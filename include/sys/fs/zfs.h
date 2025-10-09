@@ -1716,6 +1716,7 @@ typedef enum zfs_ioc {
 	ZFS_IOC_POOL_PREFETCH,			/* 0x5a58 */
 	ZFS_IOC_DDT_PRUNE,			/* 0x5a59 */
 	ZFS_IOC_POOL_CONDENSE,			/* 0x5a5a */
+	ZFS_IOC_WAIT_INJECT,			/* 0x5a5b */
 
 	/*
 	 * Per-platform (Optional) - 8/128 numbers reserved.
@@ -2008,6 +2009,12 @@ typedef enum {
  */
 #define	DDT_PRUNE_UNIT		"ddt_prune_unit"
 #define	DDT_PRUNE_AMOUNT	"ddt_prune_amount"
+
+/*
+ * The following are names used when invoking ZFS_IOC_WAIT_INJECT.
+ */
+#define	WAIT_INJECT_STATE	"state"
+#define	WAIT_INJECT_TIMEOUT	"timeout"
 
 /*
  * Flags for ZFS_IOC_VDEV_SET_STATE
