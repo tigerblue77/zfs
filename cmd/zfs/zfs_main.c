@@ -413,7 +413,7 @@ get_usage(zfs_help_t idx)
 		    "<redaction_snapshot> ...\n");
 	case HELP_REWRITE:
 		return ("\trewrite [-CPSrvx] [-o <offset>] "
-		    "[-l <length>] <directory|file ...>\n");
+		    "[-l <length>] <directory|file|volume ...>\n");
 	case HELP_JAIL:
 		return ("\tjail <jailid|jailname> <filesystem>\n");
 	case HELP_UNJAIL:
@@ -9091,6 +9091,23 @@ zfs_rewrite_file(const char *path, boolean_t verbose, zfs_rewrite_args_t *args)
 }
 
 static int
+zfs_rewrite_volume(const char *name, boolean_t verbose,
+    zfs_rewrite_args_t *args)
+{
+	int ret;
+
+	ret = lzc_zvol_rewrite(name, args->off, args->len, args->flags);
+	if (ret != 0) {
+		(void) fprintf(stderr, "failed to rewrite %s: %s\n",
+		    name, strerror(ret));
+	} else if (verbose) {
+		printf("%s\n", name);
+	}
+
+	return (ret);
+}
+
+static int
 zfs_rewrite_dir(const char *path, boolean_t verbose, boolean_t xdev, dev_t dev,
     zfs_rewrite_args_t *args, nvlist_t *dirs)
 {
@@ -9173,6 +9190,10 @@ zfs_rewrite_path(const char *path, boolean_t verbose, boolean_t recurse,
 
 	if (lstat(path, &st) < 0) {
 		ret = errno;
+		/* Not an existing path, but it may be the name of a volume. */
+		if (ret == ENOENT &&
+		    zfs_dataset_exists(g_zfs, path, ZFS_TYPE_VOLUME))
+			return (zfs_rewrite_volume(path, verbose, args));
 		(void) fprintf(stderr, "failed to stat %s: %s\n",
 		    path, strerror(errno));
 		return (ret);

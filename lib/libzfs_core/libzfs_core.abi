@@ -253,6 +253,7 @@
     <elf-symbol name='lzc_wait' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='lzc_wait_fs' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='lzc_wait_tag' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
+    <elf-symbol name='lzc_zvol_rewrite' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='membar_consumer' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='membar_enter' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='membar_exit' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
@@ -4492,6 +4493,13 @@
       <parameter type-id='80f4b756' name='pool'/>
       <parameter type-id='02e25ab0' name='unit'/>
       <parameter type-id='9c313c2d' name='amount'/>
+      <return type-id='95e97e5e'/>
+    </function-decl>
+    <function-decl name='lzc_zvol_rewrite' mangled-name='lzc_zvol_rewrite' visibility='default' binding='global' size-in-bits='64' elf-symbol-id='lzc_zvol_rewrite'>
+      <parameter type-id='80f4b756' name='volume'/>
+      <parameter type-id='9c313c2d' name='offset'/>
+      <parameter type-id='9c313c2d' name='length'/>
+      <parameter type-id='9c313c2d' name='flags'/>
       <return type-id='95e97e5e'/>
     </function-decl>
     <function-decl name='lzc_ioctl_fd_os' visibility='default' binding='global' size-in-bits='64'>

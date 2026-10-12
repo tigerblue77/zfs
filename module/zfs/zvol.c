@@ -394,6 +394,224 @@ out:
 }
 
 /*
+ * A volume is rewritten in pieces of this size (or of one volume block, if
+ * that is larger).  Each piece is rewritten under its own range lock and
+ * suspend lock, so I/O to the volume, and operations that suspend it, wait
+ * for one piece at most.
+ */
+#define	ZVOL_REWRITE_CHUNK	(4ULL << 20)
+
+/*
+ * Rewrite one piece of a volume.  If the volume has a zvol_state_t, it is kept
+ * from being suspended or removed meanwhile and I/O to the piece is excluded.
+ */
+static int
+zvol_rewrite_chunk(const char *name, objset_t *os, dnode_t *dn, uint64_t off,
+    uint64_t len, uint64_t flags)
+{
+	zvol_state_t *zv;
+	zfs_locked_range_t *lr = NULL;
+	boolean_t pinned = B_FALSE;
+	uint64_t nr = 0, nw = 0;
+	dmu_tx_t *tx;
+	int error;
+
+	zv = zvol_find_by_name(name, RW_READER);
+	if (zv != NULL) {
+		if (zv->zv_flags & ZVOL_REMOVING) {
+			mutex_exit(&zv->zv_state_lock);
+			rw_exit(&zv->zv_suspend_lock);
+			return (SET_ERROR(ENXIO));
+		}
+
+		/*
+		 * Dirtying an open volume is a write to it: open the ZIL the
+		 * way the first write does, so that the dirty data is waited
+		 * for before the volume is suspended or closed.  The suspend
+		 * lock is dropped meanwhile, so the volume is pinned the way
+		 * zvol_suspend() does it, to keep it from going away.
+		 */
+		if (zv->zv_open_count > 0 && zv->zv_zilog == NULL) {
+			atomic_inc(&zv->zv_suspend_ref);
+			pinned = B_TRUE;
+			mutex_exit(&zv->zv_state_lock);
+			rw_exit(&zv->zv_suspend_lock);
+			rw_enter(&zv->zv_suspend_lock, RW_WRITER);
+			mutex_enter(&zv->zv_state_lock);
+			if (!(zv->zv_flags & ZVOL_REMOVING) &&
+			    zv->zv_open_count > 0 && zv->zv_zilog == NULL) {
+				zv->zv_zilog = zil_open(zv->zv_objset,
+				    zvol_get_data, &zv->zv_kstat.dk_zil_sums);
+				zv->zv_flags |= ZVOL_WRITTEN_TO;
+			}
+			rw_downgrade(&zv->zv_suspend_lock);
+		}
+
+		boolean_t removing = (zv->zv_flags & ZVOL_REMOVING) != 0;
+		mutex_exit(&zv->zv_state_lock);
+		if (removing) {
+			error = SET_ERROR(ENXIO);
+			goto out;
+		}
+
+		lr = zfs_rangelock_enter(&zv->zv_rangelock, off, len,
+		    RL_WRITER);
+	}
+
+	tx = dmu_tx_create(os);
+	dmu_tx_hold_write_by_dnode(tx, dn, off, len);
+	error = dmu_tx_assign(tx, DMU_TX_WAIT);
+	if (error != 0) {
+		dmu_tx_abort(tx);
+	} else {
+		error = dmu_rewrite_by_dnode(dn, off, len, flags, tx, &nr, &nw);
+		dmu_tx_commit(tx);
+	}
+
+	if (lr != NULL)
+		zfs_rangelock_exit(lr);
+	if (zv != NULL) {
+		dataset_kstats_update_read_kstats(&zv->zv_kstat, nr);
+		dataset_kstats_update_write_kstats(&zv->zv_kstat, nw);
+	}
+out:
+	if (zv != NULL) {
+		rw_exit(&zv->zv_suspend_lock);
+		if (pinned) {
+			/* Only after the unlock, the volume may be freed. */
+			atomic_dec(&zv->zv_suspend_ref);
+			if (zv->zv_flags & ZVOL_REMOVING)
+				cv_broadcast(&zv->zv_removing_cv);
+		}
+	}
+	return (error);
+}
+
+/*
+ * Rewrite a range of a volume as-is without modification, so that its blocks
+ * are reallocated as if they were read and written back.  This is the volume
+ * counterpart of zfs_rewrite().  A length of zero stands for the rest of the
+ * volume.
+ *
+ * The volume can be in use.  It does not even have to be exposed as a device.
+ * The rewrite does not hold up I/O to the volume for longer than a piece, and
+ * it does not return before the rewritten data is on stable storage.
+ */
+int
+zvol_rewrite(const char *name, uint64_t off, uint64_t len, uint64_t flags)
+{
+	dsl_pool_t *dp;
+	dsl_dataset_t *ds;
+	objset_t *os;
+	spa_t *spa;
+	dnode_t *dn = NULL;
+	uint64_t readonly = 0, volsize, end, chunk;
+	int error;
+
+	if ((flags & ~ZFS_REWRITE_VALID_FLAGS) != 0)
+		return (SET_ERROR(EINVAL));
+
+	error = dsl_pool_hold(name, FTAG, &dp);
+	if (error != 0)
+		return (error);
+	error = dsl_dataset_hold_flags(dp, name, DS_HOLD_FLAG_DECRYPT, FTAG,
+	    &ds);
+	if (error != 0) {
+		dsl_pool_rele(dp, FTAG);
+		return (error);
+	}
+	error = dmu_objset_from_ds(ds, &os);
+	if (error == 0) {
+		spa = dmu_objset_spa(os);
+		if (dmu_objset_type(os) != DMU_OST_ZVOL)
+			error = SET_ERROR(ENOTSUP);
+		else if (dmu_objset_is_snapshot(os) || !spa_writeable(spa))
+			error = SET_ERROR(EROFS);
+		else if ((flags & ZFS_REWRITE_PHYSICAL) &&
+		    !spa_feature_is_enabled(spa, SPA_FEATURE_PHYSICAL_REWRITE))
+			error = SET_ERROR(ENOTSUP);
+		else if ((error = dsl_prop_get_ds(ds,
+		    zfs_prop_to_name(ZFS_PROP_READONLY), 8, 1, &readonly,
+		    NULL)) == 0 && readonly != 0)
+			error = SET_ERROR(EROFS);
+	}
+	if (error != 0) {
+		dsl_dataset_rele_flags(ds, DS_HOLD_FLAG_DECRYPT, FTAG);
+		dsl_pool_rele(dp, FTAG);
+		return (error);
+	}
+
+	/*
+	 * The rewrite is long: keep the dataset from being destroyed, and the
+	 * pool from being exported, but not the pool configuration locked,
+	 * since that would stop the transaction groups from syncing.
+	 */
+	dsl_dataset_long_hold(ds, FTAG);
+	spa_open_ref(spa, FTAG);
+	dsl_pool_rele(dp, FTAG);
+
+	error = dnode_hold(os, ZVOL_OBJ, FTAG, &dn);
+	if (error != 0)
+		goto out;
+
+	chunk = MAX(ZVOL_REWRITE_CHUNK, dn->dn_datablksz);
+	end = (len == 0 || len > UINT64_MAX - off) ? UINT64_MAX : off + len;
+
+	while (off < end) {
+		uint64_t stop, noff, n;
+
+		/* The volume may have been resized meanwhile. */
+		error = zap_lookup(os, ZVOL_ZAP_OBJ, "size", 8, 1, &volsize);
+		if (error != 0)
+			break;
+		stop = MIN(end, volsize);
+		if (off >= stop)
+			break;
+
+		/*
+		 * Rewrite only actual data, skipping any holes.  This might
+		 * be inaccurate for dirty volumes, but we don't really care.
+		 */
+		noff = off;
+		error = dnode_next_offset(dn, 0, &noff, 1, 1, 0);
+		if (error != 0) {
+			if (error == ESRCH)	/* No more data. */
+				error = 0;
+			break;
+		}
+		if (noff >= stop)
+			break;
+		off = noff;
+
+		/* Find where the data end. */
+		if (dnode_next_offset(dn, DNODE_FIND_HOLE, &noff, 1, 1, 0) != 0)
+			noff = stop;
+
+		ASSERT3U(noff, >, off);
+		n = MIN(MIN(stop, noff) - off, chunk - P2PHASE(off, chunk));
+		error = zvol_rewrite_chunk(name, os, dn, off, n, flags);
+		if (error != 0)
+			break;
+		off += n;
+
+		if (issig()) {
+			error = SET_ERROR(EINTR);
+			break;
+		}
+	}
+
+	/* Do not return with the rewritten data still in memory only. */
+	txg_wait_synced(dmu_objset_pool(os), 0);
+out:
+	if (dn != NULL)
+		dnode_rele(dn, FTAG);
+	dsl_dataset_long_rele(ds, FTAG);
+	dsl_dataset_rele_flags(ds, DS_HOLD_FLAG_DECRYPT, FTAG);
+	spa_close(spa, FTAG);
+	return (error);
+}
+
+/*
  * Update volthreading.
  */
 int

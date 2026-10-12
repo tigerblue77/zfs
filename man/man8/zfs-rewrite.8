@@ -12,26 +12,30 @@
 .\" Copyright (c) 2025 iXsystems, Inc.
 .\" Copyright (c) 2025, Klara, Inc.
 .\"
-.Dd November 5, 2025
+.Dd October 12, 2026
 .Dt ZFS-REWRITE 8
 .Os
 .
 .Sh NAME
 .Nm zfs-rewrite
-.Nd rewrite specified files without modification
+.Nd rewrite specified files and volumes without modification
 .Sh SYNOPSIS
 .Nm zfs
 .Cm rewrite
 .Oo Fl CPSrvx Ns Oc
 .Op Fl l Ar length
 .Op Fl o Ar offset
-.Ar file Ns | Ns Ar directory Ns …
+.Ar file Ns | Ns Ar directory Ns | Ns Ar volume Ns …
 .
 .Sh DESCRIPTION
 Rewrite blocks of specified
 .Ar file
 as is without modification at a new location and possibly with new properties,
 as if they were atomically read and written back.
+A
+.Ar volume
+is rewritten the same way.
+It is given by its dataset name, not by the path of its device.
 .No See Sx NOTES .
 for more information about property changes that may be applied during rewrite.
 .Bl -tag -width "-r"
@@ -61,10 +65,12 @@ Rewrite at most this number of bytes.
 Start at this offset in bytes.
 .It Fl r
 Recurse into directories.
+This has no effect on a volume.
 .It Fl v
-Print names of all successfully rewritten files.
+Print names of all successfully rewritten files and volumes.
 .It Fl x
 Don't cross file system mount points when recursing.
+This has no effect on a volume.
 .El
 .Sh NOTES
 Rewrite works by replacing an existing block with a new block of the same
@@ -107,6 +113,18 @@ When the
 .Fl P
 flag is used, rewritten blocks preserve their logical birth time, since
 there are no user data changes.
+.Pp
+A volume is given by its dataset name, such as
+.Ar pool/volume ,
+and not by the path of its device node.
+A name that is also an existing path is taken as a path.
+The volume can be in use, and does not need to have a device node:
+it is rewritten in pieces, so that I/O to it waits for one piece at most.
+Unlike for a file, the command does not return before the rewritten data are
+on stable storage.
+A volume snapshot, a read-only volume, or a pool that is not writable cannot be
+rewritten.
+The volume block size is not changed.
 .
 .Sh SEE ALSO
 .Xr zfsprops 7 ,
