@@ -23,11 +23,12 @@
 #	3. Rewrite all of it, then physically: verify the logical birth time
 #	   of the blocks is updated by the former and kept by the latter.
 #	4. Verify -S skips the blocks shared with a snapshot, and only those.
-#	5. Verify that snapshots, file systems, read-only volumes and names
-#	   that do not exist are refused.
+#	5. Verify that snapshots, file systems, read-only volumes, names that
+#	   do not exist and devices that are not volumes are refused, and why.
 #	6. Rewrite a volume that has no device node, and one named by its
 #	   device.
-#	7. Rewrite a sparse volume and verify its holes stay holes.
+#	7. Rewrite a sparse volume without compression, and verify its holes
+#	   stay holes, and so do blocks freed in a txg not synced yet.
 #	8. Rewrite the volume repeatedly while it is written to, and verify
 #	   that no write is lost.
 #	9. Rewrite a volume that is held open, then roll it back, which fails
@@ -52,12 +53,24 @@ typeset shadow=$(mktemp)
 typeset pat=$(mktemp)
 typeset holder=""
 typeset wpid=""
+typeset txg_timeout_saved=""
+
+if is_linux; then
+	if blkdiscard --help | grep -q -- '--force'; then
+		trimcmd='blkdiscard --force'
+	else
+		trimcmd='blkdiscard'
+	fi
+else
+	trimcmd='trim -f'
+fi
 
 function cleanup
 {
 	[[ -n "$wpid" ]] && kill $wpid 2>/dev/null
 	[[ -n "$holder" ]] && kill $holder 2>/dev/null
 	wait
+	[[ -n "$txg_timeout_saved" ]] && restore_tunable TXG_TIMEOUT
 	rm -f $bps $bps1 $snapbps $shadow $pat $pat.0 $pat.1 $pat.2 $pat.3 \
 	    $pat.4
 	datasetexists $sparse && destroy_dataset $sparse -R
@@ -77,6 +90,17 @@ function save_blocks # dataset file [count]
 	    print $1 " " $3 " " b }' < $out > $2
 	rm -f $out
 	[[ -z "$3" ]] || (($(wc -l < $2) == $3))
+}
+
+# Verify that zfs rewrite fails with the given error, which tells what
+# refused it.
+function rewrite_fails # errno arguments...
+{
+	typeset -i want=$1
+
+	shift
+	zfs rewrite "$@"
+	(($? == want))
 }
 
 # Print the offsets of the blocks that differ between two saved lists.
@@ -206,15 +230,20 @@ log_must [ "$(same_blocks $bps $snapbps)" -eq 0 ]
 log_must [ "$orig_hash" = "$(dev_hash $dev)" ]
 log_must zfs destroy $vol@snap
 
-# What can not be rewritten.
-log_mustnot zfs rewrite $TESTPOOL/${TESTVOL}_does_not_exist
+# What can not be rewritten: ENOENT, EROFS and EINVAL tell what refused it.
+log_must rewrite_fails 2 $TESTPOOL/${TESTVOL}_does_not_exist
 log_mustnot zfs rewrite $TESTPOOL/$TESTFS
 log_must zfs snapshot $vol@snap
-log_mustnot zfs rewrite $vol@snap
+log_must rewrite_fails 30 $vol@snap
+log_must zfs set snapdev=visible $vol
+block_device_wait $dev@snap
+log_must rewrite_fails 30 $dev@snap
+log_must zfs inherit snapdev $vol
 log_must zfs destroy $vol@snap
 log_must zfs set readonly=on $vol
-log_mustnot zfs rewrite $vol
+log_must rewrite_fails 30 $vol
 log_must zfs set readonly=off $vol
+log_must rewrite_fails 22 $ZVOL_DEVDIR/$TESTPOOL
 
 # A volume that has no device node, and one that is named by its device.
 log_must zfs set volmode=none $vol
@@ -230,12 +259,13 @@ log_must zfs rewrite $dev
 log_must save_blocks $vol $bps $nblocks
 log_must [ "$(same_blocks $bps $bps1)" -eq 0 ]
 
-# A sparse volume: its holes stay holes.
-log_must zfs create -s -V ${size}m -o volblocksize=$blksz $sparse
+# A sparse volume, without compression, which would turn rewritten zeroes
+# back into holes: its holes stay holes.
+log_must zfs create -s -V ${size}m -o volblocksize=$blksz -o compression=off \
+    $sparse
 block_device_wait $sparsedev
 log_must dd if=/dev/urandom of=$sparsedev bs=1M seek=4 count=8
 log_must sync_pool $TESTPOOL
-typeset -i ref=$(zfs get -Hpo value referenced $sparse)
 typeset -i sparse_blocks
 ((sparse_blocks = 8 * 1024 * 1024 / blksz))
 log_must save_blocks $sparse $bps1 $sparse_blocks
@@ -244,7 +274,17 @@ log_must save_blocks $sparse $bps $sparse_blocks
 log_must [ "$(same_blocks $bps $bps1)" -eq 0 ]
 log_must [ "$(cut -f1 -d' ' $bps | tr '\n' ' ')" = \
     "$(cut -f1 -d' ' $bps1 | tr '\n' ' ')" ]
-log_must [ "$(zfs get -Hpo value referenced $sparse)" -eq $ref ]
+
+# And so do 2 MiB freed in a txg that has not synced when they are rewritten.
+log_must save_tunable TXG_TIMEOUT
+txg_timeout_saved=yes
+log_must set_tunable32 TXG_TIMEOUT 3600
+log_must sync_pool $TESTPOOL
+log_must $trimcmd -o $((6 * 1048576)) -l $((2 * 1048576)) $sparsedev
+log_must zfs rewrite $sparse
+log_must restore_tunable TXG_TIMEOUT
+txg_timeout_saved=""
+log_must save_blocks $sparse $bps $((sparse_blocks - 2 * 1048576 / blksz))
 log_must destroy_dataset $sparse
 
 # Rewrite again and again while the volume is written to, in rounds, each one
