@@ -35,7 +35,7 @@ as if they were atomically read and written back.
 A
 .Ar volume
 is rewritten the same way.
-It is given by its dataset name, not by the path of its device.
+It is given by its dataset name.
 .No See Sx NOTES .
 for more information about property changes that may be applied during rewrite.
 .Bl -tag -width "-r"
@@ -102,7 +102,7 @@ If a
 .Fl l
 or
 .Fl o
-value request a rewrite to regions past the end of the file, then those
+value request a rewrite to regions past the end of the file or volume, then those
 regions are silently ignored, and no error is reported.
 .Pp
 By default, rewritten blocks update their logical birth time,
@@ -116,10 +116,16 @@ there are no user data changes.
 .Pp
 A volume is given by its dataset name, such as
 .Ar pool/volume ,
-and not by the path of its device node.
+or by the path
+.Pa /dev/zvol/pool/volume
+of its device.
 A name that is also an existing path is taken as a path.
+Unlike for a file, which only needs write access, rewriting a volume needs the
+same privilege as other pool configuration operations.
 The volume can be in use, and does not need to have a device node:
 it is rewritten in pieces, so that I/O to it waits for one piece at most.
+Until the command is done, the volume can not be destroyed, rolled back or
+received into, and its pool can not be exported.
 Unlike for a file, the command does not return before the rewritten data are
 on stable storage.
 A volume snapshot, a read-only volume, or a pool that is not writable cannot be

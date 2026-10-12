@@ -9097,7 +9097,14 @@ zfs_rewrite_volume(const char *name, boolean_t verbose,
 	int ret;
 
 	ret = lzc_zvol_rewrite(name, args->off, args->len, args->flags);
-	if (ret != 0) {
+	if (ret >= ZFS_ERR_CHECKPOINT_EXISTS) {
+		/* Not an errno: libzfs knows what it means. */
+		char msg[ZFS_MAX_DATASET_NAME_LEN + 32];
+
+		(void) snprintf(msg, sizeof (msg), "cannot rewrite '%s'", name);
+		(void) zfs_standard_error(g_zfs, ret, msg);
+		ret = ENOTSUP;
+	} else if (ret != 0) {
 		(void) fprintf(stderr, "failed to rewrite %s: %s\n",
 		    name, strerror(ret));
 	} else if (verbose) {
@@ -9191,11 +9198,11 @@ zfs_rewrite_path(const char *path, boolean_t verbose, boolean_t recurse,
 	if (lstat(path, &st) < 0) {
 		ret = errno;
 		/* Not an existing path, but it may be the name of a volume. */
-		if (ret == ENOENT &&
+		if ((ret == ENOENT || ret == ENOTDIR) &&
 		    zfs_dataset_exists(g_zfs, path, ZFS_TYPE_VOLUME))
 			return (zfs_rewrite_volume(path, verbose, args));
 		(void) fprintf(stderr, "failed to stat %s: %s\n",
-		    path, strerror(errno));
+		    path, strerror(ret));
 		return (ret);
 	}
 
@@ -9204,6 +9211,16 @@ zfs_rewrite_path(const char *path, boolean_t verbose, boolean_t recurse,
 	} else if (S_ISDIR(st.st_mode) && recurse) {
 		ret = zfs_rewrite_dir(path, verbose, xdev, st.st_dev, args,
 		    dirs);
+	} else if (strncmp(path, ZVOL_DIR, strlen(ZVOL_DIR)) == 0 &&
+	    zfs_dataset_exists(g_zfs, path + strlen(ZVOL_DIR),
+	    ZFS_TYPE_VOLUME)) {
+		/* The device of a volume: rewrite the volume. */
+		ret = zfs_rewrite_volume(path + strlen(ZVOL_DIR), verbose,
+		    args);
+	} else if (S_ISBLK(st.st_mode) || S_ISCHR(st.st_mode)) {
+		(void) fprintf(stderr, "%s is a device, not a volume name\n",
+		    path);
+		ret = EINVAL;
 	}
 	return (ret);
 }
@@ -9257,7 +9274,7 @@ zfs_do_rewrite(int argc, char **argv)
 	argc -= optind;
 	if (argc == 0) {
 		(void) fprintf(stderr,
-		    "missing file or directory target(s)\n");
+		    "missing file, directory or volume target(s)\n");
 		usage(B_FALSE);
 	}
 

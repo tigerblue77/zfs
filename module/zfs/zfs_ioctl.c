@@ -5164,7 +5164,9 @@ static const zfs_ioc_key_t zfs_keys_zvol_rewrite[] = {
 static int
 zfs_ioc_zvol_rewrite(const char *name, nvlist_t *innvl, nvlist_t *outnvl)
 {
-	uint64_t off = 0, len = 0, flags = 0;
+	uint64_t off = 0;
+	uint64_t len = 0;
+	uint64_t flags = 0;
 
 	if (innvl != NULL) {
 		(void) nvlist_lookup_uint64(innvl, ZVOL_REWRITE_OFFSET, &off);
