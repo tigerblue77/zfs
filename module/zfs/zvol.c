@@ -577,7 +577,7 @@ zvol_rewrite(const char *name, uint64_t off, uint64_t len, uint64_t flags)
 		    SPA_FEATURE_REDACTED_DATASETS) ||
 		    dsl_dir_incompatible_encryption_version(ds->ds_dir))
 			error = SET_ERROR(EROFS);
-		/* Its replay would read blocks the rewrite has freed. */
+		/* A log yet to be replayed may refer to blocks it frees. */
 		else if (os->os_zil_header.zh_flags & ZIL_REPLAY_NEEDED)
 			error = SET_ERROR(EBUSY);
 		else if ((flags & ZFS_REWRITE_PHYSICAL) &&

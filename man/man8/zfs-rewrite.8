@@ -33,9 +33,8 @@ Rewrite blocks of specified
 as is without modification at a new location and possibly with new properties,
 as if they were atomically read and written back.
 A
-.Ar volume
-is rewritten the same way.
-It is given by its dataset name.
+.Ar volume ,
+given by its dataset name or the path of its device, is rewritten the same way.
 .No See Sx NOTES .
 for more information about property changes that may be applied during rewrite.
 .Bl -tag -width "-r"
@@ -131,10 +130,13 @@ received into, and its pool can not be exported.
 Unlike for a file, the command does not return before the rewritten data are
 on stable storage.
 A volume snapshot, a read-only volume, a volume received from a redacted send
-stream, or a pool that is not writable cannot be rewritten.
+stream, or a pool that is not writable cannot be rewritten, nor can a volume
+whose intent log has not been replayed yet, which happens when its device is
+created.
 If the device of the volume is removed meanwhile, for example because its
 .Sy volmode
-property is changed, the command stops with an error and can be run again.
+property is changed, the command may stop with an error, and can then be run
+again.
 The volume block size is not changed.
 .
 .Sh SEE ALSO
