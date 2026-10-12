@@ -1779,6 +1779,10 @@ typedef struct zfs_rewrite_args {
 #define	ZFS_REWRITE_SKIP_BRT		0x4 /* Skip BRT-cloned blocks. */
 
 #define	ZFS_IOC_REWRITE		_IOW(0x83, 3, zfs_rewrite_args_t)
+#define	ZFS_REWRITE_VALID_FLAGS \
+	(ZFS_REWRITE_PHYSICAL | ZFS_REWRITE_SKIP_SNAPSHOT | \
+	ZFS_REWRITE_SKIP_BRT)
+
 
 /*
  * ZFS-specific error codes used for returning descriptive errors
