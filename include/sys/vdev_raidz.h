@@ -167,6 +167,7 @@ typedef struct vdev_raidz {
 } vdev_raidz_t;
 
 extern int vdev_raidz_attach_check(vdev_t *);
+extern boolean_t vdev_raidz_has_parity_epochs(vdev_t *);
 extern void vdev_raidz_attach_sync(void *, dmu_tx_t *);
 extern void spa_start_raidz_expansion_thread(spa_t *);
 extern int spa_raidz_expand_get_stats(spa_t *, pool_raidz_expand_stat_t *);

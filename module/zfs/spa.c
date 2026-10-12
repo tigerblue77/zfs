@@ -8539,6 +8539,16 @@ spa_vdev_attach(spa_t *spa, uint64_t guid, nvlist_t *nvroot, int replacing,
 			return (spa_vdev_exit(spa, NULL, txg,
 			    ZFS_ERR_RAIDZ_EXPAND_IN_PROGRESS));
 		}
+
+		/*
+		 * Expansion history cannot coexist with a parity-epoch table:
+		 * vdev_raidz_load() refuses to import such a vdev, so refuse
+		 * to create the history rather than strand the pool.
+		 */
+		if (vdev_raidz_has_parity_epochs(oldvd)) {
+			return (spa_vdev_exit(spa, NULL, txg,
+			    ZFS_ERR_VDEV_NOTSUP));
+		}
 	} else if (!oldvd->vdev_ops->vdev_op_leaf) {
 		return (spa_vdev_exit(spa, NULL, txg, ENOTSUP));
 	}

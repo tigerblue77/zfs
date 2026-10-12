@@ -936,6 +936,8 @@ The feature becomes active once a table describing more than the initial
 layout is stored.
 While active, the pool cannot be imported by software that does not
 support this feature.
+A RAID-Z vdev that has such a table cannot be expanded with
+.Nm zpool Cm attach .
 .
 .feature com.delphix redaction_bookmarks no bookmarks extensible_dataset
 This feature enables the use of redacted

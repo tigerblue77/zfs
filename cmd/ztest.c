@@ -8513,6 +8513,56 @@ ztest_raidz_expand_check(spa_t *spa)
 }
 
 /*
+ * A raidz vdev with a parity-epoch table must refuse expansion, because
+ * vdev_raidz_load() cannot import a table together with expansion history.
+ * Install a geometry-identical table in core only, so nothing reaches disk
+ * and layout selection is unchanged, try the attach and remove the table.
+ * Must be called before the vdev has ever been expanded, with no other I/O.
+ */
+static void
+ztest_raidz_expand_epochs_refused(spa_t *spa, vdev_t *rzvd, const char *path,
+    uint64_t size)
+{
+	vdev_raidz_t *vdrz = rzvd->vdev_tsd;
+	uint64_t *table = kmem_alloc(3 * sizeof (uint64_t), KM_SLEEP);
+	nvlist_t *root;
+	int error;
+
+	table[0] = 0;
+	table[1] = rzvd->vdev_children;
+	table[2] = vdrz->vd_nparity;
+
+	spa_config_enter(spa, SCL_ALL, FTAG, RW_WRITER);
+	mutex_enter(&vdrz->vd_expand_lock);
+	vdrz->vd_parity_epochs = table;
+	vdrz->vd_parity_epoch_count = 1;
+	mutex_exit(&vdrz->vd_expand_lock);
+	spa_config_exit(spa, SCL_ALL, FTAG);
+
+	root = make_vdev_root(path, NULL, NULL, size, ztest_get_ashift(),
+	    NULL, 0, 0, 1);
+	error = spa_vdev_attach(spa, rzvd->vdev_guid, root, B_FALSE, B_FALSE);
+	nvlist_free(root);
+	if (error != ZFS_ERR_VDEV_NOTSUP) {
+		fatal(0, "raidz attach with a parity-epoch table returned %d, "
+		    "expected %d", error, ZFS_ERR_VDEV_NOTSUP);
+	}
+
+	spa_config_enter(spa, SCL_ALL, FTAG, RW_WRITER);
+	mutex_enter(&vdrz->vd_expand_lock);
+	vdrz->vd_parity_epochs = NULL;
+	vdrz->vd_parity_epoch_count = 0;
+	mutex_exit(&vdrz->vd_expand_lock);
+	spa_config_exit(spa, SCL_ALL, FTAG);
+	kmem_free(table, 3 * sizeof (uint64_t));
+
+	if (ztest_opts.zo_verbose >= 1) {
+		(void) printf("raidz expansion refused with a parity-epoch "
+		    "table, as required\n");
+	}
+}
+
+/*
  * Start a raidz expansion test.  We run some I/O on the pool for a while
  * to get some data in the pool.  Then we grow the raidz and
  * kill the test at the requested offset into the reflow, verifying that
@@ -8628,6 +8678,7 @@ ztest_raidz_expand_run(ztest_shared_t *zs, spa_t *spa)
 	char *newpath = kmem_alloc(MAXPATHLEN, KM_SLEEP);
 	(void) snprintf(newpath, MAXPATHLEN, ztest_dev_template,
 	    ztest_opts.zo_dir, ztest_opts.zo_pool, rzvd->vdev_children);
+	ztest_raidz_expand_epochs_refused(spa, rzvd, newpath, csize);
 	/*
 	 * Build the nvlist describing newpath.
 	 */
