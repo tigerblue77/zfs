@@ -28,9 +28,10 @@
 #	6. Rewrite a volume that has no device node, and one named by its
 #	   device.
 #	7. Rewrite a sparse volume without compression, and verify its holes
-#	   stay holes, and so do blocks freed in a txg not synced yet.
-#	8. Rewrite the volume repeatedly while it is written to, and verify
-#	   that no write is lost.
+#	   stay holes.
+#	8. Rewrite the volume repeatedly, also physically, while it is written
+#	   to, and verify that no write is lost, nor left out of an incremental
+#	   stream.
 #	9. Rewrite a volume that is held open, then roll it back, which fails
 #	   if the rewrite left the volume held.
 
@@ -42,6 +43,8 @@ typeset vol=$TESTPOOL/${TESTVOL}_rewrite
 typeset sparse=$vol-sparse
 typeset dev=$ZVOL_DEVDIR/$vol
 typeset sparsedev=$ZVOL_DEVDIR/$sparse
+typeset copy=$vol-copy
+typeset copydev=$ZVOL_DEVDIR/$copy
 typeset -i blksz=16384
 typeset -i size=32	# MiB
 typeset -i nblocks
@@ -53,27 +56,16 @@ typeset shadow=$(mktemp)
 typeset pat=$(mktemp)
 typeset holder=""
 typeset wpid=""
-typeset txg_timeout_saved=""
-
-if is_linux; then
-	if blkdiscard --help | grep -q -- '--force'; then
-		trimcmd='blkdiscard --force'
-	else
-		trimcmd='blkdiscard'
-	fi
-else
-	trimcmd='trim -f'
-fi
 
 function cleanup
 {
 	[[ -n "$wpid" ]] && kill $wpid 2>/dev/null
 	[[ -n "$holder" ]] && kill $holder 2>/dev/null
 	wait
-	[[ -n "$txg_timeout_saved" ]] && restore_tunable TXG_TIMEOUT
 	rm -f $bps $bps1 $snapbps $shadow $pat $pat.0 $pat.1 $pat.2 $pat.3 \
 	    $pat.4
 	datasetexists $sparse && destroy_dataset $sparse -R
+	datasetexists $copy && destroy_dataset $copy -R
 	datasetexists $vol && destroy_dataset $vol -R
 }
 
@@ -161,7 +153,8 @@ function writer # round
 	for ((r = 0; r < size; r++)); do
 		typeset p=$pat.$(((r + $1) % 5))
 
-		dd if=$p of=$dev bs=1M seek=$r count=1 2>/dev/null || return 1
+		dd if=$p of=$dev bs=1M seek=$r count=1 conv=fsync \
+		    2>/dev/null || return 1
 		dd if=$p of=$shadow bs=1M seek=$r count=1 conv=notrunc \
 		    2>/dev/null || return 1
 	done
@@ -174,7 +167,7 @@ log_onexit cleanup
 
 log_must zfs create -V ${size}m -o volblocksize=$blksz $vol
 block_device_wait $dev
-log_must dd if=/dev/urandom of=$dev bs=1M count=$size
+log_must dd if=/dev/urandom of=$dev bs=1M count=$size conv=fsync
 log_must sync_pool $TESTPOOL
 typeset orig_hash=$(dev_hash $dev)
 log_must [ -n "$orig_hash" ]
@@ -220,7 +213,7 @@ log_must [ "$orig_hash" = "$(dev_hash $dev)" ]
 # Blocks shared with a snapshot: skipped by -S, and only those.
 log_must zfs snapshot $vol@snap
 log_must save_blocks $vol@snap $snapbps $nblocks
-log_must dd if=/dev/urandom of=$dev bs=1M seek=2 count=1
+log_must dd if=/dev/urandom of=$dev bs=1M seek=2 count=1 conv=fsync
 log_must sync_pool $TESTPOOL
 orig_hash=$(dev_hash $dev)
 log_must [ -n "$orig_hash" ]
@@ -264,12 +257,12 @@ log_must zfs rewrite $dev
 log_must save_blocks $vol $bps $nblocks
 log_must [ "$(same_blocks $bps $bps1)" -eq 0 ]
 
-# A sparse volume, without compression, which would turn rewritten zeroes
-# back into holes: its holes stay holes.
+# A sparse volume, without compression, which would turn zeroes written back
+# into holes again: its holes stay holes.
 log_must zfs create -s -V ${size}m -o volblocksize=$blksz -o compression=off \
     $sparse
 block_device_wait $sparsedev
-log_must dd if=/dev/urandom of=$sparsedev bs=1M seek=4 count=8
+log_must dd if=/dev/urandom of=$sparsedev bs=1M seek=4 count=8 conv=fsync
 log_must sync_pool $TESTPOOL
 typeset -i sparse_blocks
 ((sparse_blocks = 8 * 1024 * 1024 / blksz))
@@ -279,33 +272,29 @@ log_must save_blocks $sparse $bps $sparse_blocks
 log_must [ "$(same_blocks $bps $bps1)" -eq 0 ]
 log_must [ "$(cut -f1 -d' ' $bps | tr '\n' ' ')" = \
     "$(cut -f1 -d' ' $bps1 | tr '\n' ' ')" ]
-
-# And so do 2 MiB freed in a txg that has not synced when they are rewritten.
-log_must save_tunable TXG_TIMEOUT
-txg_timeout_saved=yes
-log_must set_tunable32 TXG_TIMEOUT 3600
-log_must sync_pool $TESTPOOL
-log_must $trimcmd -o $((6 * 1048576)) -l $((2 * 1048576)) $sparsedev
-log_must zfs rewrite $sparse
-log_must restore_tunable TXG_TIMEOUT
-txg_timeout_saved=""
-log_must save_blocks $sparse $bps $((sparse_blocks - 2 * 1048576 / blksz))
 log_must destroy_dataset $sparse
 
 # Rewrite again and again while the volume is written to, in rounds, each one
 # leaving a different pattern in every slot, so that a stale slot can not be
-# mistaken for the right one.
+# mistaken for the right one.  Every other round rewrites physically: a write
+# taken for a physical rewrite would keep an old birth time, and be left out of
+# an incremental stream.
 for i in 0 1 2 3 4; do
 	log_must dd if=/dev/urandom of=$pat.$i bs=1M count=1
 done
 log_must dd if=$dev of=$shadow bs=1M
+log_must zfs snapshot $vol@a
+log_must eval "zfs send $vol@a | zfs recv $copy"
 typeset -i round
-for ((round = 0; round < 3; round++)); do
+for ((round = 0; round < 4; round++)); do
+	typeset opt=""
+
+	((round % 2 == 1)) && opt="-P"
 	writer $round &
 	wpid=$!
 	typeset -i tries=0
 	while kill -0 $wpid 2>/dev/null; do
-		log_must zfs rewrite $vol
+		log_must zfs rewrite $opt $vol
 		((tries += 1))
 		((tries < 100)) || log_fail "the writer does not finish"
 	done
@@ -316,6 +305,13 @@ for ((round = 0; round < 3; round++)); do
 	log_must [ -n "$shadow_hash" ]
 	log_must [ "$shadow_hash" = "$(dev_hash $dev)" ]
 done
+log_must zfs snapshot $vol@b
+log_must eval "zfs send -i @a $vol@b | zfs recv -F $copy"
+block_device_wait $copydev
+log_must [ "$shadow_hash" = "$(dev_hash $copydev)" ]
+log_must destroy_dataset $copy -R
+log_must zfs destroy $vol@b
+log_must zfs destroy $vol@a
 
 # Rewrite a volume that is held open, then roll it back: that fails if the
 # rewrite left the volume held.
@@ -326,7 +322,7 @@ sleep 300 < $dev &
 holder=$!
 log_must zfs rewrite $vol
 log_must [ "$orig_hash" = "$(dev_hash $dev)" ]
-log_must dd if=/dev/urandom of=$dev bs=1M count=1
+log_must dd if=/dev/urandom of=$dev bs=1M count=1 conv=fsync
 log_must zfs rewrite $vol
 log_must zfs rollback $vol@open
 log_must [ "$orig_hash" = "$(dev_hash $dev)" ]

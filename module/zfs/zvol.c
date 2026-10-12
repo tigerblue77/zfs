@@ -572,9 +572,14 @@ zvol_rewrite(const char *name, uint64_t off, uint64_t len, uint64_t flags)
 			error = SET_ERROR(EROFS);
 		else if (DS_IS_INCONSISTENT(ds))
 			error = SET_ERROR(EBUSY);
+		/* Volumes that dmu_objset_own() would not write to either. */
 		else if (dsl_dataset_feature_is_active(ds,
-		    SPA_FEATURE_REDACTED_DATASETS))
-			error = SET_ERROR(ENOTSUP);
+		    SPA_FEATURE_REDACTED_DATASETS) ||
+		    dsl_dir_incompatible_encryption_version(ds->ds_dir))
+			error = SET_ERROR(EROFS);
+		/* Its replay would read blocks the rewrite has freed. */
+		else if (os->os_zil_header.zh_flags & ZIL_REPLAY_NEEDED)
+			error = SET_ERROR(EBUSY);
 		else if ((flags & ZFS_REWRITE_PHYSICAL) &&
 		    !spa_feature_is_enabled(spa, SPA_FEATURE_PHYSICAL_REWRITE))
 			error = SET_ERROR(ENOTSUP);
@@ -582,6 +587,15 @@ zvol_rewrite(const char *name, uint64_t off, uint64_t len, uint64_t flags)
 		    zfs_prop_to_name(ZFS_PROP_READONLY), 8, 1, &readonly,
 		    NULL)) == 0 && readonly != 0)
 			error = SET_ERROR(EROFS);
+	}
+
+	/* Authenticate what is going to be written to, as an owner would. */
+	if (error == 0 && arc_is_unauthenticated(os->os_phys_buf)) {
+		zbookmark_phys_t zb;
+
+		SET_BOOKMARK(&zb, ds->ds_object, ZB_ROOT_OBJECT,
+		    ZB_ROOT_LEVEL, ZB_ROOT_BLKID);
+		error = arc_untransform(os->os_phys_buf, spa, &zb, B_FALSE);
 	}
 	if (error != 0) {
 		dsl_dataset_rele_flags(ds, DS_HOLD_FLAG_DECRYPT, FTAG);
