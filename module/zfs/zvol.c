@@ -583,6 +583,13 @@ zvol_rewrite(const char *name, uint64_t off, uint64_t len, uint64_t flags)
 		else if ((flags & ZFS_REWRITE_PHYSICAL) &&
 		    !spa_feature_is_enabled(spa, SPA_FEATURE_PHYSICAL_REWRITE))
 			error = SET_ERROR(ENOTSUP);
+		/*
+		 * A raw incremental stream leaves physically rewritten blocks
+		 * out, but not the new MACs of the blocks above them: the
+		 * received copy could not be read.
+		 */
+		else if ((flags & ZFS_REWRITE_PHYSICAL) && os->os_encrypted)
+			error = SET_ERROR(ENOTSUP);
 		else if ((error = dsl_prop_get_ds(ds,
 		    zfs_prop_to_name(ZFS_PROP_READONLY), 8, 1, &readonly,
 		    NULL)) == 0 && readonly != 0)

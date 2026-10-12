@@ -24,7 +24,8 @@
 #	   of the blocks is updated by the former and kept by the latter.
 #	4. Verify -S skips the blocks shared with a snapshot, and only those.
 #	5. Verify that snapshots, file systems, read-only volumes, names that
-#	   do not exist and devices that are not volumes are refused, and why.
+#	   do not exist and devices that are not volumes are refused, and why,
+#	   and that encrypted volumes are rewritten, but not physically.
 #	6. Rewrite a volume that has no device node, and one named by its
 #	   device.
 #	7. Rewrite a sparse volume without compression, and verify its holes
@@ -45,6 +46,7 @@ typeset dev=$ZVOL_DEVDIR/$vol
 typeset sparsedev=$ZVOL_DEVDIR/$sparse
 typeset copy=$vol-copy
 typeset copydev=$ZVOL_DEVDIR/$copy
+typeset evol=$vol-encrypted
 typeset -i blksz=16384
 typeset -i size=32	# MiB
 typeset -i nblocks
@@ -66,6 +68,7 @@ function cleanup
 	    $pat.4
 	datasetexists $sparse && destroy_dataset $sparse -R
 	datasetexists $copy && destroy_dataset $copy -R
+	datasetexists $evol && destroy_dataset $evol -R
 	datasetexists $vol && destroy_dataset $vol -R
 }
 
@@ -242,6 +245,11 @@ log_must zfs set readonly=on $vol
 log_must rewrite_fails 30 $vol
 log_must zfs set readonly=off $vol
 log_must rewrite_fails 22 $ZVOL_DEVDIR/$TESTPOOL
+log_must eval "echo password | zfs create -o encryption=on \
+    -o keyformat=passphrase -o keylocation=prompt -V 8m $evol"
+log_mustnot zfs rewrite -P $evol
+log_must zfs rewrite $evol
+log_must destroy_dataset $evol
 
 # A volume that has no device node, and one that is named by its device.
 log_must zfs set volmode=none $vol

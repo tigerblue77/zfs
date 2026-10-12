@@ -53,6 +53,8 @@ inclusion in incremental streams.
 Physical rewrite requires the
 .Sy physical_rewrite
 feature to be enabled on the pool.
+It is refused for an encrypted volume: a raw incremental stream would not
+include the rewritten blocks, and the received copy could not be read.
 .It Fl S
 Skip blocks that are shared with snapshots.
 Blocks created before the most recent snapshot are shared with that snapshot.
