@@ -5706,8 +5706,23 @@ vdev_raidz_load(vdev_t *vd)
 				    num_ints * sizeof (uint64_t));
 				return (SET_ERROR(ENOTSUP));
 			}
+
+			/*
+			 * vdev_raidz_init() may already hold a copy from the
+			 * label or MOS config.  The ZAP copy is authoritative:
+			 * swap under vd_expand_lock, which the layout readers
+			 * take, then free the old copy.
+			 */
+			uint64_t *old = vdrz->vd_parity_epochs;
+			uint64_t old_size = vdrz->vd_parity_epoch_count * 3 *
+			    sizeof (uint64_t);
+
+			mutex_enter(&vdrz->vd_expand_lock);
 			vdrz->vd_parity_epochs = table;
 			vdrz->vd_parity_epoch_count = num_ints / 3;
+			mutex_exit(&vdrz->vd_expand_lock);
+			if (old != NULL)
+				kmem_free(old, old_size);
 		} else if (err != ENOENT) {
 			return (err);
 		}
@@ -5866,10 +5881,6 @@ vdev_raidz_init(spa_t *spa, nvlist_t *nv, void **tsd)
 		    pe_label_size * sizeof (uint64_t), KM_SLEEP);
 		for (unsigned int i = 0; i < pe_label_size; i++)
 			table[i] = pe_label[i];
-		if (vdrz->vd_parity_epochs != NULL)
-			kmem_free(vdrz->vd_parity_epochs,
-			    vdrz->vd_parity_epoch_count * 3 *
-			    sizeof (uint64_t));
 		vdrz->vd_parity_epochs = table;
 		vdrz->vd_parity_epoch_count = pe_label_size / 3;
 	}

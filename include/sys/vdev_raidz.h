@@ -153,9 +153,11 @@ typedef struct vdev_raidz {
 	/*
 	 * Persisted append-only parity-epoch table
 	 * (org.openzfs:raidz_parity_epochs).  Triplets of
-	 * {start physical-birth txg, logical width, parity}, loaded once in
-	 * vdev_raidz_load and freed in vdev_raidz_fini.  Not yet an input to
-	 * layout selection; parity still comes from vd_nparity.
+	 * {start physical-birth txg, logical width, parity}; the count is in
+	 * triplets.  vdev_raidz_init copies it from the label or MOS config
+	 * (needed to read the MOS before vdev_load), vdev_raidz_load replaces
+	 * that copy with the vdev ZAP's and frees it, and vdev_raidz_fini
+	 * frees the current one.
 	 */
 	uint64_t *vd_parity_epochs;
 	uint64_t vd_parity_epoch_count;
