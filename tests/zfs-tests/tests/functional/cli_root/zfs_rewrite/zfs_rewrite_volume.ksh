@@ -79,17 +79,22 @@ function cleanup
 
 # Save the offset, first DVA and logical birth time of every data block of a
 # volume, and verify there are as many as expected, if a number is given.
+# Holes that have a birth time, as freed blocks do, are not data blocks.
 function save_blocks # dataset file [count]
 {
 	typeset out=$(mktemp) || return 1
+	typeset -i n
 
 	zdb -vvvvv $1 1 > $out || { rm -f $out; return 1; }
-	awk '/ L0 / { b = ""
+	awk '/ L0 / && !/ HOLE / && !/ 0:0:0 / { b = ""
 	    if (match($0, /birth=[0-9]+L/))
 	        b = substr($0, RSTART + 6, RLENGTH - 7)
 	    print $1 " " $3 " " b }' < $out > $2
 	rm -f $out
-	[[ -z "$3" ]] || (($(wc -l < $2) == $3))
+	[[ -z "$3" ]] && return 0
+	n=$(wc -l < $2)
+	((n == $3)) || log_note "$1 has $n data blocks, not $3"
+	((n == $3))
 }
 
 # Verify that zfs rewrite fails with the given error, which tells what
