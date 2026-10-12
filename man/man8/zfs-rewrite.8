@@ -128,8 +128,11 @@ Until the command is done, the volume can not be destroyed, rolled back or
 received into, and its pool can not be exported.
 Unlike for a file, the command does not return before the rewritten data are
 on stable storage.
-A volume snapshot, a read-only volume, or a pool that is not writable cannot be
-rewritten.
+A volume snapshot, a read-only volume, a volume received from a redacted send
+stream, or a pool that is not writable cannot be rewritten.
+If the device of the volume is removed meanwhile, for example because its
+.Sy volmode
+property is changed, the command stops with an error and can be run again.
 The volume block size is not changed.
 .
 .Sh SEE ALSO

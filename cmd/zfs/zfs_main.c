@@ -9197,9 +9197,13 @@ zfs_rewrite_path(const char *path, boolean_t verbose, boolean_t recurse,
 
 	if (lstat(path, &st) < 0) {
 		ret = errno;
-		/* Not an existing path, but it may be the name of a volume. */
+		/*
+		 * Not an existing path, but it may be the name of a volume, or
+		 * of a snapshot, which the kernel refuses with a proper error.
+		 */
 		if ((ret == ENOENT || ret == ENOTDIR) &&
-		    zfs_dataset_exists(g_zfs, path, ZFS_TYPE_VOLUME))
+		    zfs_dataset_exists(g_zfs, path,
+		    ZFS_TYPE_VOLUME | ZFS_TYPE_SNAPSHOT))
 			return (zfs_rewrite_volume(path, verbose, args));
 		(void) fprintf(stderr, "failed to stat %s: %s\n",
 		    path, strerror(ret));
@@ -9211,13 +9215,20 @@ zfs_rewrite_path(const char *path, boolean_t verbose, boolean_t recurse,
 	} else if (S_ISDIR(st.st_mode) && recurse) {
 		ret = zfs_rewrite_dir(path, verbose, xdev, st.st_dev, args,
 		    dirs);
-	} else if (strncmp(path, ZVOL_DIR, strlen(ZVOL_DIR)) == 0 &&
-	    zfs_dataset_exists(g_zfs, path + strlen(ZVOL_DIR),
-	    ZFS_TYPE_VOLUME)) {
+	} else if (strncmp(path, ZVOL_DIR, strlen(ZVOL_DIR)) == 0) {
 		/* The device of a volume: rewrite the volume. */
-		ret = zfs_rewrite_volume(path + strlen(ZVOL_DIR), verbose,
-		    args);
-	} else if (S_ISBLK(st.st_mode) || S_ISCHR(st.st_mode)) {
+		const char *name = path + strlen(ZVOL_DIR);
+
+		if (zfs_dataset_exists(g_zfs, name,
+		    ZFS_TYPE_VOLUME | ZFS_TYPE_SNAPSHOT)) {
+			ret = zfs_rewrite_volume(name, verbose, args);
+		} else {
+			(void) fprintf(stderr,
+			    "%s is not the device of a volume\n", path);
+			ret = EINVAL;
+		}
+	} else if (stat(path, &st) == 0 &&
+	    (S_ISBLK(st.st_mode) || S_ISCHR(st.st_mode))) {
 		(void) fprintf(stderr, "%s is a device, not a volume name\n",
 		    path);
 		ret = EINVAL;

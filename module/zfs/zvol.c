@@ -402,6 +402,35 @@ out:
 #define	ZVOL_REWRITE_CHUNK	(4ULL << 20)
 
 /*
+ * Find the zvol_state_t that has an objset open, whatever its name.  Like
+ * zvol_find_by_name(), return it with zv_suspend_lock taken as reader and
+ * zv_state_lock, or NULL.
+ */
+static zvol_state_t *
+zvol_find_by_objset(objset_t *os)
+{
+	zvol_state_t *zv;
+
+	rw_enter(&zvol_state_lock, RW_READER);
+	for (zv = list_head(&zvol_state_list); zv != NULL;
+	    zv = list_next(&zvol_state_list, zv)) {
+		mutex_enter(&zv->zv_state_lock);
+		if (zv->zv_objset == os) {
+			if (!rw_tryenter(&zv->zv_suspend_lock, RW_READER)) {
+				mutex_exit(&zv->zv_state_lock);
+				rw_enter(&zv->zv_suspend_lock, RW_READER);
+				mutex_enter(&zv->zv_state_lock);
+			}
+			rw_exit(&zvol_state_lock);
+			return (zv);
+		}
+		mutex_exit(&zv->zv_state_lock);
+	}
+	rw_exit(&zvol_state_lock);
+	return (NULL);
+}
+
+/*
  * Rewrite one piece of a volume.  If the volume has a zvol_state_t, hold its
  * suspend lock, so that it can not go away, and exclude I/O to the piece.
  * The txg the piece was dirtied in is returned in *txgp, if it was.
@@ -418,28 +447,58 @@ zvol_rewrite_chunk(objset_t *os, dnode_t *dn, uint64_t off, uint64_t len,
 	dmu_tx_t *tx;
 	int error;
 
-	/* The volume may have been renamed since the rewrite started. */
-	dsl_pool_config_enter(dmu_objset_pool(os), FTAG);
-	dsl_dataset_name(dmu_objset_ds(os), name);
-	dsl_pool_config_exit(dmu_objset_pool(os), FTAG);
+	/*
+	 * Writes to the volume must not escape the range lock: a write that
+	 * lands on a block being marked for rewrite could be taken for the
+	 * rewrite.  The zvol_state_t of a renamed volume only gets its new name
+	 * later, from the zvol taskq, so while the dataset is owned, which an
+	 * open volume is, look for the zvol_state_t that has it open.  If none
+	 * has, its device is being created or it is otherwise briefly in use:
+	 * wait for that to end.
+	 */
+	for (;;) {
+		boolean_t owned;
 
-	zv = zvol_find_by_name(name, RW_READER);
-	if (zv != NULL) {
-		boolean_t usable = !(zv->zv_flags & ZVOL_REMOVING) &&
-		    (zv->zv_objset == NULL || zv->zv_objset == os);
+		dsl_pool_config_enter(dmu_objset_pool(os), FTAG);
+		dsl_dataset_name(dmu_objset_ds(os), name);
+		dsl_pool_config_exit(dmu_objset_pool(os), FTAG);
+		owned = dsl_dataset_has_owner(dmu_objset_ds(os));
 
-		mutex_exit(&zv->zv_state_lock);
-		if (!usable) {
+		zv = zvol_find_by_name(name, RW_READER);
+		if (zv != NULL && zv->zv_objset != os &&
+		    (zv->zv_objset != NULL || owned)) {
 			rw_exit(&zv->zv_suspend_lock);
-			return (SET_ERROR(ENXIO));
+			mutex_exit(&zv->zv_state_lock);
+			zv = NULL;
 		}
+		if (zv == NULL && owned) {
+			zv = zvol_find_by_objset(os);
+			if (zv == NULL) {
+				if (issig())
+					return (SET_ERROR(EINTR));
+				delay(MSEC_TO_TICK(10));
+				continue;
+			}
+		}
+		break;
+	}
+
+	if (zv != NULL) {
+		if (zv->zv_flags & ZVOL_REMOVING) {
+			/* zv may be freed once zv_state_lock is dropped. */
+			rw_exit(&zv->zv_suspend_lock);
+			mutex_exit(&zv->zv_state_lock);
+			return (SET_ERROR(EBUSY));
+		}
+		mutex_exit(&zv->zv_state_lock);
 
 		/*
 		 * Writes lock the extent they write.  The DMU rewrites whole
 		 * blocks, so lock whole blocks.
 		 */
 		uint64_t lo = P2ALIGN_TYPED(off, dn->dn_datablksz, uint64_t);
-		uint64_t hi = P2ROUNDUP(off + len, dn->dn_datablksz);
+		uint64_t hi = P2ROUNDUP_TYPED(off + len, dn->dn_datablksz,
+		    uint64_t);
 
 		lr = zfs_rangelock_enter(&zv->zv_rangelock, lo, hi - lo,
 		    RL_WRITER);
@@ -513,6 +572,9 @@ zvol_rewrite(const char *name, uint64_t off, uint64_t len, uint64_t flags)
 			error = SET_ERROR(EROFS);
 		else if (DS_IS_INCONSISTENT(ds))
 			error = SET_ERROR(EBUSY);
+		else if (dsl_dataset_feature_is_active(ds,
+		    SPA_FEATURE_REDACTED_DATASETS))
+			error = SET_ERROR(ENOTSUP);
 		else if ((flags & ZFS_REWRITE_PHYSICAL) &&
 		    !spa_feature_is_enabled(spa, SPA_FEATURE_PHYSICAL_REWRITE))
 			error = SET_ERROR(ENOTSUP);
@@ -603,8 +665,11 @@ zvol_rewrite(const char *name, uint64_t off, uint64_t len, uint64_t flags)
 
 		if (spa_get_failmode(spa) == ZIO_FAILURE_MODE_CONTINUE)
 			wait_flags |= TXG_WAIT_SUSPEND;
-		werror = txg_wait_synced_flags(dmu_objset_pool(os), last_txg,
-		    wait_flags);
+		/* Do not fail for a stop signal, which issig() handles. */
+		do {
+			werror = txg_wait_synced_flags(dmu_objset_pool(os),
+			    last_txg, wait_flags);
+		} while (werror == EINTR && !issig());
 		if (error == 0 && werror != 0)
 			error = (werror == ESHUTDOWN) ? SET_ERROR(EIO) : werror;
 	}
@@ -614,6 +679,10 @@ out:
 	dsl_dataset_long_rele(ds, FTAG);
 	dsl_dataset_rele_flags(ds, DS_HOLD_FLAG_DECRYPT, FTAG);
 	spa_close(spa, FTAG);
+
+	/* Report damaged data as I/O to the volume does. */
+	if (error == ECKSUM)
+		error = SET_ERROR(EIO);
 	return (error);
 }
 
