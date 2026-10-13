@@ -464,23 +464,38 @@ four (hits, misses at even sectors with old births, and new births), the
 memory a table takes (malloc's in-use bytes, before and after it is
 dropped), the import (with the `spa_tryimport()` that `zpool import` makes
 first), the sync of a txg that adds or removes 1e5 entries, the on-disk
-size, and a read benchmark with `primarycache=none`.  It punches the pool's
-free space out of its files after each persisted batch, so that the files
-take what the pool allocates.  `table_bench` builds candidate structures
-outside of any pool.  All numbers are from the debug userspace build, at
-ashift 12, unless said otherwise.
+size, a read benchmark with `primarycache=none`, and the stress test
+below.  It punches the pool's free space out of its files after each
+persisted batch, so that the files take what the pool allocates.
+`table_bench` builds candidate structures outside of any pool.
 
-The current design (an AVL node of 120 bytes per entry under one rwlock, a
-ZAP of 25 values per entry, loaded with a cursor and a lookup per entry)
-missed every target.  With 1.7e7 entries in memory a lookup took 5.3
-microseconds at the 99th percentile (2.9 at the median, 6.5 for misses with
-four threads), the table 128 bytes per entry, 2.03 GiB in all, and the load
-15.6 to 18.6 microseconds per entry: 7.8 s for 5e5 entries, 18.6 s for
-1e6, about 5 minutes for 1.7e7 by extrapolation; `zpool import` paid it
-twice, since its tryimport loaded the table too (1.45 s and 1.43 s for 2e5
-entries).  An entry took 478 bytes of ZAP, 1849 bytes allocated (the MOS
-keeps three copies), so at most 1e6 entries fit this disk, and a txg adding
-or removing 1e5 entries synced in 4.7 to 5.2 s (5e5 entries on disk, 1.7e7
+Conditions: ashift 12, a VM with 4 CPUs and 15 GB, the ARC capped at 2
+GiB.  Until the commit after b026196, `scale_probe` set only
+`zfs_arc_max`, which userland's `arc_init()` ignores below its
+`arc_c_min` (half the default maximum): those runs had a 7 GiB ARC, and
+every number below was measured again with the cap in force.  "Debug" is
+this tree's build.  libzpool is always built with `-DDEBUG -DZFS_DEBUG`,
+whatever configure says (`LIBZPOOL_CPPFLAGS` in `config/Rules.am`), so a
+tree configured without `--enable-debug` changes nothing in it; "release"
+below is such a tree whose libzpool, libnvpair and libzfs_core were made
+with `LIBZPOOL_CPPFLAGS="-UDEBUG -DNDEBUG"` (zdb does not build that way:
+it reads a `ZFS_DEBUG`-only field), and probes built to match
+(`BUILD_TOOL_RELEASE=1`).  Both use `-O2`.
+
+The previous design (an AVL node of 120 bytes per entry under one rwlock,
+a ZAP of 25 values per entry, loaded with a cursor and a lookup per entry)
+missed every target.  With 1.7e7 entries in memory (5e5 of them loaded
+from disk), a lookup took 4.7 to 6.2 microseconds at the 99th percentile
+(2.6 to 2.9 at the median), and the table 128.0 bytes per entry, 2.03 GiB.
+The load took 1.30 to 1.48 s for 2e5 entries and 5.9 to 6.8 s for 5e5
+(6.5 to 7.4, then 11.9 to 13.7 microseconds per entry), and `zpool
+import` paid it twice, since its tryimport loaded the table too: 3.0 to
+3.2 s, then 12.7 to 14.3 s, in all.  At 12 microseconds per entry, 1.7e7
+entries would take about 200 s per load (an extrapolation from the 5e5
+runs; the cost per entry grew with the table).  An entry took 448 to 477
+bytes of ZAP, 1724 to 1805 allocated (the MOS keeps three copies), so 1e6
+entries already passed the 4.6 GB these tests allow for pool files; a txg
+adding or removing 1e5 entries synced in 4.2 to 7.0 s (5e5 on disk, 1.7e7
 in memory).
 
 The table is now:
@@ -488,10 +503,11 @@ The table is now:
 * in memory, per raidz vdev, 1024 open-addressing tables (one per metaslab
   modulo 1024), linear probing in Robin Hood order with backward-shift
   deletion, of 40-byte slots: offset, birth, new offset, and the new birth
-  as a 32-bit delta and the three sizes in 512-byte units.  A shard grows by
-  half at 90% use; the load leaves each at 80%.  The key stays {offset,
-  birth}: the kept head sector makes the offset unique among live entries
-  and tombstones under P1 and P2, but not under the test-only P3;
+  as a 32-bit delta and the three sizes in 512-byte units.  A shard that
+  reaches 90% use grows to two thirds; the load leaves each at 80%.  The
+  key stays {offset, birth}: the kept head sector makes the offset unique
+  among live entries and tombstones under P1 and P2, but not under the
+  test-only P3;
 * read without a lock: a reader counts itself in one of 64 counters, a
   cache line each (by CPU in the kernel, by a hash of the thread here), and
   checks that no writer is in; a writer (syncing context or the load) holds
@@ -510,9 +526,11 @@ The table is now:
   it, in the txgs they did before.  When the records pass twice the entries
   (plus 65536), or the unsorted tail outgrows the sorted part, the next
   sync of the vdev rewrites the log in key order, one record per live
-  entry, in a new object that replaces the old one in the same txg: not
-  during an import, which waits for its txgs.  A table of the earlier
-  format is refused (ENOTSUP);
+  entry, in a new object that replaces the old one in the same txg.  The
+  load never runs it, but the first txg after the load, which
+  `spa_import()` itself waits for, does: an import that finds the log due
+  takes the condense too (below).  A table of the earlier format is
+  refused (ENOTSUP, by read-write and read-only imports alike);
 * loaded by reading the log in windows of 2^20 records, sorting each by
   shard (stably: the records of a key stay in order) and replaying the
   shards' runs in parallel tasks, then trimming each shard to 80% use; a
@@ -526,38 +544,92 @@ The table is now:
   were all moved before the window, from a sorted copy of the metaslab's
   keys in the window, kept while the walk is in it.
 
-With 1.7e7 entries loaded from disk: a lookup takes 0.62 to 0.69
-microseconds at the 99th percentile (0.58 to 0.60 with four threads, 0.27
-to 0.31 at the median), and 33 to 40 ns at the median (63 at the 99th
-percentile) when the birth is after every entry's; the table takes 50.0 bytes per entry (0.79 GiB) after a load of a
-sorted log and 51.8 (0.82 GiB) after one of a log in random order; the
-import takes 2.7 to 3.3 s, of which the load is 2.6 to 3.1 s (1.3 to 1.6 s
-of it in `dmu_read()`), warm or after `echo 3 > drop_caches`, and the
-tryimport loads nothing.  The log takes 40 bytes per entry, 63 to 72
-allocated; the block-pointer ZAP takes 382, 1555 allocated at ashift 12 and
-833 at ashift 9.  A txg adding 1e5 entries with their block pointers syncs
-in 2.2 to 2.3 s, one removing them in 1.8 to 1.9 s.  A condense of 1.7e7
-entries takes 2.0 s and its txg syncs in 4.4 s, with both logs on disk
-until then.  On the way: replaying a log in random order record by record
-took 8.5 to 9.3 s; sorted by shard per window, 4.8 s; with parallel tasks,
-2.8 to 3.1 s.  In `table_bench` at 1.7e7 entries, a btree of 40-byte
+With 1.7e7 entries loaded from disk:
+
+| | target | previous design | this design, debug | this design, release |
+| --- | --- | --- | --- | --- |
+| lookup p99, hit or miss, 1 thread | 1 us | 4.7 to 5.6 us | 0.63 to 0.77 us | 0.62 to 0.68 us |
+| lookup p99, hit or miss, 4 threads | 1 us | 5.8 to 6.2 us | 0.55 to 0.61 us | 0.55 to 0.64 us |
+| lookup p99, birth after every entry's | | 4.7 to 5.9 us | 44 to 64 ns | 41 to 53 ns |
+| memory | 1 GiB | 2.03 GiB | 0.79 to 0.84 GiB | 0.79 to 0.82 GiB |
+| table load at import | 5 s | about 200 s, twice (extrapolated) | 2.44 to 3.24 s | 2.49 to 2.98 s |
+| whole import, tryimport included | | | 2.65 to 3.45 s | 2.68 to 3.18 s |
+| txg adding / removing 1e5 entries | | 4.6 / 4.2 to 7.0 s | 2.07 to 2.22 / 1.70 to 1.80 s | 0.92 to 0.97 / 0.55 to 0.58 s |
+
+Every target is met in both builds: the lookup by 23 to 45%, the memory
+by 16 to 21%, the load by 35 to 51%.  The previous design missed them by
+4.7 to 6.2 times, 2 times and, extrapolated, about 40 times (80 counting
+the tryimport's load).  The lookup is bound by memory, not by the
+assertions: the release build is no faster.  At the 99.9th percentile it
+took 0.9 to 4.3 microseconds in both builds.
+
+The memory is 50.0 bytes per entry after a load of a log in key order
+and 51.8 after one in random order (52.8 for a log of which 1.5e7 records
+were sorted), malloc's in-use bytes freed when the table is dropped.  An
+import spends 0.075 to 0.12 s in its find and tryimport, which loads
+nothing, and 0.09 to 0.13 s beside the load; the load spends 1.2 to 1.6 s
+in `dmu_read()`.  The same holds with the log in key order or in random
+order (2.44 to 2.99 s and 2.73 to 3.24 s of load in the debug build), and
+after `echo 3 > /proc/sys/vm/drop_caches` (the guest's page cache went
+from 1.2 to 3.1 GB to 0.19 GB; the host may still have cached the virtual
+disk, which these runs cannot tell).  A log that the test had kept from
+condensing (`SCALE_CONDENSE=-1`) was due at import: that import took 7.7
+s, 3.2 s of load and a condense of 2.2 s in the txg `spa_import()` waits
+for.  Under the default policy the log is condensed in the txg that makes
+it due, so an import should find it due only after an export or a crash
+between that txg and the next sync of the vdev: reasoned, not run.  A
+condense of 1.7e7 entries takes 1.9 to 2.2 s and its txg syncs in 4.3 to
+4.8 s, with both logs on disk until then (3.6 to 3.7 GB of pool files,
+against 2.2 GB before).  The log takes 40 bytes per entry, 72 allocated at
+1.7e7 entries (61 to 64 at 1e5); the block-pointer ZAP, measured at 1e5
+entries, 362 to 364 bytes, 1482 allocated at ashift 12 and 814 at ashift
+9, which would make 25 GB at ashift 12 for 1.7e7 real moves (an
+extrapolation: synthetic entries at that scale are persisted without
+their block pointers, which would not fit this disk).
+
+In `table_bench` at 1.7e7 entries, in the debug build, a btree of 40-byte
 elements took 58 bytes per entry and 2.5 to 2.7 microseconds at the 99th
-percentile, and a hash table behind one rwlock 1.5 microseconds at the 99th
-percentile with four threads (0.6 to 0.7 with no lock).
+percentile, and a hash table behind one rwlock 1.5 microseconds at the
+99th percentile with four threads (0.6 to 0.7 with no lock): that is why
+the shards are hash tables read without a lock.
 
 What the table costs a raidz read it does not redirect, measured on 512 MiB
-of 16K blocks read with `primarycache=none` from a warm page cache: about
-110 microseconds of wall time and 225 of CPU per block with one thread in
-this build.  Alternating the base commit, the previous design with an
-empty and a full (1.7e7, in memory) table and this one with an empty and a
-full (1.7e7, loaded) table, 4 rounds in each order, 32 passes each, every
-spike variant reads 2.6 to 3.9% slower than the base commit with one
-thread (2 to 3 standard errors), the full tables no slower than the empty
-ones; with four threads the variants are within 2% of the base but this
-design's full table (+3.4% wall, +4.2% CPU, 2 to 3 standard errors).  The
-order of the variants moved a variant's mean by up to 6%, so differences
-under about 3% are not resolved here; the lookup itself costs what the
-microbenchmark says, under a microsecond per I/O.
+of 16K blocks read with `primarycache=none` from a warm page cache, every
+pass with no redirect hit: each variant ran 8 times, alternated with the
+base commit 94407d4 in 4 rounds of one order and 4 of the reverse, and is
+compared with the base run of its own round.  In the debug build (the
+base, the previous design with an empty and a full table, this one with an
+empty and a full table), with one thread every variant is within 1.5% of
+the base's 108 microseconds of wall time per block, and none of the
+differences is resolved (|t| at most 1.1 over 8 rounds); with four threads
+the variants read 1.3 to 3.1% slower than the base's 31.7, and only this
+design's full table stands out at all (+3.1% wall, t = 2.3; +2.6% CPU, t =
+2.5).  In the release build (the base, this design empty and full), the
+variants are within 2.6% of the base's 101 and 29.1 microseconds, none
+resolved (|t| at most 1.5).  Read through files in userspace, a block
+costs about 100 microseconds in either build, so the lookup's own cost, a
+third of a microsecond on average in the microbenchmark, is below what
+these runs can resolve.
+
+    scale_probe <dir> 12 create 64 synth 0 100000 mem 100000 stress 120 3 500000
+
+The I/O path reads the shards without a lock while syncing context moves
+their slots and frees their arrays.  `stress` keeps reader threads looking
+up the stable entries, and keys in the same metaslabs, while the sync
+thread adds five times as many keys in one sync task, removes them in
+another and lets their tombstones expire, round after round: every shard
+grows, shrinks, shifts its slots and is condensed under the readers.  A
+stable entry must always be found with its fields, and a key found must
+carry its own.  The test-only `spike_redirect_unsafe_readers` makes a
+writer skip the wait for the readers, as a table without the protocol
+would (`SCALE_UNSAFE`).  In 120 s with three readers, without the
+protocol, they missed 1020 stable entries and read 4 wrong ones in 2.6e9
+lookups (and 1147 and 3 in 3.1e9 in an earlier run); with it, none in 2.0e9
+lookups (1.9e9 earlier).  The wait has a cost for writers: with the
+readers looking up without a pause, the sync tasks that add and remove
+5e5 keys took 13.7 and 20.7 s per round, against 6.0 and 6.3 s without
+the protocol.  Every insert and removal is its own writer section; the
+I/O path looks up far less often than these readers do.
 
     crash_probe <dir> <ashift> move <point> <P1|P2> condense
     crash_probe <dir> <ashift> fcrash <point> <P1|P2> [condense|condensebad]
@@ -574,16 +646,30 @@ comes back.  The corrupt mode now damages plain-A's record in the log;
 a sector, cannot be written at ashift 9, where the log's 512-byte units are
 a sector.  `lax` (`spike_redirect_load_lax`) skips the load's checks of
 the log's structure.  `scale_probe`'s other switches: `SCALE_LOAD_SKIP`
-(`spike_redirect_load_skip`, an empty table) and `SCALE_CONDENSE`.
+(`spike_redirect_load_skip`, an empty table), `SCALE_CONDENSE` and
+`SCALE_UNSAFE`.
 
-Every target is met in this build: at most 0.69 microseconds at the 99th
-percentile, 0.82 GiB and an import of 3.3 s.  The previous design missed
-them by 5 to 6.5x, 2x and, extrapolated from 5e5 and 1e6 entries, about
-60x.
+At ashift 12 and 9, on the commit that adds the stress test, 252 runs of
+the probes: 227 pass, and the others are deliberate demonstrations and two
+runs that cannot be written.  redirect_probe's checks pass (2 of 2), T4a
+under P1 and P2 (4), T4b under P1, P2 and P3 and P1 `nofix` (8), the move
+and free crash matrices (32 each, half of them with `condense`), the free
+cases (22), resilver (17, `replace nowiden` included), stalebp (8, none
+skipped), guards (16), corrupt (52), tomb (4), converge (8) and rpass R1 to
+R6 (22).  `condensebad` fails at POST_UB in all 4 runs (8 redirects
+loaded, 7 expected: the freed block's entry is back), `rtype` and `rdup`
+with `lax` fail in all 4 (the read-write import takes the damage, and
+`rtype` then aborts in the range tree), and the earlier steps'
+demonstrations fail with their signatures (T4a under P3 and P3 `alone`,
+T4b `nofix` under P2 and P3, the free of P3 with `nocheck`, the resilver
+switches, R6 `noverify`); `nasize` and `rmisalign` skip at ashift 9.  A
+60 s ztest of raidz exits 0.
 
-Not covered: a release build of the module (only the lookup was timed in a
-release build of the userspace libraries), a kernel, the scan walk's cost
-measured on a large table (it is bounded by the shards moved in the
-window, by construction), a condense spread over txgs (one rewrites the
-whole log in one txg), two raidz vdevs, and pools of the earlier spike
-format, which are refused.
+Not covered: a kernel; a release build of zdb (it does not compile without
+`ZFS_DEBUG`); the scan walk's cost on a large table (it is bounded by the
+shards moved in the window, by construction; synthetic entries have no
+block pointer a scan could verify); the block-pointer ZAP at 1.7e7
+entries; a condense spread over txgs (one rewrites the whole log in one
+txg); an import that finds the log due under the default policy; two raidz
+vdevs; I/O costs outside this userspace file-backed setup; and pools of
+the earlier spike formats, which are refused.

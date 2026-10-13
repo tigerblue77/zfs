@@ -42,6 +42,7 @@
  *                       raidz vdev's read count.
  *   ondisk              what the table's objects hold and take on disk.
  *   condense            condense the log now (the redesign's format).
+ *   punch               punch the pool's free space out of its files.
  *   stress <seconds> <readers> <churn>  while <readers> threads look up
  *                       entries [0, n) and <churn> other keys in the same
  *                       metaslabs, add those keys in one sync task, remove
@@ -513,6 +514,12 @@ print_load_stats(const char *what)
 	if (&spike_redirect_condense != NULL) {
 		(void) printf("MEASURE %s table load in dmu_read=%.3f s\n",
 		    what, spike_table_stats.sts_load_read_ns / 1e9);
+		(void) printf("MEASURE %s condenses so far=%llu, the last in "
+		    "txg %llu of %llu records, %.3f s\n", what,
+		    (u_longlong_t)spike_table_stats.sts_condense_calls,
+		    (u_longlong_t)spike_table_stats.sts_condense_txg,
+		    (u_longlong_t)spike_table_stats.sts_condense_records,
+		    spike_table_stats.sts_condense_ns / 1e9);
 	}
 #endif
 }
@@ -1077,7 +1084,7 @@ cmd_stress(int seconds, int readers, uint64_t churn)
 	uint64_t got = 0, done[2], rounds = 0, t0, lookups = 0, found = 0;
 	uint64_t missing = 0, wrong = 0, first = UINT64_MAX;
 	uint64_t count0 = vdev_raidz_redirect_count(spa, 0);
-	uint64_t add_ns = 0, remove_ns = 0, expire_ns = 0, t1;
+	uint64_t add_ns = 0, remove_ns = 0, expire_ns = 0, t1, condenses = 0;
 
 	VERIFY3U(live_n, >, 0);
 	VERIFY3S(readers, <=, 16);
@@ -1128,6 +1135,11 @@ cmd_stress(int seconds, int readers, uint64_t churn)
 		rounds++;
 	}
 	stress_stop = 1;
+#ifdef	RAIDZ_REDIRECT_REC_ADD
+	/* Only the redesign's libzpool condenses. */
+	if (&spike_table_stats != NULL)
+		condenses = spike_table_stats.sts_condense_calls;
+#endif
 	for (int t = 0; t < readers; t++) {
 		VERIFY0(pthread_join(tid[t], NULL));
 		lookups += r[t].s_lookups;
@@ -1144,9 +1156,7 @@ cmd_stress(int seconds, int readers, uint64_t churn)
 	    expire_ns / 1e9, (u_longlong_t)lookups,
 	    (u_longlong_t)found, (u_longlong_t)missing, (u_longlong_t)wrong,
 	    (u_longlong_t)vdev_raidz_redirect_count(spa, 0),
-	    (u_longlong_t)count0,
-	    (u_longlong_t)(&spike_table_stats != NULL ?
-	    spike_table_stats.sts_condense_calls : 0));
+	    (u_longlong_t)count0, (u_longlong_t)condenses);
 	if (missing != 0 || wrong != 0 || rounds == 0 || found == 0) {
 		(void) printf("FAIL stress: %llu stable entries missed and "
 		    "%llu wrong in %llu lookups (first entry %lld), %llu "
@@ -1449,6 +1459,8 @@ main(int argc, char **argv)
 		} else if (strcmp(c, "condense") == 0) {
 			cmd_condense();
 #endif
+		} else if (strcmp(c, "punch") == 0) {
+			punch_free();
 		} else if (strcmp(c, "export") == 0) {
 			cmd_export();
 		} else {
