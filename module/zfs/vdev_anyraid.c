@@ -1701,10 +1701,15 @@ vdev_anyraid_xlate(vdev_t *cvd, const zfs_range_seg64_t *logical_rs,
 			    anyraidvd->vdev_ashift) + atn->atn_tile_idx *
 			    ptsize;
 
+			/*
+			 * rs_end is exclusive and may equal the end of the
+			 * logical tile; "% ltsize" would map it to 0.
+			 */
+			uint64_t tile_base = start_tile_id * ltsize;
 			uint64_t b_start =
-			    (logical_rs->rs_start % ltsize) >> ashift;
+			    (logical_rs->rs_start - tile_base) >> ashift;
 			uint64_t b_end =
-			    (logical_rs->rs_end % ltsize) >> ashift;
+			    (logical_rs->rs_end - tile_base) >> ashift;
 
 			uint64_t start_row = 0;
 			/* avoid underflow */
