@@ -2395,14 +2395,74 @@ vdev_raidz_layout_for_alloc(vdev_raidz_t *vdrz, uint64_t txg)
 }
 
 /*
- * Keep BP layout selection distinct from new-allocation selection even though
- * both paths intentionally have identical behavior before mixed-parity epochs.
+ * SPIKE, not for merge: a test-only, in-memory table of block redirects.  An
+ * entry says that the block whose DVA on top-level vdev rd_vdev starts at
+ * rd_offset, born in txg rd_birth, has been re-encoded at rd_new_offset with
+ * the layout of txg rd_new_birth, in rd_new_asize bytes.  The block pointers
+ * are not changed: I/O to the old DVA is sent to the new extent.  Entries are
+ * only added while nothing reads the blocks they name, and published by the
+ * count, so readers take no lock.
  */
-static vdev_raidz_layout_t
-vdev_raidz_layout_for_bp(vdev_raidz_t *vdrz, const blkptr_t *bp)
+typedef struct raidz_redirect {
+	uint64_t rd_vdev;
+	uint64_t rd_offset;
+	uint64_t rd_birth;
+	uint64_t rd_new_offset;
+	uint64_t rd_new_birth;
+	uint64_t rd_new_asize;
+} raidz_redirect_t;
+
+#define	RAIDZ_REDIRECT_MAX	256
+static raidz_redirect_t raidz_redirects[RAIDZ_REDIRECT_MAX];
+static volatile uint64_t raidz_redirect_count;
+static volatile uint64_t raidz_redirect_hit_count;
+
+int
+vdev_raidz_redirect_add(uint64_t vdev, uint64_t offset, uint64_t birth,
+    uint64_t new_offset, uint64_t new_birth, uint64_t new_asize)
 {
-	return (vdev_raidz_layout_for_alloc(vdrz,
-	    BP_GET_PHYSICAL_BIRTH(bp)));
+	uint64_t n = raidz_redirect_count;
+
+	if (n == RAIDZ_REDIRECT_MAX)
+		return (SET_ERROR(ENOSPC));
+	raidz_redirects[n] = (raidz_redirect_t) {
+		.rd_vdev = vdev, .rd_offset = offset, .rd_birth = birth,
+		.rd_new_offset = new_offset, .rd_new_birth = new_birth,
+		.rd_new_asize = new_asize,
+	};
+	membar_producer();
+	raidz_redirect_count = n + 1;
+	return (0);
+}
+
+void
+vdev_raidz_redirect_clear(void)
+{
+	raidz_redirect_count = 0;
+	membar_producer();
+}
+
+uint64_t
+vdev_raidz_redirect_hits(void)
+{
+	return (raidz_redirect_hit_count);
+}
+
+static const raidz_redirect_t *
+vdev_raidz_redirect_find(const zio_t *zio)
+{
+	uint64_t n = raidz_redirect_count;
+
+	membar_consumer();
+	for (uint64_t i = 0; i < n; i++) {
+		const raidz_redirect_t *rd = &raidz_redirects[i];
+
+		if (rd->rd_vdev == zio->io_vd->vdev_id &&
+		    rd->rd_offset == zio->io_offset &&
+		    rd->rd_birth == BP_GET_PHYSICAL_BIRTH(zio->io_bp))
+			return (rd);
+	}
+	return (NULL);
 }
 
 /*
@@ -2653,7 +2713,7 @@ vdev_raidz_io_verify(zio_t *zio, raidz_map_t *rm, raidz_row_t *rr, int col)
 	logical_rs.rs_start = rr->rr_offset;
 	logical_rs.rs_end = logical_rs.rs_start +
 	    vdev_raidz_psize_to_asize(zio->io_vd, rr->rr_size,
-	    BP_GET_PHYSICAL_BIRTH(zio->io_bp));
+	    rm->rm_birth);
 
 	raidz_col_t *rc = &rr->rr_col[col];
 	vdev_t *cvd = zio->io_vd->vdev_child[rc->rc_devidx];
@@ -2914,8 +2974,22 @@ vdev_raidz_io_start(zio_t *zio)
 	vdev_t *tvd = vd->vdev_top;
 	vdev_raidz_t *vdrz = vd->vdev_tsd;
 	raidz_map_t *rm;
+	uint64_t birth = BP_GET_PHYSICAL_BIRTH(zio->io_bp);
 
-	vdev_raidz_layout_t layout = vdev_raidz_layout_for_bp(vdrz, zio->io_bp);
+	/*
+	 * SPIKE: a redirected block is read and repaired at its new extent,
+	 * with the layout of its new birth.  The children inherit io_txg, so
+	 * the DTL checks also look at the txg the new extent was written in.
+	 */
+	const raidz_redirect_t *rd = vdev_raidz_redirect_find(zio);
+	if (rd != NULL) {
+		atomic_inc_64(&raidz_redirect_hit_count);
+		zio->io_offset = rd->rd_new_offset;
+		zio->io_txg = rd->rd_new_birth;
+		birth = rd->rd_new_birth;
+	}
+
+	vdev_raidz_layout_t layout = vdev_raidz_layout_for_alloc(vdrz, birth);
 	if (zfs_flags & ZFS_DEBUG_RAIDZ_RECONSTRUCT)
 		zfs_dbgmsg("io_start: vrl_width=%llu phys=%d "
 		    "off=%llu type=%d", (u_longlong_t)layout.vrl_width,
@@ -2923,7 +2997,12 @@ vdev_raidz_io_start(zio_t *zio)
 		    (u_longlong_t)zio->io_offset, (int)zio->io_type);
 	if (layout.vrl_width != vdrz->vd_physical_width ||
 	    layout.vrl_nparity != vdrz->vd_nparity) {
-		if (BP_GET_DEDUP(zio->io_bp)) {
+		if (rd != NULL) {
+			/* The new extent was sized for its own layout. */
+			VERIFY3U(vdev_raidz_psize_to_asize_width(vd,
+			    zio->io_size, layout.vrl_width, layout.vrl_nparity),
+			    <=, rd->rd_new_asize);
+		} else if (BP_GET_DEDUP(zio->io_bp)) {
 			uint64_t required_asize;
 			uint64_t owned_asize;
 
@@ -3006,6 +3085,7 @@ vdev_raidz_io_start(zio_t *zio)
 		    layout.vrl_nparity);
 	}
 	rm->rm_original_width = vdrz->vd_original_width;
+	rm->rm_birth = birth;
 
 	zio->io_vsd = rm;
 	zio->io_vsd_ops = &vdev_raidz_vsd_ops;
