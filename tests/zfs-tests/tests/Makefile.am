@@ -529,6 +529,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/anyraid/anyraid_offline_anyraidz_001_pos.ksh \
 	functional/anyraid/anyraid_offline_anyraidz_002_neg.ksh \
 	functional/anyraid/anyraid_offline_write_online_resilver.ksh \
+	functional/anyraid/anyraid_open_map_fallback_rebalance.ksh \
 	functional/anyraid/anyraid_properties_001_pos.ksh \
 	functional/anyraid/anyraid_rebalance_001.ksh \
 	functional/anyraid/anyraid_rebalance_002.ksh \

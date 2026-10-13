@@ -577,6 +577,25 @@ free_header(anyraid_header_t *header, uint64_t header_size) {
 }
 
 /*
+ * anyraid_open_existing() also takes the state of a relocation from the
+ * header, and registers it with the pool only once the open succeeds.  After
+ * an error the state is undone, so that the header of the next child starts
+ * from nothing instead of finding a relocation already in progress.
+ */
+static void
+anyraid_open_undo_relocate(vdev_anyraid_t *va)
+{
+	vdev_anyraid_relocate_t *var = &va->vd_relocate;
+	vdev_anyraid_relocate_task_t *vart;
+
+	while ((vart = list_remove_head(&var->var_list)) != NULL)
+		kmem_free(vart, sizeof (*vart));
+	var->var_state = ARS_NONE;
+	var->var_synced_offset = var->var_offset = 0;
+	var->var_synced_task = var->var_task = 0;
+}
+
+/*
  * anyraid_open_existing() hands out the child capacities only on success.
  * Its caller tries the next child after an error, so every error return
  * frees them and clears the pointer, or the next allocation overwrites them.
@@ -803,7 +822,6 @@ anyraid_open_existing(vdev_t *vd, uint64_t child, int32_t **child_capacities)
 			free_child_capacities(child_capacities, count);
 			return (EINVAL);
 		}
-		spa->spa_anyraid_relocate = var;
 	}
 	if (state == ARS_CONTRACTING)
 		spa_async_request(spa, SPA_ASYNC_CONTRACTION_DONE);
@@ -816,6 +834,7 @@ anyraid_open_existing(vdev_t *vd, uint64_t child, int32_t **child_capacities)
 		    "relocate info %d", (u_longlong_t)vd->vdev_id, error);
 		free_header(&header, header_size);
 		free_child_capacities(child_capacities, count);
+		anyraid_open_undo_relocate(va);
 		return (error);
 	}
 
@@ -847,7 +866,6 @@ anyraid_open_existing(vdev_t *vd, uint64_t child, int32_t **child_capacities)
 		list_insert_head(&var->var_list, vart);
 		if (va->vd_contracting_leaf != -1)
 			(*child_capacities)[va->vd_contracting_leaf] = 0;
-		spa->spa_anyraid_relocate = var;
 	}
 
 	va->vd_checkpoint_tile = UINT32_MAX;
@@ -884,6 +902,7 @@ anyraid_open_existing(vdev_t *vd, uint64_t child, int32_t **child_capacities)
 		zfs_dbgmsg("Error opening anyraid vdev %llu: map read error %d",
 		    (u_longlong_t)vd->vdev_id, error);
 		free_child_capacities(child_capacities, count);
+		anyraid_open_undo_relocate(va);
 		return (error);
 	}
 	free_header(&header, header_size);
@@ -975,9 +994,12 @@ anyraid_open_existing(vdev_t *vd, uint64_t child, int32_t **child_capacities)
 	if (numerrors > va->vd_nparity) {
 		vd->vdev_stat.vs_aux = VDEV_AUX_NO_REPLICAS;
 		free_child_capacities(child_capacities, count);
+		anyraid_open_undo_relocate(va);
 		return (lasterror);
 	}
 
+	if (va->vd_relocate.var_state != ARS_NONE)
+		spa->spa_anyraid_relocate = &va->vd_relocate;
 	return (0);
 }
 
