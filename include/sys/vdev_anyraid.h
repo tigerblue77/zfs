@@ -52,8 +52,30 @@ typedef struct vdev_anyraid_relocate_task {
 	uint16_t	vart_dest_idx;
 	uint32_t	vart_tile;
 	uint32_t	vart_task;
-	uint32_t	vart_dis_ms; // Only used during resume
 } vdev_anyraid_relocate_task_t;
+
+/*
+ * While a column moves, writes to its tile go to both its source and its
+ * destination slots, so that the copy never has to catch up with them.
+ */
+typedef enum anyraid_move_phase {
+	ARMP_IDLE = 0,		/* write source, read source */
+	ARMP_ARMED,		/* write source and dest, read source */
+	ARMP_COMMITTING,	/* write dest and source, read dest */
+} anyraid_move_phase_t;
+
+/* The column being moved, as the I/O path sees it; under vd_lock. */
+typedef struct anyraid_move {
+	uint32_t	am_tile;	/* UINT32_MAX: none */
+	uint32_t	am_task;
+	uint8_t		am_src_disk;
+	uint8_t		am_dst_disk;
+	uint16_t	am_src_idx;
+	uint16_t	am_dst_idx;
+	anyraid_move_phase_t am_phase;
+	/* A write captured ARMED failed on the destination; atomic. */
+	uint32_t	am_dest_dirty;
+} anyraid_move_t;
 
 typedef struct vdev_anyraid_relocate {
 	list_t 		var_list;
@@ -73,9 +95,6 @@ typedef struct vdev_anyraid_relocate {
 	uint64_t	var_failed_offset;
 	uint64_t	var_failed_task;
 	boolean_t	var_waiting_for_resilver;
-	uint64_t	var_offset_pertxg[TXG_SIZE];
-	uint64_t	var_task_pertxg[TXG_SIZE];
-	uint64_t	var_bytes_copied_pertxg[TXG_SIZE];
 
 	kmutex_t	var_lock;
 	kcondvar_t	var_cv;
@@ -101,6 +120,8 @@ typedef struct vdev_anyraid {
 	vdev_anyraid_node_t **vd_children;
 	vdev_anyraid_relocate_t vd_relocate;
 	int32_t		vd_contracting_leaf;
+	anyraid_move_t	vd_move;
+	/* Logical rows of the tiles; held by writes and by the column copy. */
 	zfs_rangelock_t	vd_rangelock;
 } vdev_anyraid_t;
 
