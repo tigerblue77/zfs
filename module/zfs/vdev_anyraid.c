@@ -577,6 +577,18 @@ free_header(anyraid_header_t *header, uint64_t header_size) {
 }
 
 /*
+ * anyraid_open_existing() hands out the child capacities only on success.
+ * Its caller tries the next child after an error, so every error return
+ * frees them and clears the pointer, or the next allocation overwrites them.
+ */
+static void
+free_child_capacities(int32_t **child_capacities, uint_t count)
+{
+	kmem_free(*child_capacities, sizeof (**child_capacities) * count);
+	*child_capacities = NULL;
+}
+
+/*
  * This function is non-static for ZDB, and shouldn't be used for anything else.
  *
  * Iterate over all the copies of the map for the given child vdev and select
@@ -768,6 +780,7 @@ anyraid_open_existing(vdev_t *vd, uint64_t child, int32_t **child_capacities)
 			    "active when another relocate is in progress",
 			    (u_longlong_t)vd->vdev_id);
 			free_header(&header, header_size);
+			free_child_capacities(child_capacities, count);
 			return (EINVAL);
 		}
 		spa->spa_anyraid_relocate = var;
@@ -782,6 +795,7 @@ anyraid_open_existing(vdev_t *vd, uint64_t child, int32_t **child_capacities)
 		zfs_dbgmsg("Error opening anyraid vdev %llu: Error opening "
 		    "relocate info %d", (u_longlong_t)vd->vdev_id, error);
 		free_header(&header, header_size);
+		free_child_capacities(child_capacities, count);
 		return (error);
 	}
 
@@ -854,8 +868,7 @@ anyraid_open_existing(vdev_t *vd, uint64_t child, int32_t **child_capacities)
 		free_header(&header, header_size);
 		zfs_dbgmsg("Error opening anyraid vdev %llu: map read error %d",
 		    (u_longlong_t)vd->vdev_id, error);
-		kmem_free(*child_capacities, sizeof (**child_capacities) *
-		    count);
+		free_child_capacities(child_capacities, count);
 		return (error);
 	}
 	free_header(&header, header_size);
@@ -946,6 +959,7 @@ anyraid_open_existing(vdev_t *vd, uint64_t child, int32_t **child_capacities)
 
 	if (numerrors > va->vd_nparity) {
 		vd->vdev_stat.vs_aux = VDEV_AUX_NO_REPLICAS;
+		free_child_capacities(child_capacities, count);
 		return (lasterror);
 	}
 
