@@ -48,8 +48,8 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C DEBIAN_FRONTEND=noninteractive
 
 REPO_URL=https://github.com/tigerblue77/zfs
-BRANCH=zpool-remove-empty-vdev
-PATCHED_COMMIT=4e0c3a2d7238b3085c0d9b65935a49c7080f8668
+BRANCH=zpool-remove-empty-vdev-v2
+PATCHED_COMMIT=fbf5f2acc6b9db69aecc766876355f3cf01d94c0
 BASE_COMMIT=4542a317e2fa
 TESTS_SERIAL=ZTSTESTS
 DEMO_SERIALS="ZTSD1 ZTSD2 ZTSD3 ZTSD4 ZTSD5 ZTSD6"
@@ -81,6 +81,7 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
 is_done() { grep -qx "$1" "$STATE" 2>/dev/null; }
 mark() { if ! is_done "$1"; then echo "$1" >>"$STATE"; fi; }
+unmark() { sed -i "/^$1\$/d" "$STATE"; }
 as_zts() {
 	runuser -u "$TEST_USER" -- env HOME="/home/$TEST_USER" \
 	    USER="$TEST_USER" LOGNAME="$TEST_USER" "$@"
@@ -310,7 +311,7 @@ build_tree() {
 
 step_build() {
 	STEP=build
-	local head
+	local head prev
 	if ! is_done prepare; then
 		die "run '$SCRIPT prepare' first (and reboot if it asked for it)"
 	fi
@@ -322,6 +323,20 @@ step_build() {
 		    die "clone failed (branch not pushed yet?); see $LOG/clone.log"
 	fi
 	head=$(as_zts git -C "$WORK/patched" rev-parse HEAD)
+	if [ "$head" != "$PATCHED_COMMIT" ]; then
+		say "patched tree is at $head; moving it to $PATCHED_COMMIT and keeping the earlier results"
+		as_zts git -C "$WORK/patched" fetch -q origin "$BRANCH" >>"$LOG/clone.log" 2>&1 ||
+		    die "fetch of $BRANCH failed; see $LOG/clone.log"
+		as_zts git -C "$WORK/patched" checkout -q --detach "$PATCHED_COMMIT" >>"$LOG/clone.log" 2>&1 ||
+		    die "cannot check out $PATCHED_COMMIT; see $LOG/clone.log"
+		prev=$LOG/before-${head:0:12}
+		install -d "$prev"
+		mv -f "$RESULTS" "$LOG"/*.zts.log "$LOG"/*.dmesg.* "$LOG"/*.results "$prev"/ 2>/dev/null || true
+		rm -f "$STATE_DIR/inprogress"
+		unmark build_patched
+		unmark build
+		head=$(as_zts git -C "$WORK/patched" rev-parse HEAD)
+	fi
 	[ "$head" = "$PATCHED_COMMIT" ] ||
 	    die "branch tip is $head, expected $PATCHED_COMMIT; update PATCHED_COMMIT if intended"
 	if [ ! -d "$WORK/base/.git" ]; then
@@ -366,7 +381,7 @@ run_one() {
 	    >"$LOG/$tag.zts.log" 2>&1 || rc=$?
 	rm -f "$inprog"
 	dmesg >"$LOG/$tag.dmesg.after"
-	res=$(sed -n "s/^Test: .*\\/$name\\.ksh .*\\[\\(PASS\\|FAIL\\|SKIP\\|KILLED\\)\\].*/\\1/p" \
+	res=$(sed -n "s/^.*Test: .*\\/$name\\.ksh .*\\[\\(PASS\\|FAIL\\|SKIP\\|KILLED\\)\\].*/\\1/p" \
 	    "$LOG/$tag.zts.log" | tail -n 1)
 	[ -n "$res" ] || res=NORESULT
 	[ "$rc" != 124 ] || res=TIMEOUT
@@ -415,7 +430,7 @@ step_test() {
 		as_zts cp -p "$WORK/patched/$FUNCDIR/$t.ksh" "$WORK/base/$FUNCDIR/$t.ksh"
 		[ -x "$WORK/base/$FUNCDIR/$t.ksh" ] || die "copied test is not executable: $t.ksh"
 	done
-	base_list=$NEW_TESTS
+	base_list="$NEW_TESTS cli_root/zpool_add/zpool_add_004_pos"
 	for d in cli_root/zpool_remove cli_root/zpool_add; do
 		for f in "$WORK/patched/$FUNCDIR/$d"/*.ksh; do
 			case ${f##*/} in setup.ksh | cleanup.ksh) continue ;; esac
