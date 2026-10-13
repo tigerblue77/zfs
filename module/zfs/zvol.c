@@ -576,8 +576,9 @@ zvol_rewrite_chunk(objset_t *os, dnode_t *dn, uint64_t off, uint64_t len,
  * The volume can be in use.  It does not even have to be exposed as a device.
  * I/O to it is not held up for longer than a piece.  The dataset stays long
  * held and the pool referenced meanwhile, so the volume can not be destroyed,
- * rolled back or received into, nor the pool exported, until the rewrite is
- * done.  It does not return before the rewritten data is on stable storage.
+ * rolled back, received into, shrunk or sent itself, nor the pool exported,
+ * until the rewrite is done.  It does not return before the rewritten data is
+ * on stable storage.
  */
 int
 zvol_rewrite(const char *name, uint64_t off, uint64_t len, uint64_t flags)
