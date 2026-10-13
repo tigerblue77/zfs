@@ -184,6 +184,12 @@ extern void spa_start_raidz_expansion_thread(spa_t *);
 extern int spa_raidz_expand_get_stats(spa_t *, pool_raidz_expand_stat_t *);
 extern int vdev_raidz_load(vdev_t *);
 
+/* SPIKE, not for merge: test-only, in-memory block redirects */
+extern int vdev_raidz_redirect_add(uint64_t, uint64_t, uint64_t, uint64_t,
+    uint64_t, uint64_t);
+extern void vdev_raidz_redirect_clear(void);
+extern uint64_t vdev_raidz_redirect_hits(void);
+
 /* RAIDZ scratch area pause points (for testing) */
 #define	RAIDZ_EXPAND_PAUSE_NONE	0
 #define	RAIDZ_EXPAND_PAUSE_PRE_SCRATCH_1 1
