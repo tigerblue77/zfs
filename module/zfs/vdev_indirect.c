@@ -531,6 +531,10 @@ spa_condense_indirect_complete_sync(void *arg, dmu_tx_t *tx)
 	    (u_longlong_t)new_count, (u_longlong_t)old_count);
 
 	vdev_config_dirty(spa->spa_root_vdev);
+
+	/* Nothing refers to the vdev any more, see vdev_removal.c. */
+	if (new_count == 0)
+		spa_async_request(spa, SPA_ASYNC_RETIRE_INDIRECT);
 }
 
 /*

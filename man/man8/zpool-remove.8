@@ -17,7 +17,7 @@
 .\" Copyright 2017 Nexenta Systems, Inc.
 .\" Copyright (c) 2017 Open-E, Inc. All Rights Reserved.
 .\"
-.Dd November 19, 2024
+.Dd October 13, 2026
 .Dt ZPOOL-REMOVE 8
 .Os
 .
@@ -61,6 +61,14 @@ the background.
 The removal progress can be monitored with
 .Nm zpool Cm status .
 If an I/O error is encountered during the removal process it will be canceled.
+Once the evacuation completes, blocks that still refer to the removed device
+are reached through a mapping held in memory, and once no block refers to it
+any more, the mapping is freed and the device leaves the pool configuration
+.Po see
+.Sy zfs_retire_indirect_vdevs
+in
+.Xr zfs 4
+.Pc .
 The
 .Sy device_removal
 feature flag must be enabled to remove a top-level vdev, see

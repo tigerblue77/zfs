@@ -72,6 +72,10 @@
  *      the sync thread to destroy the space maps and finish the removal
  *      (spa_finish_removal).
  *
+ *    - Once condensing has left the mapping without entries, nothing
+ *      refers to the indirect vdev any more, and it is turned into a hole
+ *      and its mapping freed (spa_vdev_retire_indirect).
+ *
  *   The following constraints currently apply primary device removal:
  *
  *     - All vdevs must be online, healthy, and not be missing any data
@@ -164,6 +168,12 @@ uint_t vdev_removal_max_span = 32 * 1024;
  * actions happen while in the middle of a removal.
  */
 static int zfs_removal_suspend_progress = 0;
+
+/*
+ * Turn indirect vdevs whose mapping is empty into holes, see
+ * spa_vdev_retire_indirect().
+ */
+static int zfs_retire_indirect_vdevs = 1;
 
 #define	VDEV_REMOVAL_ZAP_OBJS	"lzap"
 
@@ -2109,6 +2119,199 @@ vdev_remove_make_hole_and_free(vdev_t *vd)
 }
 
 /*
+ * Return whether an indirect vdev can be retired: its mapping is empty,
+ * so no block pointer refers to it any more.  This is checked from
+ * syncing context to request the retirement and again under
+ * spa_vdev_enter() to do it, so it only reads state that is current in
+ * both.
+ */
+boolean_t
+vdev_indirect_should_retire(vdev_t *vd)
+{
+	spa_t *spa = vd->vdev_spa;
+
+	if (!zfs_retire_indirect_vdevs)
+		return (B_FALSE);
+
+	if (vd->vdev_ops != &vdev_indirect_ops ||
+	    vd->vdev_indirect_mapping == NULL ||
+	    vdev_indirect_mapping_num_entries(vd->vdev_indirect_mapping) != 0)
+		return (B_FALSE);
+
+	/*
+	 * A removal or a condense may still change the list of indirect
+	 * vdevs or a mapping, and the checkpointed state may still have
+	 * blocks on this vdev.
+	 */
+	if (spa->spa_vdev_removal != NULL ||
+	    spa->spa_condensing_indirect != NULL ||
+	    spa_feature_is_active(spa, SPA_FEATURE_POOL_CHECKPOINT))
+		return (B_FALSE);
+
+	/*
+	 * Neither can be set for an empty mapping (see
+	 * vdev_indirect_mark_obsolete() and vdev_indirect_state_sync_verify()),
+	 * but their objects and txg lists would outlive the vdev.
+	 */
+	if (vd->vdev_obsolete_sm != NULL ||
+	    zfs_range_tree_space(vd->vdev_obsolete_segments) != 0)
+		return (B_FALSE);
+
+	return (B_TRUE);
+}
+
+typedef struct vdev_retire_arg {
+	uint64_t	vra_vdev_id;
+	uint64_t	vra_top_zap;
+	uint64_t	vra_mapping_object;
+	uint64_t	vra_births_object;
+} vdev_retire_arg_t;
+
+/*
+ * Free the objects of a retired indirect vdev, in the txg whose config
+ * replaces it with a hole: the pool on disk has either the indirect vdev
+ * and its objects, or the hole and none of them.
+ */
+static void
+vdev_retire_indirect_sync(void *arg, dmu_tx_t *tx)
+{
+	vdev_retire_arg_t *vra = arg;
+	spa_t *spa = dmu_tx_pool(tx)->dp_spa;
+	objset_t *mos = spa->spa_meta_objset;
+
+	ASSERT3U(dmu_tx_get_txg(tx), ==, spa_syncing_txg(spa));
+
+	vdev_indirect_mapping_free(mos, vra->vra_mapping_object, tx);
+	vdev_indirect_births_free(mos, vra->vra_births_object, tx);
+
+	if (vra->vra_top_zap != 0) {
+		uint64_t precise = 0;
+		int error = zap_lookup(mos, vra->vra_top_zap,
+		    VDEV_TOP_ZAP_OBSOLETE_COUNTS_ARE_PRECISE, sizeof (precise),
+		    1, &precise);
+		VERIFY(error == 0 || error == ENOENT);
+		if (precise != 0)
+			spa_feature_decr(spa, SPA_FEATURE_OBSOLETE_COUNTS, tx);
+
+		ASSERT3S(zap_contains(mos, vra->vra_top_zap,
+		    VDEV_TOP_ZAP_INDIRECT_OBSOLETE_SM), ==, ENOENT);
+
+		VERIFY0(zap_destroy(mos, vra->vra_top_zap, tx));
+		VERIFY0(zap_remove_int(mos, spa->spa_all_vdev_zaps,
+		    vra->vra_top_zap, tx));
+	}
+
+	spa_feature_decr(spa, SPA_FEATURE_DEVICE_REMOVAL, tx);
+	spa_sync_removing_state(spa, tx);
+
+	spa_history_log_internal(spa, "vdev retire", tx, "%s vdev %llu",
+	    spa_name(spa), (u_longlong_t)vra->vra_vdev_id);
+	kmem_free(vra, sizeof (*vra));
+}
+
+/*
+ * Retire one indirect vdev that vdev_indirect_should_retire() accepts.
+ * Returns ENOENT when there is none.
+ */
+static int
+spa_vdev_retire_indirect_one(spa_t *spa)
+{
+	spa_removing_phys_t *srp = &spa->spa_removing_phys;
+	uint64_t txg = spa_vdev_enter(spa);
+	vdev_t *rvd = spa->spa_root_vdev;
+	vdev_t *vd = NULL;
+
+	for (uint64_t c = 0; c < rvd->vdev_children; c++) {
+		if (vdev_indirect_should_retire(rvd->vdev_child[c])) {
+			vd = rvd->vdev_child[c];
+			break;
+		}
+	}
+	if (vd == NULL)
+		return (spa_vdev_exit(spa, NULL, txg, SET_ERROR(ENOENT)));
+
+	vdev_indirect_config_t *vic = &vd->vdev_indirect_config;
+	uint64_t id = vd->vdev_id;
+
+	/*
+	 * Unlink the vdev from the list that spa_remove_init() walks, from
+	 * the most recently removed vdev.  Readers of the list hold a config
+	 * lock, so it is changed here, and written in the same txg as the
+	 * hole by the sync task (the removing state) and by the config of
+	 * the vdev that pointed to this one.
+	 */
+	if (srp->sr_prev_indirect_vdev == id) {
+		srp->sr_prev_indirect_vdev = vic->vic_prev_indirect_vdev;
+	} else {
+		vdev_t *nvd = vdev_lookup_top(spa, srp->sr_prev_indirect_vdev);
+		while (nvd != NULL &&
+		    nvd->vdev_indirect_config.vic_prev_indirect_vdev != id) {
+			nvd = vdev_lookup_top(spa,
+			    nvd->vdev_indirect_config.vic_prev_indirect_vdev);
+		}
+		if (nvd == NULL) {
+			zfs_dbgmsg("vdev %llu is missing from the list of "
+			    "indirect vdevs", (u_longlong_t)id);
+			return (spa_vdev_exit(spa, NULL, txg,
+			    SET_ERROR(EINVAL)));
+		}
+		nvd->vdev_indirect_config.vic_prev_indirect_vdev =
+		    vic->vic_prev_indirect_vdev;
+		vdev_config_dirty(nvd);
+	}
+
+	vdev_retire_arg_t *vra = kmem_alloc(sizeof (*vra), KM_SLEEP);
+	vra->vra_vdev_id = id;
+	vra->vra_top_zap = vd->vdev_top_zap;
+	vra->vra_mapping_object = vic->vic_mapping_object;
+	vra->vra_births_object = vic->vic_births_object;
+
+	dmu_tx_t *tx = dmu_tx_create_assigned(spa->spa_dsl_pool, txg);
+	dsl_sync_task_nowait(spa->spa_dsl_pool, vdev_retire_indirect_sync,
+	    vra, tx);
+	dmu_tx_commit(tx);
+
+	sysevent_t *ev = spa_event_create(spa, vd, NULL,
+	    ESC_ZFS_VDEV_REMOVE_DEV);
+
+	zfs_dbgmsg("retiring indirect vdev %llu in txg %llu",
+	    (u_longlong_t)id, (u_longlong_t)txg);
+
+	if (list_link_active(&vd->vdev_state_dirty_node))
+		vdev_state_clean(vd);
+	if (list_link_active(&vd->vdev_config_dirty_node))
+		vdev_config_clean(vd);
+
+	vdev_remove_make_hole_and_free(vd);
+
+	(void) spa_vdev_exit(spa, NULL, txg, 0);
+
+	if (ev != NULL)
+		spa_event_post(ev);
+
+	return (0);
+}
+
+/*
+ * Turn the indirect vdevs that nothing refers to any more into holes.
+ * Called by the async thread, which spa_sync_condense_indirect() asks
+ * to run while a vdev qualifies.  This needs the namespace lock and all
+ * the config locks, which neither syncing context nor the condense
+ * thread may take.
+ *
+ * Retirement frees the mapping like a condense does, so rewinding the
+ * pool past it is exposed in the same way.  It waits for a checkpoint to
+ * be discarded, because the checkpointed state may still have blocks on
+ * the vdev.
+ */
+void
+spa_vdev_retire_indirect(spa_t *spa)
+{
+	while (!spa_suspended(spa) && spa_vdev_retire_indirect_one(spa) == 0)
+		;
+}
+
+/*
  * Remove a log device.  The config lock is held for the specified TXG.
  */
 static int
@@ -2612,6 +2815,9 @@ ZFS_MODULE_PARAM(zfs_vdev, vdev_, removal_max_span, UINT, ZMOD_RW,
 ZFS_MODULE_PARAM(zfs_vdev, zfs_, removal_suspend_progress, UINT, ZMOD_RW,
 	"Pause device removal after this many bytes are copied "
 	"(debug use only - causes removal to hang)");
+
+ZFS_MODULE_PARAM(zfs_vdev, zfs_, retire_indirect_vdevs, INT, ZMOD_RW,
+	"Turn indirect vdevs into holes once nothing refers to them");
 
 EXPORT_SYMBOL(free_from_removing_vdev);
 EXPORT_SYMBOL(spa_removal_get_stats);
