@@ -2388,7 +2388,7 @@ vdev_raidz_min_asize(vdev_t *pvd, vdev_t *cvd)
 static uint64_t
 vdev_raidz_min_attach_size(vdev_t *vd)
 {
-	ASSERT3U(vd->vdev_top, ==, vd);
+	/* ztest nests raidz under mirrors, so vd is not always top-level. */
 	return (vdev_raidz_min_asize(vd, vd->vdev_child[0]));
 }
 
