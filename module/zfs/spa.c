@@ -11152,6 +11152,8 @@ spa_sync_iterate_to_convergence(spa_t *spa, dmu_tx_t *tx)
 		while ((vd = txg_list_remove(&spa->spa_vdev_txg_list, txg))
 		    != NULL)
 			vdev_sync(vd, txg);
+		/* SPIKE: test-only crash point */
+		spike_crash_check(spa, txg, SPIKE_CRASH_MS_SYNCED);
 
 		if (pass == 1) {
 			/*
@@ -11432,6 +11434,8 @@ spa_sync(spa_t *spa, uint64_t txg)
 		vdev_sync_dispatch(vd, txg);
 
 	spa_sync_rewrite_vdev_config(spa, tx);
+	/* SPIKE: test-only crash point */
+	spike_crash_check(spa, txg, SPIKE_CRASH_POST_UB);
 	dmu_tx_commit(tx);
 
 	taskq_cancel_id(system_delay_taskq, spa->spa_deadman_tqid, B_TRUE);

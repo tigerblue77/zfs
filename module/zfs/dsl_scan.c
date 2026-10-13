@@ -4955,10 +4955,11 @@ int spike_scan_redirect_unsorted = 1;
  * not allow two queued extents to overlap.
  */
 static boolean_t
-dsl_scan_bp_redirected(const blkptr_t *bp)
+dsl_scan_bp_redirected(spa_t *spa, const blkptr_t *bp)
 {
 	for (int i = 0; i < BP_GET_NDVAS(bp); i++) {
-		if (vdev_raidz_redirect_lookup(DVA_GET_VDEV(&bp->blk_dva[i]),
+		if (vdev_raidz_redirect_lookup(spa,
+		    DVA_GET_VDEV(&bp->blk_dva[i]),
 		    DVA_GET_OFFSET(&bp->blk_dva[i]),
 		    BP_GET_PHYSICAL_BIRTH(bp)))
 			return (B_TRUE);
@@ -4985,7 +4986,8 @@ dsl_scan_enqueue(dsl_pool_t *dp, const blkptr_t *bp, int zio_flags,
 	 * read from a new extent, which the queues cannot place.
 	 */
 	if (!dp->dp_scan->scn_is_sorted || BP_IS_GANG(bp) ||
-	    (spike_scan_redirect_unsorted && dsl_scan_bp_redirected(bp))) {
+	    (spike_scan_redirect_unsorted &&
+	    dsl_scan_bp_redirected(spa, bp))) {
 		scan_exec_io(dp, bp, zio_flags, zb, NULL);
 		return;
 	}

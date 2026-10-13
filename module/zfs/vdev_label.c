@@ -2222,6 +2222,9 @@ retry:
 		goto retry;
 	}
 
+	/* SPIKE: test-only crash point */
+	spike_crash_check(spa, txg, SPIKE_CRASH_PRE_UB);
+
 	/*
 	 * Sync the uberblocks to all vdevs in svd[].
 	 * If the system dies in the middle of this step, there are two cases

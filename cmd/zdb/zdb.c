@@ -125,6 +125,7 @@ static int flagbits[256];
 static uint64_t max_inflight_bytes = 256 * 1024 * 1024; /* 256MB */
 static int leaked_objects = 0;
 static zfs_range_tree_t *mos_refd_objs;
+static boolean_t spike_zdb_redirect_mos = B_TRUE;	/* SPIKE */
 static spa_t *spa;
 static objset_t *os;
 static boolean_t kernel_init_done;
@@ -8101,6 +8102,8 @@ dump_block_stats(spa_t *spa)
 	total_found =
 	    tzb->zb_asize - zcb->zcb_dedup_asize - zcb->zcb_clone_asize +
 	    zcb->zcb_removing_size + zcb->zcb_checkpoint_size;
+	/* SPIKE: a moved block's claims differ from its DVA's asize. */
+	total_found += spike_redirect_claim_delta;
 
 	if (total_found == total_alloc && !dump_opt['L']) {
 		(void) printf("\n\tNo leaks (block sum matches space"
@@ -9093,6 +9096,14 @@ dump_mos_leaked_object_details(objset_t *mos, uint64_t object,
 static void
 mos_leak_vdev_top_zap(vdev_t *vd)
 {
+	/* SPIKE: the raidz vdev's table of moved blocks. */
+	uint64_t redirect_obj;
+	if (spike_zdb_redirect_mos &&
+	    zap_lookup(spa_meta_objset(vd->vdev_spa), vd->vdev_top_zap,
+	    VDEV_TOP_ZAP_RAIDZ_REDIRECTS, sizeof (redirect_obj), 1,
+	    &redirect_obj) == 0)
+		mos_obj_refd(redirect_obj);
+
 	uint64_t ms_flush_data_obj;
 	int error = zap_lookup(spa_meta_objset(vd->vdev_spa),
 	    vd->vdev_top_zap, VDEV_TOP_ZAP_MS_UNFLUSHED_PHYS_TXGS,
@@ -10216,6 +10227,17 @@ main(int argc, char **argv)
 	char pbuf[MAXPATHLEN];
 
 	dprintf_setup(&argc, argv);
+
+	/*
+	 * SPIKE, not for merge: test-only, ignore the claims ("claims"), the
+	 * table object ("mos") or both (any other value) of moved raidz
+	 * blocks.
+	 */
+	const char *spike_ignore = getenv("SPIKE_ZDB_IGNORE_REDIRECTS");
+	if (spike_ignore != NULL && strcmp(spike_ignore, "mos") != 0)
+		spike_redirect_claim_enable = 0;
+	if (spike_ignore != NULL && strcmp(spike_ignore, "claims") != 0)
+		spike_zdb_redirect_mos = B_FALSE;
 
 	/*
 	 * Set up signal handlers, so if we crash due to bad on-disk data we

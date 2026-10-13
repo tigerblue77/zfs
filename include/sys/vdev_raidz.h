@@ -164,6 +164,16 @@ typedef struct vdev_raidz {
 	 */
 	uint64_t *vd_parity_epochs;
 	uint64_t vd_parity_epoch_count;
+
+	/*
+	 * SPIKE, not for merge: blocks moved to a new extent, as
+	 * raidz_redirect_node_t's keyed by {old offset, physical birth}, and
+	 * the MOS ZAP that holds them (0 until the first move).  The lock
+	 * protects the tree; the I/O path takes it as a reader.
+	 */
+	avl_tree_t vd_redirects;
+	krwlock_t vd_redirect_lock;
+	uint64_t vd_redirect_obj;
 } vdev_raidz_t;
 
 extern int vdev_raidz_attach_check(vdev_t *);
@@ -184,12 +194,72 @@ extern void spa_start_raidz_expansion_thread(spa_t *);
 extern int spa_raidz_expand_get_stats(spa_t *, pool_raidz_expand_stat_t *);
 extern int vdev_raidz_load(vdev_t *);
 
-/* SPIKE, not for merge: test-only, in-memory block redirects */
-extern int vdev_raidz_redirect_add(uint64_t, uint64_t, uint64_t, uint64_t,
-    uint64_t, uint64_t);
-extern void vdev_raidz_redirect_clear(void);
+/*
+ * SPIKE, not for merge: persistent block redirects of a raidz vdev.  An
+ * entry says that the block whose DVA starts at rde_offset, born in txg
+ * rde_birth, is now stored at rde_new_offset with the layout of txg
+ * rde_new_birth, in rde_new_asize bytes, and that [rde_offset, rde_offset +
+ * rde_old_reserved) of its old extent is still allocated.  The table is a
+ * ZAP in the MOS, keyed by {rde_offset, rde_birth}, named in the vdev's
+ * top-level ZAP.
+ */
+#define	VDEV_TOP_ZAP_RAIDZ_REDIRECTS	"org.openzfs:spike_raidz_redirects"
+
+typedef struct raidz_redirect_ent {
+	uint64_t rde_offset;
+	uint64_t rde_birth;
+	uint64_t rde_new_offset;
+	uint64_t rde_new_birth;
+	uint64_t rde_new_asize;
+	uint64_t rde_old_reserved;
+} raidz_redirect_ent_t;
+
+/* What a move keeps allocated of the old extent [O, O + asize). */
+typedef enum raidz_redirect_keep {
+	RAIDZ_REDIRECT_KEEP_ALL,	/* P1: all of it */
+	RAIDZ_REDIRECT_KEEP_FIRST,	/* P2: its first sector */
+	RAIDZ_REDIRECT_KEEP_NONE,	/* P3: nothing */
+} raidz_redirect_keep_t;
+
+struct blkptr;
+struct zbookmark_phys;
+
+/* One block to move, for vdev_raidz_redirect_move() (test-only). */
+typedef struct raidz_redirect_move {
+	const struct blkptr *rdm_bp;	/* never changed; DVA 0 moves */
+	const struct zbookmark_phys *rdm_zb;	/* where rdm_bp lives */
+	uint64_t rdm_psize;		/* bytes at the DVA */
+	abd_t *rdm_data;		/* those bytes, as stored */
+	uint64_t rdm_place;		/* if not 0, claim N there */
+	/* Set by the move, as soon as each is known. */
+	uint64_t rdm_old_asize;
+	raidz_redirect_ent_t rdm_ent;
+	int rdm_error;
+} raidz_redirect_move_t;
+
+extern int vdev_raidz_redirect_move(spa_t *, uint64_t,
+    raidz_redirect_move_t *, int, raidz_redirect_keep_t, boolean_t);
+extern boolean_t vdev_raidz_redirect_get(vdev_t *, uint64_t, uint64_t,
+    raidz_redirect_ent_t *);
+extern boolean_t vdev_raidz_redirect_lookup(spa_t *, uint64_t, uint64_t,
+    uint64_t);
+extern uint64_t vdev_raidz_redirect_count(spa_t *, uint64_t);
 extern uint64_t vdev_raidz_redirect_hits(void);
-extern boolean_t vdev_raidz_redirect_lookup(uint64_t, uint64_t, uint64_t);
+extern boolean_t vdev_raidz_redirect_claim(vdev_t *, uint64_t, uint64_t,
+    uint64_t, uint64_t, int *);
+extern uint64_t spike_redirect_claim_delta;
+extern int spike_redirect_claim_enable;
+extern int spike_redirect_split_txg;
+
+/* SPIKE: test-only crash points; spike_crash_check() calls _exit(99). */
+#define	SPIKE_CRASH_NONE	0
+#define	SPIKE_CRASH_TABLE_DIRTY	1	/* the move's table updates */
+#define	SPIKE_CRASH_MS_SYNCED	2	/* after vdev_sync() in spa_sync */
+#define	SPIKE_CRASH_PRE_UB	3	/* even labels, no uberblock yet */
+#define	SPIKE_CRASH_POST_UB	4	/* uberblocks and labels written */
+extern uint64_t spike_crash_txg;
+extern int spike_crash_point;
+extern void spike_crash_check(spa_t *, uint64_t, int);
 
 /* RAIDZ scratch area pause points (for testing) */
 #define	RAIDZ_EXPAND_PAUSE_NONE	0

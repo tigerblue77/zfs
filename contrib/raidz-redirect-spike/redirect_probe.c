@@ -6,12 +6,13 @@
  *
  *   redirect_probe <dir> <ashift>
  *
- * Needs a libzpool built with the SPIKE redirect hook in vdev_raidz.c
- * (vdev_raidz_redirect_add()).  Creates a five-wide raidz1 pool of files in
+ * Needs a libzpool built with the SPIKE redirect table in vdev_raidz.c
+ * (vdev_raidz_redirect_move()).  Creates a five-wide raidz1 pool of files in
  * <dir>, writes plain, dedup and gang blocks, moves the vdev to a parity-2
- * epoch, re-encodes some of the old blocks into new extents (raw read with
- * the old layout, metaslab_alloc() and zio_rewrite() with the new one),
- * registers redirects, then checks:
+ * epoch, and re-encodes some of the old blocks into new extents: the probe
+ * reads their raw bytes with the old layout, and the kernel's test-only move
+ * allocates N, writes the bytes there with the new layout and adds the
+ * persistent redirects, in one txg.  Then it checks:
  *
  *   T1  every redirected block reads back bit-identical through its old,
  *       unchanged block pointer, and only through the redirect
@@ -425,6 +426,7 @@ read_raw(spa_t *spa, const blkptr_t *bp, uint64_t psize)
 typedef struct move {
 	const char	*mv_name;
 	blkptr_t	mv_bp;		/* the block pointer, never changed */
+	zbookmark_phys_t mv_zb;		/* where it is referenced from */
 	uint64_t	mv_psize;	/* bytes at the DVA: psize or header */
 	abd_t		*mv_data;	/* their raw contents */
 	uint64_t	mv_new_offset;
@@ -436,123 +438,59 @@ typedef struct move {
 	extent_t	mv_new;
 } move_t;
 
-typedef struct move_arg {
-	move_t		*ma_moves;
-	int		ma_n;
-	policy_t	ma_policy;
-	uint64_t	ma_far;		/* if not 0, claim N from here on */
-} move_arg_t;
-
 /*
- * Apply the policy to the old extent of a block that has just been moved,
- * in the move's own sync task: free whatever the policy does not keep.  The
- * free is never checkpointed, which is only right with no checkpoint.
+ * Move the blocks with the kernel's test-only move, in one sync task of a txg
+ * of the new epoch, which also applies the policy to the old extents.  With
+ * <far> not 0, N is claimed from there on instead of allocated.
  */
-static void
-old_extent_policy(spa_t *spa, move_t *mv, policy_t policy)
-{
-	vdev_t *tvd = spa->spa_root_vdev->vdev_child[0];
-	const dva_t *dva = &mv->mv_bp.blk_dva[0];
-	uint64_t offset = DVA_GET_OFFSET(dva);
-
-	mv->mv_old_asize = DVA_GET_GANG(dva) ? vdev_gang_header_asize(tvd,
-	    BP_GET_PHYSICAL_BIRTH(&mv->mv_bp)) : DVA_GET_ASIZE(dva);
-	mv->mv_kept = mv->mv_old_asize;
-	if (policy == P2)
-		mv->mv_kept = 1ULL << tvd->vdev_ashift;
-	else if (policy == P3)
-		mv->mv_kept = 0;
-	if (mv->mv_kept == mv->mv_old_asize)
-		return;
-
-	VERIFY(!spa_has_checkpoint(spa));
-	spa_config_enter(spa, SCL_FREE, FTAG, RW_READER);
-	metaslab_free_concrete(tvd, offset + mv->mv_kept,
-	    mv->mv_old_asize - mv->mv_kept, B_FALSE);
-	spa_config_exit(spa, SCL_FREE, FTAG);
-}
-
-/*
- * Re-encode every block in a sync task of a txg of the new epoch: allocate
- * an extent sized for its layout, write the raw bytes there through the
- * raidz vdev with that layout, register the redirect, and apply the policy
- * to the old extent.
- */
-static void
-move_sync(void *arg, dmu_tx_t *tx)
-{
-	move_arg_t *ma = arg;
-	spa_t *spa = dmu_tx_pool(tx)->dp_spa;
-	uint64_t txg = dmu_tx_get_txg(tx);
-
-	for (int i = 0; i < ma->ma_n; i++) {
-		move_t *mv = &ma->ma_moves[i];
-		zio_alloc_list_t zal;
-		blkptr_t wbp;
-
-		memset(&wbp, 0, sizeof (wbp));
-		BP_SET_LSIZE(&wbp, mv->mv_psize);
-		BP_SET_PSIZE(&wbp, mv->mv_psize);
-		BP_SET_COMPRESS(&wbp, ZIO_COMPRESS_OFF);
-		BP_SET_CHECKSUM(&wbp, ZIO_CHECKSUM_OFF);
-		BP_SET_TYPE(&wbp, DMU_OT_PLAIN_FILE_CONTENTS);
-		BP_SET_LEVEL(&wbp, 0);
-		BP_SET_BYTEORDER(&wbp, ZFS_HOST_BYTEORDER);
-
-		if (ma->ma_far != 0) {
-			/* Place N deliberately, away from every old extent. */
-			vdev_t *tvd = spa->spa_root_vdev->vdev_child[0];
-			uint64_t asize = vdev_psize_to_asize_txg(tvd,
-			    mv->mv_psize, txg);
-
-			DVA_SET_VDEV(&wbp.blk_dva[0], 0);
-			DVA_SET_OFFSET(&wbp.blk_dva[0], ma->ma_far);
-			DVA_SET_ASIZE(&wbp.blk_dva[0], asize);
-			BP_SET_BIRTH(&wbp, txg, txg);
-			VERIFY0(metaslab_claim(spa, &wbp, txg));
-			ma->ma_far += asize;
-		} else {
-			metaslab_trace_init(&zal);
-			VERIFY0(metaslab_alloc(spa, spa_normal_class(spa),
-			    mv->mv_psize, &wbp, 1, txg, NULL, 0, &zal, 0,
-			    FTAG));
-			metaslab_trace_fini(&zal);
-			BP_SET_BIRTH(&wbp, txg, txg);
-		}
-
-		VERIFY0(zio_wait(zio_rewrite(NULL, spa, txg, &wbp,
-		    mv->mv_data, mv->mv_psize, NULL, NULL,
-		    ZIO_PRIORITY_SYNC_WRITE, ZIO_FLAG_CANFAIL, NULL)));
-
-		mv->mv_new_offset = DVA_GET_OFFSET(&wbp.blk_dva[0]);
-		mv->mv_new_birth = txg;
-		mv->mv_new_asize = DVA_GET_ASIZE(&wbp.blk_dva[0]);
-		VERIFY0(vdev_raidz_redirect_add(0,
-		    DVA_GET_OFFSET(&mv->mv_bp.blk_dva[0]),
-		    BP_GET_PHYSICAL_BIRTH(&mv->mv_bp), mv->mv_new_offset,
-		    mv->mv_new_birth, mv->mv_new_asize));
-		old_extent_policy(spa, mv, ma->ma_policy);
-	}
-}
-
 static void
 run_moves(spa_t *spa, move_t *moves, int n, policy_t policy, uint64_t far)
 {
-	move_arg_t ma = { moves, n, policy, far };
+	static const raidz_redirect_keep_t keep[] = {
+		RAIDZ_REDIRECT_KEEP_ALL, RAIDZ_REDIRECT_KEEP_FIRST,
+		RAIDZ_REDIRECT_KEEP_NONE
+	};
+	vdev_t *tvd = spa->spa_root_vdev->vdev_child[0];
+	raidz_redirect_move_t *rdm = calloc(n, sizeof (*rdm));
 
-	VERIFY0(dsl_sync_task(POOL, NULL, move_sync, &ma, 0,
-	    ZFS_SPACE_CHECK_NONE));
+	for (int i = 0; i < n; i++) {
+		rdm[i].rdm_bp = &moves[i].mv_bp;
+		rdm[i].rdm_zb = &moves[i].mv_zb;
+		rdm[i].rdm_psize = moves[i].mv_psize;
+		rdm[i].rdm_data = moves[i].mv_data;
+		if (far != 0) {
+			/* The move's txg is in the last epoch. */
+			rdm[i].rdm_place = far;
+			far += vdev_psize_to_asize_txg(tvd, moves[i].mv_psize,
+			    UINT64_MAX);
+		}
+	}
+	VERIFY0(vdev_raidz_redirect_move(spa, 0, rdm, n, keep[policy],
+	    B_FALSE));
+	for (int i = 0; i < n; i++) {
+		move_t *mv = &moves[i];
+
+		VERIFY0(rdm[i].rdm_error);
+		mv->mv_new_offset = rdm[i].rdm_ent.rde_new_offset;
+		mv->mv_new_birth = rdm[i].rdm_ent.rde_new_birth;
+		mv->mv_new_asize = rdm[i].rdm_ent.rde_new_asize;
+		mv->mv_old_asize = rdm[i].rdm_old_asize;
+		mv->mv_kept = rdm[i].rdm_ent.rde_old_reserved;
+	}
+	free(rdm);
 	txg_wait_synced(spa_get_dsl(spa), 0);
 }
 
 /* Name a plain (not gang) block to move and read its raw bytes. */
 static void
-move_prepare(spa_t *spa, move_t *mv, const char *name, const blkptr_t *bp)
+move_prepare(spa_t *spa, move_t *mv, const char *name, const blkptr_t *bp,
+    objset_t *os, uint64_t obj)
 {
 	memset(mv, 0, sizeof (*mv));
 	VERIFY(!BP_IS_GANG(bp));
 	mv->mv_name = name;
 	mv->mv_bp = *bp;
+	SET_BOOKMARK(&mv->mv_zb, dmu_objset_id(os), obj, 0, 0);
 	mv->mv_psize = BP_GET_PSIZE(bp);
 	mv->mv_data = read_raw(spa, bp, mv->mv_psize);
 }
@@ -823,6 +761,8 @@ run_classic(void)
 	for (int i = 0; i < NMOVED; i++) {
 		moves[nmoves].mv_name = names[i];
 		moves[nmoves].mv_bp = object_bp(os, obj[i]);
+		SET_BOOKMARK(&moves[nmoves].mv_zb, dmu_objset_id(os), obj[i],
+		    0, 0);
 		nmoves++;
 	}
 	ctl_bp = object_bp(os, obj[CTL]);
@@ -871,6 +811,7 @@ run_classic(void)
 			VERIFY(!BP_IS_GANG(cbp));
 			mv->mv_name = "gang-G child";
 			mv->mv_bp = *cbp;
+			mv->mv_zb = g->mv_zb;
 			mv->mv_psize = BP_GET_PSIZE(cbp);
 			mv->mv_data = read_raw(spa, cbp, mv->mv_psize);
 			nmoves++;
@@ -1234,7 +1175,7 @@ run_brt(policy_t policy, boolean_t alone)
 	(void) printf("INFO X is run block %d; K, run block %d, is %s\n", x, k,
 	    alone ? "not cloned" : "cloned");
 	xbp = object_bp(os, a);
-	move_prepare(spa, &mv, "X", &xbp);
+	move_prepare(spa, &mv, "X", &xbp, os, a);
 	bbp = object_bp(os, b);
 	dmu_objset_disown(os, B_TRUE, FTAG);
 	o = DVA_GET_OFFSET(&mv.mv_bp.blk_dva[0]);
@@ -1355,7 +1296,7 @@ run_scan(policy_t policy, boolean_t fix)
 		xobj[npairs] = robj[i];
 		xseed[npairs] = 100 + i;
 		yseed[npairs] = 200 + i;
-		move_prepare(spa, &moves[npairs], "X", &rbp[i]);
+		move_prepare(spa, &moves[npairs], "X", &rbp[i], os, robj[i]);
 		npairs++;
 	}
 	dmu_objset_disown(os, B_TRUE, FTAG);

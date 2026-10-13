@@ -6048,6 +6048,11 @@ metaslab_claim_dva(spa_t *spa, const dva_t *dva, uint64_t birth, uint64_t txg)
 	if (DVA_GET_GANG(dva))
 		size = vdev_gang_header_asize(vd, birth);
 
+	/* SPIKE: zdb claims a moved block where it now lies. */
+	int error;
+	if (vdev_raidz_redirect_claim(vd, offset, size, birth, txg, &error))
+		return (error);
+
 	return (metaslab_claim_impl(vd, offset, size, txg));
 }
 
