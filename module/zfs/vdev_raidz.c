@@ -4208,6 +4208,15 @@ vdev_raidz_need_resilver(vdev_t *vd, const dva_t *dva, size_t psize,
 	uint64_t s = ((psize - 1) >> ashift) + 1;
 	/* The first column for this stripe. */
 	uint64_t f = b % dcols;
+	/*
+	 * The block is laid out in rows of the logical width it was born
+	 * with, each with nparity parity columns, over consecutive
+	 * children.  A block born before an expansion can need several
+	 * rows where a block of the vdev's width needs one.
+	 */
+	uint64_t ncols = s + nparity *
+	    howmany(s, vdev_raidz_get_logical_width(vdrz, phys_birth) -
+	    nparity);
 
 	/* Unreachable by sequential resilver. */
 	ASSERT3U(phys_birth, !=, TXG_UNKNOWN);
@@ -4215,10 +4224,10 @@ vdev_raidz_need_resilver(vdev_t *vd, const dva_t *dva, size_t psize,
 	if (!vdev_dtl_contains(vd, DTL_PARTIAL, phys_birth, 1))
 		return (B_FALSE);
 
-	if (s + nparity >= dcols)
+	if (ncols >= dcols)
 		return (B_TRUE);
 
-	for (uint64_t c = 0; c < s + nparity; c++) {
+	for (uint64_t c = 0; c < ncols; c++) {
 		uint64_t devidx = (f + c) % dcols;
 		vdev_t *cvd = vd->vdev_child[devidx];
 
