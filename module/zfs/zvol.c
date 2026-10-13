@@ -368,6 +368,20 @@ zvol_set_volsize(const char *name, uint64_t volsize)
 	    (error = zvol_check_volsize(volsize, doi->doi_data_block_size)))
 		goto out;
 
+	/*
+	 * A rewrite of the volume holds it long without owning it: do not
+	 * free blocks under it.
+	 */
+	uint64_t cursize;
+	if ((error = zap_lookup(os, ZVOL_ZAP_OBJ, "size", 8, 1,
+	    &cursize)) != 0)
+		goto out;
+	if (volsize < cursize &&
+	    dsl_dataset_long_held_by_others(dmu_objset_ds(os), FTAG)) {
+		error = SET_ERROR(EBUSY);
+		goto out;
+	}
+
 	error = zvol_update_volsize(volsize, os);
 	if (error == 0 && zv != NULL) {
 		zv->zv_volsize = volsize;
@@ -402,32 +416,89 @@ out:
 #define	ZVOL_REWRITE_CHUNK	(4ULL << 20)
 
 /*
- * Find the zvol_state_t that has an objset open, whatever its name.  Like
- * zvol_find_by_name(), return it with zv_suspend_lock taken as reader and
- * zv_state_lock, or NULL.
+ * Find the zvol_state_t of the volume of os, named name, and return it in
+ * *zvp with zv_suspend_lock taken as reader, or NULL if it has none.  Writes
+ * to the volume must not escape the range lock: a write that lands on a block
+ * being marked for rewrite could be taken for the rewrite.  The zvol_state_t
+ * of a renamed volume only gets its new name later, from the zvol taskq, so
+ * while the dataset is owned, which an open volume is, look for the one that
+ * has it open.  Return EAGAIN if none has yet, as while its device is being
+ * created, and EBUSY if it is being removed while open.  All is decided under
+ * zvol_state_lock, without which a zvol_state_t being removed may be freed.
  */
-static zvol_state_t *
-zvol_find_by_objset(objset_t *os)
+static int
+zvol_rewrite_find(objset_t *os, const char *name, boolean_t owned,
+    zvol_state_t **zvp)
 {
-	zvol_state_t *zv;
+	uint64_t hash = zvol_name_hash(name);
+	struct hlist_node *p;
+	zvol_state_t *zv = NULL;
+	zvol_state_t *it;
+	int error = 0;
 
+	*zvp = NULL;
 	rw_enter(&zvol_state_lock, RW_READER);
-	for (zv = list_head(&zvol_state_list); zv != NULL;
-	    zv = list_next(&zvol_state_list, zv)) {
-		mutex_enter(&zv->zv_state_lock);
-		if (zv->zv_objset == os) {
-			if (!rw_tryenter(&zv->zv_suspend_lock, RW_READER)) {
-				mutex_exit(&zv->zv_state_lock);
-				rw_enter(&zv->zv_suspend_lock, RW_READER);
-				mutex_enter(&zv->zv_state_lock);
-			}
-			rw_exit(&zvol_state_lock);
-			return (zv);
+	hlist_for_each(p, ZVOL_HT_HEAD(hash)) {
+		it = hlist_entry(p, zvol_state_t, zv_hlink);
+		mutex_enter(&it->zv_state_lock);
+		if (it->zv_hash == hash && strcmp(it->zv_name, name) == 0 &&
+		    (it->zv_objset == os || (it->zv_objset == NULL &&
+		    !owned))) {
+			zv = it;
+			break;
 		}
-		mutex_exit(&zv->zv_state_lock);
+		mutex_exit(&it->zv_state_lock);
 	}
+	if (zv == NULL && owned) {
+		for (it = list_head(&zvol_state_list); it != NULL;
+		    it = list_next(&zvol_state_list, it)) {
+			mutex_enter(&it->zv_state_lock);
+			if (it->zv_objset == os) {
+				zv = it;
+				break;
+			}
+			mutex_exit(&it->zv_state_lock);
+		}
+		if (zv == NULL)
+			error = SET_ERROR(EAGAIN);
+	}
+
+	/*
+	 * Once a zvol_state_t is being removed, nothing opens it anymore, so
+	 * nothing writes through it unless it is still open.
+	 */
+	if (zv != NULL && (zv->zv_flags & ZVOL_REMOVING)) {
+		if (zv->zv_objset != NULL)
+			error = SET_ERROR(EBUSY);
+		mutex_exit(&zv->zv_state_lock);
+		zv = NULL;
+	}
+	if (zv != NULL && !rw_tryenter(&zv->zv_suspend_lock, RW_READER)) {
+		mutex_exit(&zv->zv_state_lock);
+		rw_enter(&zv->zv_suspend_lock, RW_READER);
+		mutex_enter(&zv->zv_state_lock);
+		/*
+		 * Meanwhile it may have started being removed or, if it was
+		 * suspended, have changed objsets.
+		 */
+		if (zv->zv_flags & ZVOL_REMOVING) {
+			if (zv->zv_objset != NULL)
+				error = SET_ERROR(EBUSY);
+		} else if (zv->zv_objset != os && zv->zv_objset != NULL) {
+			error = SET_ERROR(EAGAIN);
+		}
+		if ((zv->zv_flags & ZVOL_REMOVING) || error != 0) {
+			rw_exit(&zv->zv_suspend_lock);
+			mutex_exit(&zv->zv_state_lock);
+			zv = NULL;
+		}
+	}
+	if (zv != NULL)
+		mutex_exit(&zv->zv_state_lock);
 	rw_exit(&zvol_state_lock);
-	return (NULL);
+
+	*zvp = zv;
+	return (error);
 }
 
 /*
@@ -447,51 +518,23 @@ zvol_rewrite_chunk(objset_t *os, dnode_t *dn, uint64_t off, uint64_t len,
 	dmu_tx_t *tx;
 	int error;
 
-	/*
-	 * Writes to the volume must not escape the range lock: a write that
-	 * lands on a block being marked for rewrite could be taken for the
-	 * rewrite.  The zvol_state_t of a renamed volume only gets its new name
-	 * later, from the zvol taskq, so while the dataset is owned, which an
-	 * open volume is, look for the zvol_state_t that has it open.  If none
-	 * has, its device is being created or it is otherwise briefly in use:
-	 * wait for that to end.
-	 */
+	/* Wait while something else briefly owns the volume. */
 	for (;;) {
-		boolean_t owned;
-
 		dsl_pool_config_enter(dmu_objset_pool(os), FTAG);
 		dsl_dataset_name(dmu_objset_ds(os), name);
 		dsl_pool_config_exit(dmu_objset_pool(os), FTAG);
-		owned = dsl_dataset_has_owner(dmu_objset_ds(os));
-
-		zv = zvol_find_by_name(name, RW_READER);
-		if (zv != NULL && zv->zv_objset != os &&
-		    (zv->zv_objset != NULL || owned)) {
-			rw_exit(&zv->zv_suspend_lock);
-			mutex_exit(&zv->zv_state_lock);
-			zv = NULL;
-		}
-		if (zv == NULL && owned) {
-			zv = zvol_find_by_objset(os);
-			if (zv == NULL) {
-				if (issig())
-					return (SET_ERROR(EINTR));
-				delay(MSEC_TO_TICK(10));
-				continue;
-			}
-		}
-		break;
+		error = zvol_rewrite_find(os, name,
+		    dsl_dataset_has_owner(dmu_objset_ds(os)), &zv);
+		if (error != EAGAIN)
+			break;
+		if (issig())
+			return (SET_ERROR(EINTR));
+		delay(MSEC_TO_TICK(10));
 	}
+	if (error != 0)
+		return (error);
 
 	if (zv != NULL) {
-		if (zv->zv_flags & ZVOL_REMOVING) {
-			/* zv may be freed once zv_state_lock is dropped. */
-			rw_exit(&zv->zv_suspend_lock);
-			mutex_exit(&zv->zv_state_lock);
-			return (SET_ERROR(EBUSY));
-		}
-		mutex_exit(&zv->zv_state_lock);
-
 		/*
 		 * Writes lock the extent they write.  The DMU rewrites whole
 		 * blocks, so lock whole blocks.
@@ -686,11 +729,17 @@ zvol_rewrite(const char *name, uint64_t off, uint64_t len, uint64_t flags)
 
 		if (spa_get_failmode(spa) == ZIO_FAILURE_MODE_CONTINUE)
 			wait_flags |= TXG_WAIT_SUSPEND;
-		/* Do not fail for a stop signal, which issig() handles. */
-		do {
+		for (;;) {
 			werror = txg_wait_synced_flags(dmu_objset_pool(os),
 			    last_txg, wait_flags);
-		} while (werror == EINTR && !issig());
+			if (werror != EINTR || issig())
+				break;
+			/*
+			 * No signal to act on: a stop, or a FreeBSD process
+			 * being single-threaded, whose sleeps keep failing.
+			 */
+			delay(MSEC_TO_TICK(10));
+		}
 		if (error == 0 && werror != 0)
 			error = (werror == ESHUTDOWN) ? SET_ERROR(EIO) : werror;
 	}

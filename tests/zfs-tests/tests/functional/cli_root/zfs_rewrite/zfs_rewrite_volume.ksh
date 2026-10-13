@@ -23,16 +23,16 @@
 #	3. Rewrite all of it, then physically: verify the logical birth time
 #	   of the blocks is updated by the former and kept by the latter.
 #	4. Verify -S skips the blocks shared with a snapshot, and only those.
-#	5. Verify that snapshots, file systems, read-only volumes, names that
-#	   do not exist and devices that are not volumes are refused, and why,
-#	   and that encrypted volumes are rewritten, but not physically.
+#	5. Verify that file systems are refused, and that snapshots, read-only
+#	   volumes, names that do not exist and devices that are not volumes
+#	   are refused, and why.  Verify that encrypted volumes are rewritten,
+#	   but not physically.
 #	6. Rewrite a volume that has no device node, and one named by its
 #	   device.
 #	7. Rewrite a sparse volume without compression, and verify its holes
 #	   stay holes.
 #	8. Rewrite the volume repeatedly, also physically, while it is written
-#	   to, and verify that no write is lost, nor left out of an incremental
-#	   stream.
+#	   to, and verify that no write is lost, nor keeps an old birth time.
 #	9. Rewrite a volume that is held open, then roll it back, which fails
 #	   if the rewrite left the volume held.
 
@@ -44,9 +44,9 @@ typeset vol=$TESTPOOL/${TESTVOL}_rewrite
 typeset sparse=$vol-sparse
 typeset dev=$ZVOL_DEVDIR/$vol
 typeset sparsedev=$ZVOL_DEVDIR/$sparse
-typeset copy=$vol-copy
-typeset copydev=$ZVOL_DEVDIR/$copy
 typeset evol=$vol-encrypted
+typeset evoldev=$ZVOL_DEVDIR/$evol
+typeset notavol=$TESTDIR/notavol
 typeset -i blksz=16384
 typeset -i size=32	# MiB
 typeset -i nblocks
@@ -65,9 +65,8 @@ function cleanup
 	[[ -n "$holder" ]] && kill $holder 2>/dev/null
 	wait
 	rm -f $bps $bps1 $snapbps $shadow $pat $pat.0 $pat.1 $pat.2 $pat.3 \
-	    $pat.4
+	    $pat.4 $notavol
 	datasetexists $sparse && destroy_dataset $sparse -R
-	datasetexists $copy && destroy_dataset $copy -R
 	datasetexists $evol && destroy_dataset $evol -R
 	datasetexists $vol && destroy_dataset $vol -R
 }
@@ -233,7 +232,8 @@ log_must zfs destroy $vol@snap
 
 # What can not be rewritten: ENOENT, EROFS and EINVAL tell what refused it.
 log_must rewrite_fails 2 $TESTPOOL/${TESTVOL}_does_not_exist
-log_mustnot zfs rewrite $TESTPOOL/$TESTFS
+# A file system is not a volume, and its name is no path either.
+log_must rewrite_fails 2 $TESTPOOL/$TESTFS
 log_must zfs snapshot $vol@snap
 log_must rewrite_fails 30 $vol@snap
 log_must zfs set snapdev=visible $vol
@@ -245,10 +245,25 @@ log_must zfs set readonly=on $vol
 log_must rewrite_fails 30 $vol
 log_must zfs set readonly=off $vol
 log_must rewrite_fails 22 $ZVOL_DEVDIR/$TESTPOOL
+log_must ln -s /dev/null $notavol
+log_must rewrite_fails 22 $notavol
+
+# An encrypted volume: rewritten, but not physically.
 log_must eval "echo password | zfs create -o encryption=on \
-    -o keyformat=passphrase -o keylocation=prompt -V 8m $evol"
+    -o keyformat=passphrase -o keylocation=prompt -V 8m \
+    -o volblocksize=$blksz $evol"
+block_device_wait $evoldev
+log_must dd if=/dev/urandom of=$evoldev bs=1M count=8 conv=fsync
+log_must sync_pool $TESTPOOL
+typeset evol_hash=$(dev_hash $evoldev)
+log_must [ -n "$evol_hash" ]
+log_must save_blocks $evol $bps1 $((8 * 1048576 / blksz))
 log_mustnot zfs rewrite -P $evol
 log_must zfs rewrite $evol
+log_must save_blocks $evol $bps $((8 * 1048576 / blksz))
+log_must [ "$(same_blocks $bps $bps1)" -eq 0 ]
+log_must logical_births updated $bps1 $bps
+log_must [ "$evol_hash" = "$(dev_hash $evoldev)" ]
 log_must destroy_dataset $evol
 
 # A volume that has no device node, and one that is named by its device.
@@ -284,20 +299,22 @@ log_must destroy_dataset $sparse
 
 # Rewrite again and again while the volume is written to, in rounds, each one
 # leaving a different pattern in every slot, so that a stale slot can not be
-# mistaken for the right one.  Every other round rewrites physically: a write
-# taken for a physical rewrite would keep an old birth time, and be left out of
-# an incremental stream.
+# mistaken for the right one.  Every other round rewrites physically: as every
+# slot is written in every round, every block must then have a newer birth
+# time, which a write taken for the physical rewrite would not have.
 for i in 0 1 2 3 4; do
 	log_must dd if=/dev/urandom of=$pat.$i bs=1M count=1
 done
 log_must dd if=$dev of=$shadow bs=1M
-log_must zfs snapshot $vol@a
-log_must eval "zfs send $vol@a | zfs recv $copy"
 typeset -i round
 for ((round = 0; round < 4; round++)); do
 	typeset opt=""
 
-	((round % 2 == 1)) && opt="-P"
+	if ((round % 2 == 1)); then
+		opt="-P"
+		log_must sync_pool $TESTPOOL
+		log_must save_blocks $vol $bps1 $nblocks
+	fi
 	writer $round &
 	wpid=$!
 	typeset -i tries=0
@@ -312,14 +329,12 @@ for ((round = 0; round < 4; round++)); do
 	typeset shadow_hash=$(xxh128digest $shadow)
 	log_must [ -n "$shadow_hash" ]
 	log_must [ "$shadow_hash" = "$(dev_hash $dev)" ]
+	if [[ -n "$opt" ]]; then
+		log_must sync_pool $TESTPOOL
+		log_must save_blocks $vol $bps $nblocks
+		log_must logical_births updated $bps1 $bps
+	fi
 done
-log_must zfs snapshot $vol@b
-log_must eval "zfs send -i @a $vol@b | zfs recv -F $copy"
-block_device_wait $copydev
-log_must [ "$shadow_hash" = "$(dev_hash $copydev)" ]
-log_must destroy_dataset $copy -R
-log_must zfs destroy $vol@b
-log_must zfs destroy $vol@a
 
 # Rewrite a volume that is held open, then roll it back: that fails if the
 # rewrite left the volume held.

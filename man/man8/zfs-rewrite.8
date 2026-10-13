@@ -125,8 +125,9 @@ Unlike for a file, which only needs write access, rewriting a volume needs the
 same privilege as other pool configuration operations.
 The volume can be in use, and does not need to have a device node:
 it is rewritten in pieces, so that I/O to it waits for one piece at most.
-Until the command is done, the volume can not be destroyed, rolled back or
-received into, and its pool can not be exported.
+Until the command is done, the volume can not be destroyed, rolled back,
+received into, shrunk, or sent itself rather than a snapshot of it, and its
+pool can not be exported.
 Unlike for a file, the command does not return before the rewritten data are
 on stable storage.
 A volume snapshot, a read-only volume, a volume received from a redacted send
