@@ -86,7 +86,7 @@ tests = ['block_cloning_clone_mmap_cached',
     'block_cloning_lwb_buffer_overflow', 'block_cloning_clone_mmap_write',
     'block_cloning_rlimit_fsize', 'block_cloning_large_offset',
     'block_cloning_after_device_removal',
-    'block_cloning_after_trunc']
+    'block_cloning_after_trunc', 'block_cloning_resilver_free']
 tags = ['functional', 'block_cloning']
 
 [tests/functional/bootfs]
@@ -504,6 +504,7 @@ tests = ['zpool_import_001_pos', 'zpool_import_002_pos',
     'import_relax_metadata_damaged',
     'import_rewind_config_changed',
     'import_rewind_device_replaced',
+    'import_rewind_dryrun_no_writes',
     'import_rewind_metadata_damaged',
     'zpool_import_status', 'zpool_import_parallel_pos',
     'zpool_import_parallel_neg', 'zpool_import_parallel_admin']
