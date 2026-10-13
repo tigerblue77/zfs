@@ -3921,7 +3921,7 @@ ztest_vdev_attach_detach(ztest_ds_t *zd, uint64_t id)
 	 * mirror vdev -- in which case, pick a random child. For anyraid vdevs,
 	 * attachment occurs at the parent level.
 	 */
-	while (oldvd->vdev_children != 0 && !anyraid) {
+	while (oldvd->vdev_children != 0 && !vdev_is_anyraid(oldvd)) {
 		oldvd_has_siblings = B_TRUE;
 		ASSERT3U(oldvd->vdev_children, >=, 2);
 		oldvd = oldvd->vdev_child[ztest_random(oldvd->vdev_children)];
