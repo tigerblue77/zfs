@@ -252,6 +252,27 @@ each switch brings back its failure: `nofix` and `nocols` fail `offline`
 and `replace`, `nowiden` fails `offline` only (a replace's window already
 covers every txg), and `nolive` fails `stalebp`.
 
+## Minor fixes: bookmarks, damaged entries, freed entries
+
+The liveness check passed a bookmark at `DMU_SPILL_BLKID` to
+`dbuf_dnode_findbp()`, which finds no block pointer for the spill block of
+a dnode without one and fails `VERIFY3P(bp2, !=, NULL)` in the sync
+thread.  The check now reads the spill block pointer itself, under
+`dn_mtx`, from the dnode as the txg synced it, and refuses the bookmark
+when the dnode has none.
+
+    crash_probe <dir> <ashift> guard <spill|spillblk|xbook>
+
+`spill` names plain-A by its object's absent spill block; `spillblk` gives
+an object a spill block in phase 0 and moves it by its bookmark (it must
+move and read back through its redirect after an import), and names
+plain-A by that bookmark; `xbook` names plain-A by every other shape of
+bookmark that reaches the check (bonus, negative or out-of-range blkid and
+level, an object beyond the dnode count, freed or special, an objset that
+is not a dataset) and then by its right one.  On the previous commit
+`spill` aborts at ashift 12 and 9; `spillblk` and `xbook` pass there too,
+so those shapes needed no change.
+
 Not covered: a checkpoint-aware move or free (the flags are computed, never
 exercised), a frozen pool, the table walk that should replace the widened
 window and its cost on a large pool, a mirror beside the raidz vdev,

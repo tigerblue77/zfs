@@ -6535,8 +6535,8 @@ vdev_raidz_redirect_in_gang(spa_t *spa, const blkptr_t *gbp,
  * moved block.  That the old extent is allocated proves nothing: it may
  * have been freed and given to other blocks since the caller found bp.  A
  * bookmark that names no block of an object (an objset's root block, a
- * bonus buffer) is refused.  A real mover would find its blocks by
- * traversal instead.
+ * bonus buffer, the spill block of a dnode without one) is refused.  A real
+ * mover would find its blocks by traversal instead.
  */
 static boolean_t
 vdev_raidz_redirect_live(spa_t *spa, const zbookmark_phys_t *zb,
@@ -6556,11 +6556,23 @@ vdev_raidz_redirect_live(spa_t *spa, const zbookmark_phys_t *zb,
 		err = dnode_hold(os, zb->zb_object, FTAG, &dn);
 	if (err == 0) {
 		rw_enter(&dn->dn_struct_rwlock, RW_READER);
-		/* dbuf_findbp() asserts what it is not asked for. */
+		/*
+		 * dbuf_findbp() asserts what it is not asked for, and finds
+		 * no block pointer at all for the spill block of a dnode
+		 * that has none: read that one here, as this txg synced it.
+		 */
 		if (zb->zb_level < 0 || zb->zb_level >=
 		    MAX(dn->dn_phys->dn_nlevels, 1) ||
 		    zb->zb_blkid == DMU_BONUS_BLKID) {
 			err = SET_ERROR(ENOENT);
+		} else if (zb->zb_blkid == DMU_SPILL_BLKID) {
+			mutex_enter(&dn->dn_mtx);
+			if (zb->zb_level == 0 && (dn->dn_phys->dn_flags &
+			    DNODE_FLAG_SPILL_BLKPTR))
+				cur = *DN_SPILL_BLKPTR(dn->dn_phys);
+			else
+				err = SET_ERROR(ENOENT);
+			mutex_exit(&dn->dn_mtx);
 		} else {
 			err = dbuf_dnode_findbp(dn, zb->zb_level, zb->zb_blkid,
 			    &cur, NULL, NULL);

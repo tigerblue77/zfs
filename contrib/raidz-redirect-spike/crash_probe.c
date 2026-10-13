@@ -7,6 +7,7 @@
  *
  *   crash_probe <dir> <ashift> move <point> <P1|P2> [split]
  *   crash_probe <dir> <ashift> guard <mos|zil|stale|checkpoint|wrongzb>
+ *   crash_probe <dir> <ashift> guard <spill|spillblk|xbook>
  *   crash_probe <dir> <ashift> free <plain|dedup|clone|gang|snap> <P1|P2>
  *   crash_probe <dir> <ashift> free plain P3 [nocheck]
  *   crash_probe <dir> <ashift> fcrash <point> <P1|P2> [late]
@@ -51,7 +52,14 @@
  * a block whose old extent was freed before the move (under P2).
  * 'wrongzb' moves gang-G's children with plain-A's bookmark, and plain-A's
  * block with gang-G's and at level -1: the move must refuse each one
- * (ESTALE).
+ * (ESTALE).  'spill' names plain-A by its object's spill block, which it
+ * does not have; 'xbook' by bookmarks of every other shape that names no
+ * block of it (bonus, out-of-range or negative blkid and level, an object
+ * beyond the dnode count or freed, an objset that is not a dataset), then
+ * by its right bookmark; 'spillblk' moves the spill block of spill-S, an
+ * object phase 0 gives one, by its bookmark and plain-A by the same.  Each
+ * wrong bookmark must be refused (ESTALE), each right one must move, and
+ * the spill block must read back through its redirect after an import.
  *
  * free: phase 0 writes, at parity 1, a block that only snapshot s1 holds, a
  * control, then a plain object, a clone pair (one block, one BRT reference),
@@ -125,6 +133,7 @@
 #include <sys/dmu_objset.h>
 #include <sys/dnode.h>
 #include <sys/brt.h>
+#include <sys/dbuf.h>
 #include <sys/dsl_destroy.h>
 #include <sys/dsl_pool.h>
 #include <sys/dsl_prop.h>
@@ -157,6 +166,7 @@
 #define	MAXMOVES	64
 #define	MAXOBJS		96
 #define	POLL_TXGS	40
+#define	SPILL_SIZE	(16ULL << 10)
 
 extern uint64_t metaslab_force_ganging;
 extern uint_t metaslab_force_ganging_pct;
@@ -224,6 +234,8 @@ typedef struct shared {
 	int			sh_replaced;	/* resilver: replaced + 1 */
 	blkptr_t		sh_stale_bp;	/* stalebp: E's freed bp */
 	zbookmark_phys_t	sh_stale_zb;
+	boolean_t		sh_with_spill;	/* setup adds spill-S */
+	uint64_t		sh_obj_s;
 } shared_t;
 
 static shared_t *sh;
@@ -398,6 +410,88 @@ object_bp(objset_t *os, uint64_t obj)
 	return (bp);
 }
 
+/*
+ * A new object with no data and a spill block of SPILL_SIZE bytes of
+ * pattern <seed>.  As the SA layer does, it is made with the old maximum
+ * bonus buffer, so that it has one block pointer, and the bonus buffer is
+ * then shortened to leave room for the spill block pointer.
+ */
+static uint64_t
+put_spill_object(objset_t *os, uint64_t seed)
+{
+	dmu_buf_t *bonus, *db;
+	dnode_t *dn;
+	dmu_tx_t *tx;
+	uint64_t obj;
+
+	tx = dmu_tx_create(os);
+	dmu_tx_hold_bonus(tx, DMU_NEW_OBJECT);
+	VERIFY0(dmu_tx_assign(tx, DMU_TX_WAIT));
+	obj = dmu_object_alloc(os, DMU_OT_PLAIN_FILE_CONTENTS,
+	    SPA_MINBLOCKSIZE, DMU_OT_PLAIN_OTHER, DN_OLD_MAX_BONUSLEN, tx);
+	dmu_tx_commit(tx);
+
+	tx = dmu_tx_create(os);
+	dmu_tx_hold_bonus(tx, obj);
+	dmu_tx_hold_spill(tx, obj);
+	VERIFY0(dmu_tx_assign(tx, DMU_TX_WAIT));
+	VERIFY0(dmu_bonus_hold(os, obj, FTAG, &bonus));
+	VERIFY0(dmu_set_bonus(bonus, DN_OLD_MAX_BONUSLEN - sizeof (blkptr_t),
+	    tx));
+	dmu_buf_rele(bonus, FTAG);
+	VERIFY0(dnode_hold(os, obj, FTAG, &dn));
+	VERIFY0(dmu_spill_hold_by_dnode(dn, DB_RF_MUST_SUCCEED, FTAG, &db));
+	VERIFY0(dbuf_spill_set_blksz(db, SPILL_SIZE, tx));
+	dmu_buf_will_dirty(db, tx);
+	VERIFY3U(db->db_size, ==, SPILL_SIZE);
+	fill_pattern(db->db_data, SPILL_SIZE, seed);
+	dmu_buf_rele(db, FTAG);
+	dnode_rele(dn, FTAG);
+	dmu_tx_commit(tx);
+	return (obj);
+}
+
+/* The spill block pointer of an object, as the last synced txg has it. */
+static blkptr_t
+spill_bp(objset_t *os, uint64_t obj)
+{
+	dnode_t *dn;
+	blkptr_t bp;
+
+	VERIFY0(dnode_hold(os, obj, FTAG, &dn));
+	mutex_enter(&dn->dn_mtx);
+	VERIFY(dn->dn_phys->dn_flags & DNODE_FLAG_SPILL_BLKPTR);
+	bp = *DN_SPILL_BLKPTR(dn->dn_phys);
+	mutex_exit(&dn->dn_mtx);
+	dnode_rele(dn, FTAG);
+	return (bp);
+}
+
+/* Read an object's spill block; 0 and a match, or the error. */
+static int
+read_spill(uint64_t obj, uint64_t seed, boolean_t *match)
+{
+	uint64_t *want = malloc(SPILL_SIZE);
+	dmu_buf_t *bonus, *db;
+	objset_t *os;
+	int err;
+
+	*match = B_FALSE;
+	fill_pattern(want, SPILL_SIZE, seed);
+	VERIFY0(dmu_objset_hold(POOL, FTAG, &os));
+	VERIFY0(dmu_bonus_hold(os, obj, FTAG, &bonus));
+	err = dmu_spill_hold_existing(bonus, FTAG, &db);
+	if (err == 0) {
+		*match = (db->db_size == SPILL_SIZE &&
+		    memcmp(db->db_data, want, SPILL_SIZE) == 0);
+		dmu_buf_rele(db, FTAG);
+	}
+	dmu_buf_rele(bonus, FTAG);
+	dmu_objset_rele(os, FTAG);
+	free(want);
+	return (err);
+}
+
 /* Read an object of the root dataset; 0 and a match, or the error. */
 static int
 read_object(uint64_t obj, uint64_t seed, boolean_t *match)
@@ -496,6 +590,8 @@ child_setup(boolean_t extra)
 	sh->sh_obj[OC] = put_object(os, obj_seeds[OC]);
 	if (extra)
 		sh->sh_obj_e = put_object(os, 99);
+	if (sh->sh_with_spill)
+		sh->sh_obj_s = put_spill_object(os, 98);
 	txg_wait_synced(spa_get_dsl(spa), 0);
 	dmu_objset_disown(os, B_TRUE, FTAG);
 
@@ -1106,6 +1202,75 @@ guard_fn(void *arg)
 		SET_BOOKMARK(&zba, dmu_objset_id(os), sh->sh_obj[OA], -1, 0);
 		add_move(spa, "plain-A at level -1", &sh->sh_bp[sh->sh_nmoves -
 		    1], &zba, sh->sh_rdm[sh->sh_nmoves - 1].rdm_psize);
+	} else if (strcmp(which, "spill") == 0) {
+		/* plain-A named by its object's spill block, which it lacks */
+		blkptr_t bp = object_bp(os, sh->sh_obj[OA]);
+		zbookmark_phys_t zb;
+
+		SET_BOOKMARK(&zb, dmu_objset_id(os), sh->sh_obj[OA], 0,
+		    DMU_SPILL_BLKID);
+		add_move(spa, "plain-A at the spill blkid", &bp, &zb,
+		    BP_GET_PSIZE(&bp));
+	} else if (strcmp(which, "spillblk") == 0) {
+		/* spill-S's spill block by its bookmark, plain-A by S's. */
+		blkptr_t sbp = spill_bp(os, sh->sh_obj_s);
+		blkptr_t bp = object_bp(os, sh->sh_obj[OA]);
+		zbookmark_phys_t zb;
+
+		SET_BOOKMARK(&zb, dmu_objset_id(os), sh->sh_obj_s, 0,
+		    DMU_SPILL_BLKID);
+		add_move(spa, "spill-S's spill block", &sbp, &zb,
+		    BP_GET_PSIZE(&sbp));
+		add_move(spa, "plain-A at S's spill blkid", &bp, &zb,
+		    BP_GET_PSIZE(&bp));
+	} else if (strcmp(which, "xbook") == 0) {
+		/*
+		 * plain-A named by bookmarks that name no block of it: every
+		 * shape that reaches the liveness check, then the right one.
+		 */
+		blkptr_t bp = object_bp(os, sh->sh_obj[OA]);
+		uint64_t id = dmu_objset_id(os);
+		uint64_t a = sh->sh_obj[OA];
+		const struct {
+			const char	*xb_name;
+			uint64_t	xb_objset;
+			uint64_t	xb_object;
+			int64_t		xb_level;
+			uint64_t	xb_blkid;
+		} xb[] = {
+			{ "blkid BONUS", id, a, 0, DMU_BONUS_BLKID },
+			{ "blkid -3", id, a, 0, -3ULL },
+			{ "blkid 2^40", id, a, 0, 1ULL << 40 },
+			{ "blkid 1, a hole", id, a, 0, 1 },
+			{ "level -1", id, a, -1, 0 },
+			{ "level 1 = nlevels", id, a, 1, 0 },
+			{ "level 50", id, a, 50, 0 },
+			{ "level 2^32", id, a, 1LL << 32, 0 },
+			{ "level INT64_MIN", id, a, INT64_MIN, 0 },
+			{ "object 2^40", id, 1ULL << 40, 0, 0 },
+			{ "object 2^50", id, 1ULL << 50, 0, 0 },
+			{ "object -10", id, -10ULL, 0, 0 },
+			{ "object USERUSED", id, DMU_USERUSED_OBJECT, 0, 0 },
+			{ "freed object E", id, sh->sh_obj_e, 0, 0 },
+			{ "objset 1", DMU_POOL_DIRECTORY_OBJECT, a, 0, 0 },
+			{ "objset 2^40", 1ULL << 40, a, 0, 0 },
+			{ "objset -1", -1ULL, a, 0, 0 },
+			{ "right bookmark", id, a, 0, 0 },
+		};
+
+		/* E is freed, in a txg that has synced. */
+		VERIFY0(dmu_free_long_object(os, sh->sh_obj_e));
+		txg_wait_synced(spa_get_dsl(spa), 0);
+		for (int i = 0; i < sizeof (xb) / sizeof (xb[0]); i++) {
+			zbookmark_phys_t zb;
+			char name[32];
+
+			SET_BOOKMARK(&zb, xb[i].xb_objset, xb[i].xb_object,
+			    xb[i].xb_level, xb[i].xb_blkid);
+			(void) snprintf(name, sizeof (name), "plain-A, %s",
+			    xb[i].xb_name);
+			add_move(spa, name, &bp, &zb, BP_GET_PSIZE(&bp));
+		}
 	} else {
 		blkptr_t bp = object_bp(os, sh->sh_obj_e);
 		zbookmark_phys_t zb;
@@ -1128,7 +1293,30 @@ guard_fn(void *arg)
 		    "N=%llx\n", sh->sh_name[i], err, sh->sh_rdm[i].rdm_error,
 		    (u_longlong_t)sh->sh_rdm[i].rdm_ent.rde_new_offset);
 	}
-	if (strcmp(which, "wrongzb") == 0) {
+	if (strcmp(which, "spill") == 0 || strcmp(which, "spillblk") == 0 ||
+	    strcmp(which, "xbook") == 0) {
+		/* The right bookmark: first for spillblk, last for xbook. */
+		int good = strcmp(which, "spillblk") == 0 ? 0 :
+		    strcmp(which, "xbook") == 0 ? sh->sh_nmoves - 1 : -1;
+		int refused = 0;
+
+		for (int i = 0; i < sh->sh_nmoves; i++) {
+			if (i != good && sh->sh_rdm[i].rdm_error == ESTALE &&
+			    sh->sh_rdm[i].rdm_ent.rde_new_asize == 0)
+				refused++;
+		}
+		check(err == 0 && refused == sh->sh_nmoves - (good >= 0),
+		    "the move refuses every bookmark that names no block of "
+		    "the block it is given (%d of %d with ESTALE)", refused,
+		    sh->sh_nmoves - (good >= 0));
+		if (good >= 0) {
+			check(sh->sh_rdm[good].rdm_error == 0 &&
+			    sh->sh_rdm[good].rdm_ent.rde_new_asize != 0,
+			    "%s, named by its right bookmark, moves (block "
+			    "error %d)", sh->sh_name[good],
+			    sh->sh_rdm[good].rdm_error);
+		}
+	} else if (strcmp(which, "wrongzb") == 0) {
 		int refused = 0;
 
 		for (int i = 0; i < sh->sh_nmoves; i++) {
@@ -1153,9 +1341,36 @@ guard_fn(void *arg)
 		    sh->sh_name[0], err);
 	}
 	if (vdev_raidz_redirect_count != NULL) {
-		check(vdev_raidz_redirect_count(spa, 0) == 0,
-		    "no redirect was added (%llu)",
-		    (u_longlong_t)vdev_raidz_redirect_count(spa, 0));
+		uint64_t want = (strcmp(which, "spillblk") == 0 ||
+		    strcmp(which, "xbook") == 0) ? 1 : 0;
+
+		check(vdev_raidz_redirect_count(spa, 0) == want,
+		    "%llu redirect(s) added (expected %llu)",
+		    (u_longlong_t)vdev_raidz_redirect_count(spa, 0),
+		    (u_longlong_t)want);
+	}
+	if (strcmp(which, "spillblk") == 0) {
+		boolean_t match;
+		uint64_t hits;
+
+		/* Read spill-S's spill block from a fresh import. */
+		export_pool(spa);
+		spa = import_pool();
+		hits = vdev_raidz_redirect_hits();
+		err = read_spill(sh->sh_obj_s, 98, &match);
+		hits = vdev_raidz_redirect_hits() - hits;
+		check(err == 0 && match && hits == 1, "spill-S's spill block "
+		    "reads back bit-exact through its redirect after an export "
+		    "and import (err=%d match=%d hits=%llu)", err, match,
+		    (u_longlong_t)hits);
+	}
+	if (strcmp(which, "spill") == 0 || strcmp(which, "spillblk") == 0 ||
+	    strcmp(which, "xbook") == 0) {
+		boolean_t match;
+		int rerr = read_object(sh->sh_obj[OA], obj_seeds[OA], &match);
+
+		check(rerr == 0 && match, "plain-A reads back (err=%d "
+		    "match=%d)", rerr, match);
 	}
 	export_pool(spa);
 	kernel_fini();
@@ -1169,6 +1384,7 @@ run_guard(const char *which)
 
 	(void) printf("INFO guard %s, ashift %llu\n", which,
 	    (u_longlong_t)ashift);
+	sh->sh_with_spill = (strcmp(which, "spillblk") == 0);
 	VERIFY0(phase("0 setup", setup_fn, (void *)1));
 	st = phase("guard", guard_fn, (void *)which);
 	check(st == 0, "the guard child passes (status %d)", st);
@@ -3010,7 +3226,7 @@ usage(void)
 	(void) fprintf(stderr, "usage: crash_probe <dir> <ashift> move "
 	    "<TABLE_DIRTY|MS_SYNCED|PRE_UB|POST_UB> <P1|P2> [split]\n"
 	    "       crash_probe <dir> <ashift> guard "
-	    "<mos|zil|stale|checkpoint|wrongzb>\n"
+	    "<mos|zil|stale|checkpoint|wrongzb|spill|spillblk|xbook>\n"
 	    "       crash_probe <dir> <ashift> free "
 	    "<plain|dedup|clone|gang|snap> <P1|P2> | free plain P3 "
 	    "[nocheck]\n"
@@ -3053,7 +3269,10 @@ main(int argc, char **argv)
 	    (strcmp(argv[4], "mos") == 0 || strcmp(argv[4], "zil") == 0 ||
 	    strcmp(argv[4], "stale") == 0 ||
 	    strcmp(argv[4], "checkpoint") == 0 ||
-	    strcmp(argv[4], "wrongzb") == 0)) {
+	    strcmp(argv[4], "wrongzb") == 0 ||
+	    strcmp(argv[4], "spill") == 0 ||
+	    strcmp(argv[4], "spillblk") == 0 ||
+	    strcmp(argv[4], "xbook") == 0)) {
 		st = run_guard(argv[4]);
 	} else if (strcmp(mode, "free") == 0 && argc >= 6 &&
 	    (strcmp(argv[4], "plain") == 0 || strcmp(argv[4], "dedup") == 0 ||
