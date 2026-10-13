@@ -344,13 +344,17 @@ vdev_default_min_attach_size(vdev_t *vd)
 	return (vdev_get_min_asize(vd));
 }
 
+/*
+ * Attaching to a top-level vdev adds a device to it, and its own ops say how
+ * small that device may be.  A device attached to any other vdev replaces it
+ * or mirrors it, so it must be as large as the parent needs that vdev to be.
+ */
 uint64_t
 vdev_get_min_attach_size(vdev_t *vd)
 {
-	vdev_t *pvd = vd->vdev_parent;
 	if (vd == vd->vdev_top)
-		pvd = vd;
-	return (pvd->vdev_ops->vdev_op_min_attach_size(pvd));
+		return (vd->vdev_ops->vdev_op_min_attach_size(vd));
+	return (vdev_get_min_asize(vd));
 }
 
 uint64_t
