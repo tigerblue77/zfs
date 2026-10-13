@@ -2379,6 +2379,11 @@ vdev_open(vdev_t *vd)
 	 * Make sure the allocatable size hasn't shrunk too much.
 	 */
 	if (asize < vd->vdev_min_asize) {
+		zfs_dbgmsg("DBGAA vdev_open %s id %llu: asize %llu < min_asize "
+		    "%llu (vdev_asize %llu)", vd->vdev_ops->vdev_op_type,
+		    (u_longlong_t)vd->vdev_id, (u_longlong_t)asize,
+		    (u_longlong_t)vd->vdev_min_asize,
+		    (u_longlong_t)vd->vdev_asize);
 		vdev_set_state(vd, B_TRUE, VDEV_STATE_CANT_OPEN,
 		    VDEV_AUX_BAD_LABEL);
 		return (SET_ERROR(EINVAL));

@@ -2010,6 +2010,8 @@ vdev_extra_sync_list(vdev_t **svd, int svdcount, int flags, uint64_t txg,
 
 	(void) zio_wait(zio);
 
+	zfs_dbgmsg("DBGAA extra_sync txg %llu: good_writes %llu",
+	    (u_longlong_t)txg, (u_longlong_t)good_writes);
 	return (good_writes >= 1 ? 0 : EIO);
 }
 
@@ -2233,9 +2235,15 @@ retry:
 		    txg, spa->spa_mmp.mmp_delay);
 
 		if (!changed && list_is_empty(&spa->spa_config_dirty_list) &&
-		    !spa_multihost(spa))
+		    !spa_multihost(spa)) {
+			zfs_dbgmsg("DBGAA config_sync %s txg %llu: unchanged",
+			    spa_name(spa), (u_longlong_t)txg);
 			return (0);
+		}
 	}
+	zfs_dbgmsg("DBGAA config_sync %s txg %llu: svdcount %d ub_txg %llu",
+	    spa_name(spa), (u_longlong_t)txg, svdcount,
+	    (u_longlong_t)ub->ub_txg);
 
 	if (txg > spa_freeze_txg(spa))
 		return (0);
@@ -2308,6 +2316,8 @@ retry:
 		goto retry;
 	}
 
+	zfs_dbgmsg("DBGAA config_sync %s txg %llu: uberblocks written",
+	    spa_name(spa), (u_longlong_t)txg);
 	if (spa_multihost(spa))
 		mmp_update_uberblock(spa, ub);
 

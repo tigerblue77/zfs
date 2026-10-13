@@ -670,6 +670,9 @@ vdev_anyraid_pick_best_mapping(vdev_t *cvd, uint64_t *out_txg,
 			    (u_longlong_t)spa_load_max_txg(spa));
 			continue;
 		}
+		zfs_dbgmsg("DBGAA header %d on %s accepted: txg %llu min %llu",
+		    i, cvd->vdev_path, (u_longlong_t)written_txg,
+		    (u_longlong_t)min_txg);
 		if (written_txg > best_txg) {
 			best_txg = written_txg;
 			best_mapping = i;
@@ -682,6 +685,8 @@ vdev_anyraid_pick_best_mapping(vdev_t *cvd, uint64_t *out_txg,
 		}
 	}
 
+	zfs_dbgmsg("DBGAA pick_best on %s: best %d txg %llu error %d",
+	    cvd->vdev_path, best_mapping, (u_longlong_t)best_txg, error);
 	if (best_txg != 0) {
 		*out_txg = best_txg;
 		*out_mapping = best_mapping;
@@ -1207,8 +1212,11 @@ vdev_anyraid_open(vdev_t *vd, uint64_t *asize, uint64_t *max_asize,
 			vdev_t *cvd = vd->vdev_child[c];
 			if (cvd->vdev_open_error != 0)
 				continue;
-			if ((lasterror = anyraid_open_existing(vd, c,
-			    &child_capacities)) == 0)
+			lasterror = anyraid_open_existing(vd, c,
+			    &child_capacities);
+			zfs_dbgmsg("DBGAA open_existing vdev %llu child %d: %d",
+			    (u_longlong_t)vd->vdev_id, (int)c, lasterror);
+			if (lasterror == 0)
 				break;
 		}
 		if (lasterror)
@@ -1247,6 +1255,19 @@ vdev_anyraid_open(vdev_t *vd, uint64_t *asize, uint64_t *max_asize,
 		avl_add(&va->vd_children_tree, va->vd_children[c]);
 	}
 	*asize = calculate_asize(vd, num_tiles);
+	for (int c = 0; c < vd->vdev_children; c++) {
+		zfs_dbgmsg("DBGAA open vdev %llu reopening %d child %d err %d "
+		    "tiles %llu cap %u alloc %u", (u_longlong_t)vd->vdev_id,
+		    (int)vd->vdev_reopening, c,
+		    vd->vdev_child[c]->vdev_open_error,
+		    (u_longlong_t)num_tiles[c],
+		    (uint_t)va->vd_children[c]->van_capacity,
+		    (uint_t)anyraid_freelist_alloc(
+		    &va->vd_children[c]->van_freelist));
+	}
+	zfs_dbgmsg("DBGAA open vdev %llu asize %llu mapped %llu",
+	    (u_longlong_t)vd->vdev_id, (u_longlong_t)*asize,
+	    (u_longlong_t)avl_numnodes(&va->vd_tile_map));
 
 	for (int c = 0; c < vd->vdev_children; c++) {
 		vdev_t *cvd = vd->vdev_child[c];
@@ -2088,7 +2109,10 @@ vdev_anyraid_write_map_sync(vdev_t *vd, zio_t *pio, uint64_t txg,
 	map_write_issue(zio, vd, base_offset, written, buf_offset, map_abd,
 	    &cksums[written], flags);
 
-	if (zio_wait(zio)) {
+	int dbg_err;
+	if ((dbg_err = zio_wait(zio)) != 0) {
+		zfs_dbgmsg("DBGAA map data write failed on %s txg %llu: %d",
+		    vd->vdev_path, (u_longlong_t)txg, dbg_err);
 		abd_return_buf(header_abd, header_buf, header_size);
 		abd_free(header_abd);
 		return;
