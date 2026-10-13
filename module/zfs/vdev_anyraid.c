@@ -799,7 +799,8 @@ anyraid_open_existing(vdev_t *vd, uint64_t child, int32_t **child_capacities)
 		    VART_TILE);
 		vart->vart_task = var->var_task;
 		list_insert_head(&var->var_list, vart);
-		(*child_capacities)[va->vd_contracting_leaf] = 0;
+		if (va->vd_contracting_leaf != -1)
+			(*child_capacities)[va->vd_contracting_leaf] = 0;
 		spa->spa_anyraid_relocate = var;
 	}
 
