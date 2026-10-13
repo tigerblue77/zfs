@@ -10238,6 +10238,9 @@ main(int argc, char **argv)
 		spike_redirect_claim_enable = 0;
 	if (spike_ignore != NULL && strcmp(spike_ignore, "claims") != 0)
 		spike_zdb_redirect_mos = B_FALSE;
+	/* SPIKE: test-only, accept the entries of P3, as the tests do. */
+	if (getenv("SPIKE_ZDB_KEEP_NONE") != NULL)
+		spike_redirect_keep_none = 1;
 
 	/*
 	 * Set up signal handlers, so if we crash due to bad on-disk data we

@@ -189,6 +189,10 @@ extern spike_redirect_stat_t spike_redirect_stats[SPIKE_REDIRECT_TXGS]
 /* Weak: the resilver and liveness fixes, absent from the previous step's. */
 extern int spike_resilver_redirects __attribute__((weak));
 extern int spike_redirect_move_live __attribute__((weak));
+/* Weak: the entry checks, absent from the previous step's. */
+extern int spike_redirect_keep_none __attribute__((weak));
+extern uint64_t vdev_raidz_redirect_damaged(spa_t *, uint64_t)
+    __attribute__((weak));
 /* Weak: the previous step's in-memory table, absent from this one. */
 extern int vdev_raidz_redirect_add(uint64_t, uint64_t, uint64_t, uint64_t,
     uint64_t, uint64_t) __attribute__((weak));
@@ -236,6 +240,7 @@ typedef struct shared {
 	zbookmark_phys_t	sh_stale_zb;
 	boolean_t		sh_with_spill;	/* setup adds spill-S */
 	uint64_t		sh_obj_s;
+	uint64_t		sh_epoch_txg;	/* start of parity 2 */
 } shared_t;
 
 static shared_t *sh;
@@ -339,14 +344,17 @@ create_pool(void)
 		fnvlist_free(child[c]);
 }
 
-/* Import the pool found in dir, read-only if libzpool was set up so. */
-static spa_t *
-import_pool(void)
+/*
+ * Import the pool found in dir, read-only if libzpool was set up so, and
+ * open it; the import's error if it fails.
+ */
+static int
+try_import_pool(spa_t **spap)
 {
 	importargs_t ia;
 	char *paths[1];
 	nvlist_t *config = NULL;
-	spa_t *spa;
+	int err;
 	libpc_handle_t lpch = {
 		.lpc_lib_handle = NULL,
 		.lpc_ops = &libzpool_config_ops,
@@ -359,9 +367,19 @@ import_pool(void)
 	ia.paths = 1;
 	ia.can_be_active = B_TRUE;
 	VERIFY0(zpool_find_config(&lpch, POOL, &config, &ia));
-	VERIFY0(spa_import((char *)POOL, config, NULL, ZFS_IMPORT_NORMAL));
+	err = spa_import((char *)POOL, config, NULL, ZFS_IMPORT_NORMAL);
 	fnvlist_free(config);
-	VERIFY0(spa_open(POOL, &spa, FTAG));
+	if (err == 0)
+		VERIFY0(spa_open(POOL, spap, FTAG));
+	return (err);
+}
+
+static spa_t *
+import_pool(void)
+{
+	spa_t *spa;
+
+	VERIFY0(try_import_pool(&spa));
 	return (spa);
 }
 
@@ -567,6 +585,7 @@ add_parity2_epoch(spa_t *spa)
 	VERIFY0(dsl_sync_task(POOL, epoch_check, epoch_sync, &ea, 0,
 	    ZFS_SPACE_CHECK_NONE));
 	txg_wait_synced(spa_get_dsl(spa), ea.ea_table[3]);
+	sh->sh_epoch_txg = ea.ea_table[3];
 	(void) printf("INFO parity 2 from txg %llu\n",
 	    (u_longlong_t)ea.ea_table[3]);
 }
@@ -1081,8 +1100,10 @@ run_zdb(void)
 	int leaked = 0, claims = 0, mos = 0, noleaks = 0, status;
 	FILE *fp;
 
-	(void) snprintf(cmd, sizeof (cmd), "%s -bcc -d -Y -e -p %s %s 2>&1",
-	    zdb, dir, POOL);
+	/* zdb must accept P3's entries where this process does. */
+	(void) snprintf(cmd, sizeof (cmd), "%s%s -bcc -d -Y -e -p %s %s 2>&1",
+	    &spike_redirect_keep_none != NULL && spike_redirect_keep_none ?
+	    "SPIKE_ZDB_KEEP_NONE=1 " : "", zdb, dir, POOL);
 	if (getenv("SPIKE_ZDB_IGNORE_REDIRECTS") != NULL) {
 		(void) printf("INFO SPIKE_ZDB_IGNORE_REDIRECTS=%s\n",
 		    getenv("SPIKE_ZDB_IGNORE_REDIRECTS"));
@@ -1954,18 +1975,18 @@ held_allocated(spa_t *spa, int i)
 	return (n);
 }
 
+/* 0 if move i has its key in the table, whatever its value's size. */
 static int
 zap_entry(spa_t *spa, int i)
 {
 	vdev_raidz_t *vdrz = spa->spa_root_vdev->vdev_child[0]->vdev_tsd;
 	uint64_t key[2] = { DVA_GET_OFFSET(&sh->sh_bp[i].blk_dva[0]),
 	    BP_GET_PHYSICAL_BIRTH(&sh->sh_bp[i]) };
-	uint64_t val[4];
 
 	if (vdrz->vd_redirect_obj == 0)
 		return (ENOENT);
-	return (zap_lookup_uint64(spa_meta_objset(spa), vdrz->vd_redirect_obj,
-	    key, 2, sizeof (uint64_t), 4, val));
+	return (zap_length_uint64(spa_meta_objset(spa), vdrz->vd_redirect_obj,
+	    key, 2, NULL, NULL));
 }
 
 static boolean_t
@@ -2521,6 +2542,9 @@ run_free(const char *which, policy_t policy, boolean_t nocheck)
 	(void) printf("INFO free %s, policy %s, ashift %llu%s\n", which,
 	    policy_names[policy], (u_longlong_t)ashift,
 	    nocheck ? ", nocheck" : "");
+	/* P3 is kept only to show it failing: allow it where it is gated. */
+	if (policy == P3 && &spike_redirect_keep_none != NULL)
+		spike_redirect_keep_none = 1;
 	VERIFY0(phase("0 setup", setup_free_fn, NULL));
 	if (policy != P3) {
 		st = phase("1 move", child_move_fobjs, &policy);
@@ -3198,6 +3222,355 @@ run_stalebp(policy_t policy, boolean_t same, boolean_t nolive)
 	return (0);
 }
 
+/*
+ * The corrupt mode: plain-A's entry, rewritten as a damaged table could
+ * hold it.  Each kind but oasize and nsmall breaks one rule that every
+ * entry the move writes keeps.  Those two keep them all, but oasize claims
+ * a larger old extent than plain-A's DVA has, which only the free and the
+ * claim can see, and nsmall a new extent of one sector, too small for
+ * plain-A, which only its I/O can see.
+ */
+static const char *const corrupt_kinds[] = {
+	"misalign", "nasize", "nout", "nspan", "nzero", "noverlap",
+	"reserved0", "rmisalign", "overreserve", "birth", "epoch", "future",
+	"koffset", "kout", "ksize", "vsize", "oasize", "nsmall", NULL
+};
+
+/* The kinds the load cannot see, which their use must refuse. */
+static boolean_t
+corrupt_at_use(const char *how)
+{
+	return (strcmp(how, "oasize") == 0 || strcmp(how, "nsmall") == 0);
+}
+
+static boolean_t
+corrupt_kind_ok(const char *how)
+{
+	for (int k = 0; corrupt_kinds[k] != NULL; k++) {
+		if (strcmp(how, corrupt_kinds[k]) == 0)
+			return (B_TRUE);
+	}
+	return (B_FALSE);
+}
+
+static void
+corrupt_sync(void *arg, dmu_tx_t *tx)
+{
+	const char *how = arg;
+	spa_t *spa = dmu_tx_pool(tx)->dp_spa;
+	vdev_t *vd = spa->spa_root_vdev->vdev_child[0];
+	vdev_raidz_t *vdrz = vd->vdev_tsd;
+	objset_t *mos = spa_meta_objset(spa);
+	int i = find_move("plain-A");
+	uint64_t sector = 1ULL << vd->vdev_ashift;
+	uint64_t oasize = sh->sh_rdm[i].rdm_old_asize;
+	uint64_t key[3] = { DVA_GET_OFFSET(&sh->sh_bp[i].blk_dva[0]),
+	    BP_GET_PHYSICAL_BIRTH(&sh->sh_bp[i]), 0 };
+	uint64_t nkey[3];
+	uint64_t val[6] = { 0 };
+	uint64_t isz, nint, nlen = 2, nval;
+
+	VERIFY0(zap_length_uint64(mos, vdrz->vd_redirect_obj, key, 2, &isz,
+	    &nint));
+	VERIFY(isz == 8 && nint >= 4 && nint <= 5);
+	VERIFY0(zap_lookup_uint64(mos, vdrz->vd_redirect_obj, key, 2, 8, nint,
+	    val));
+	(void) printf("INFO plain-A's entry {%llx, %llu}: %llu values: N=%llx "
+	    "t2=%llu new asize %llu kept %llu%s%llu\n", (u_longlong_t)key[0],
+	    (u_longlong_t)key[1], (u_longlong_t)nint, (u_longlong_t)val[0],
+	    (u_longlong_t)val[1], (u_longlong_t)val[2], (u_longlong_t)val[3],
+	    nint >= 5 ? " old asize " : " (old asize, from the move) ",
+	    (u_longlong_t)(nint >= 5 ? val[4] : oasize));
+	memcpy(nkey, key, sizeof (nkey));
+	nval = nint;
+	if (strcmp(how, "misalign") == 0) {
+		val[0] += sector / 2;
+	} else if (strcmp(how, "nasize") == 0) {
+		val[2] += sector / 2;
+	} else if (strcmp(how, "nout") == 0) {
+		val[0] = P2ALIGN_TYPED(vd->vdev_asize, sector, uint64_t);
+	} else if (strcmp(how, "nspan") == 0) {
+		uint64_t m = val[0] >> vd->vdev_ms_shift;
+
+		if (m + 1 >= vd->vdev_ms_count)
+			m--;
+		val[0] = ((m + 1) << vd->vdev_ms_shift) - sector;
+	} else if (strcmp(how, "nzero") == 0) {
+		val[2] = 0;
+	} else if (strcmp(how, "noverlap") == 0) {
+		val[0] = key[0];
+	} else if (strcmp(how, "reserved0") == 0) {
+		val[3] = 0;
+	} else if (strcmp(how, "rmisalign") == 0) {
+		val[3] += sector / 2;
+	} else if (strcmp(how, "overreserve") == 0) {
+		val[3] = oasize + 65536;
+	} else if (strcmp(how, "birth") == 0) {
+		val[1] = key[1];
+	} else if (strcmp(how, "epoch") == 0) {
+		val[1] = sh->sh_epoch_txg - 1;
+		VERIFY3U(val[1], >, key[1]);
+	} else if (strcmp(how, "future") == 0) {
+		val[1] = dmu_tx_get_txg(tx) + 1000;
+	} else if (strcmp(how, "koffset") == 0) {
+		nkey[0] += sector / 2;
+	} else if (strcmp(how, "kout") == 0) {
+		nkey[0] = P2ALIGN_TYPED(vd->vdev_asize, sector, uint64_t) +
+		    sector;
+	} else if (strcmp(how, "ksize") == 0) {
+		nlen = 3;
+		nkey[2] = 7;
+	} else if (strcmp(how, "vsize") == 0) {
+		nval = 3;
+	} else if (strcmp(how, "nsmall") == 0) {
+		val[2] = sector;
+	} else {
+		/* oasize: kept and old asize, consistent, but too large. */
+		val[3] = oasize + 65536;
+		if (nint >= 5)
+			val[4] = oasize + 65536;
+	}
+	if (nlen != 2 || nval != nint || nkey[0] != key[0]) {
+		VERIFY0(zap_remove_uint64(mos, vdrz->vd_redirect_obj, key, 2,
+		    tx));
+		VERIFY0(zap_add_uint64(mos, vdrz->vd_redirect_obj, nkey, nlen,
+		    8, nval, val, tx));
+	} else {
+		VERIFY0(zap_update_uint64(mos, vdrz->vd_redirect_obj, key, 2,
+		    8, nval, val, tx));
+	}
+	(void) printf("INFO rewrote it (%s): key {%llx, %llu}%s, %llu values: "
+	    "N=%llx t2=%llu new asize %llu kept %llu old asize %llu\n", how,
+	    (u_longlong_t)nkey[0], (u_longlong_t)nkey[1],
+	    nlen == 3 ? " and a third key integer" : "", (u_longlong_t)nval,
+	    (u_longlong_t)val[0], (u_longlong_t)val[1], (u_longlong_t)val[2],
+	    (u_longlong_t)val[3], (u_longlong_t)val[4]);
+}
+
+/* Phase 2: rewrite plain-A's entry on disk. */
+static int
+child_corrupt_write(void *arg)
+{
+	spa_t *spa;
+
+	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+	spa = import_pool();
+	VERIFY0(dsl_sync_task(POOL, NULL, corrupt_sync, arg, 0,
+	    ZFS_SPACE_CHECK_NONE));
+	export_pool(spa);
+	kernel_fini();
+	return (0);
+}
+
+/*
+ * Phase 3: a read-write import.  It must refuse a damaged entry; if it does
+ * not, what freeing plain-A then does is shown.  An oasize entry passes the
+ * load: reading plain-A must go to N, and freeing it must leak what the
+ * entry holds, with nothing freed twice.
+ */
+static int
+child_corrupt_rw(void *arg)
+{
+	const char *how = arg;
+	boolean_t use = corrupt_at_use(how);
+	boolean_t small = (strcmp(how, "nsmall") == 0);
+	int a = find_fobj("plain-A");
+	int i = find_move("plain-A");
+	const raidz_redirect_ent_t *e = &sh->sh_rdm[i].rdm_ent;
+	uint64_t o = DVA_GET_OFFSET(&sh->sh_bp[i].blk_dva[0]);
+	uint64_t vs, trees, hits, t;
+	boolean_t owners[MAXOBJS] = { 0 };
+	boolean_t match;
+	spa_t *spa;
+	int err;
+
+	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+	err = try_import_pool(&spa);
+	if (!use) {
+		check(err == EROFS, "the read-write import refuses the damaged "
+		    "entry with EROFS (error %d)", err);
+	} else {
+		check(err == 0, "the read-write import accepts the entry, "
+		    "sound on its own (error %d)", err);
+	}
+	if (err != 0) {
+		kernel_fini();
+		return (failures == 0 ? 0 : 1);
+	}
+	(void) printf("INFO imported read-write with %llu redirects\n",
+	    (u_longlong_t)vdev_raidz_redirect_count(spa, 0));
+	hits = vdev_raidz_redirect_hits();
+	err = read_fobj(a, &match);
+	hits = vdev_raidz_redirect_hits() - hits;
+	(void) printf("INFO plain-A read: err=%d match=%d hits=%llu\n", err,
+	    match, (u_longlong_t)hits);
+	if (small) {
+		check(err == EIO && hits >= 1, "plain-A's read through its "
+		    "too small redirect fails with EIO (err=%d hits=%llu)", err,
+		    (u_longlong_t)hits);
+	} else if (use) {
+		check(err == 0 && match && hits == 1, "plain-A reads back "
+		    "through its redirect (err=%d match=%d hits=%llu)", err,
+		    match, (u_longlong_t)hits);
+	}
+	(void) printf("INFO freeing plain-A\n");
+	t = free_fobjs(spa, &a, 1);
+	owners[a] = B_TRUE;
+	t = wait_conversions(spa, owners, t);
+	txg_wait_synced(spa_get_dsl(spa), t + TXG_DEFER_SIZE + 1);
+	(void) printf("INFO the free synced\n");
+	if (small) {
+		uint64_t sector = 1ULL << ashift;
+
+		check(!mem_entry(spa, i) && zap_entry(spa, i) == ENOENT,
+		    "the entry is gone from memory and the table");
+		/* The entry's one sector of N is freed, N's rest leaks. */
+		check(live_allocated(spa, e->rde_new_offset + sector,
+		    e->rde_new_asize - sector) == e->rde_new_asize - sector,
+		    "the free leaked the rest of N [%llx, +%llu)",
+		    (u_longlong_t)(e->rde_new_offset + sector),
+		    (u_longlong_t)(e->rde_new_asize - sector));
+		quiet_alloc(spa, &vs, &trees);
+		check(vs == trees, "vs_alloc matches the trees (%llu, %llu)",
+		    (u_longlong_t)vs, (u_longlong_t)trees);
+	} else if (use) {
+		check(!mem_entry(spa, i) && zap_entry(spa, i) == ENOENT,
+		    "the entry is gone from memory and the table");
+		/* What the move kept and wrote, before the damage. */
+		check(live_allocated(spa, o, e->rde_old_reserved) ==
+		    e->rde_old_reserved && live_allocated(spa,
+		    e->rde_new_offset, e->rde_new_asize) == e->rde_new_asize,
+		    "the free leaked the kept [%llx, +%llu) and N [%llx, "
+		    "+%llu) rather than free what the entry claims",
+		    (u_longlong_t)o, (u_longlong_t)e->rde_old_reserved,
+		    (u_longlong_t)e->rde_new_offset,
+		    (u_longlong_t)e->rde_new_asize);
+		quiet_alloc(spa, &vs, &trees);
+		check(vs == trees, "vs_alloc matches the trees (%llu, %llu)",
+		    (u_longlong_t)vs, (u_longlong_t)trees);
+	}
+	export_pool(spa);
+	kernel_fini();
+	return (failures == 0 ? 0 : 1);
+}
+
+/*
+ * Phase 4: a read-only import.  It must load every sound entry and leave the
+ * damaged one out; every other object must read back, and plain-A, read at
+ * its old extent, must read back under P1 and never return wrong bytes.
+ */
+static int
+child_corrupt_ro(void *arg)
+{
+	const char *how = arg;
+	boolean_t use = corrupt_at_use(how);
+	int a = find_fobj("plain-A");
+	uint64_t want = sh->sh_nmoves - 1;
+	boolean_t match;
+	spa_t *spa;
+	int err;
+
+	spa_mode_readable_spacemaps = B_TRUE;
+	kernel_init(SPA_MODE_READ);
+	err = try_import_pool(&spa);
+	check(err == 0, "a read-only import succeeds (error %d)", err);
+	if (err != 0) {
+		kernel_fini();
+		return (1);
+	}
+	check(vdev_raidz_redirect_count(spa, 0) == want, "it loads the %llu "
+	    "sound entries (%llu)", (u_longlong_t)want,
+	    (u_longlong_t)vdev_raidz_redirect_count(spa, 0));
+	if (vdev_raidz_redirect_damaged != NULL) {
+		uint64_t d = vdev_raidz_redirect_damaged(spa, 0);
+
+		check(d == (use ? 0 : 1), "it counts %llu damaged entries "
+		    "(expected %d)", (u_longlong_t)d, use ? 0 : 1);
+	} else {
+		(void) printf("INFO this libzpool counts no damaged entry\n");
+	}
+	if (!use) {
+		err = read_fobj(a, &match);
+		(void) printf("INFO plain-A, read at its old extent: err=%d "
+		    "match=%d\n", err, match);
+		check(sh->sh_rdm[find_move("plain-A")].rdm_ent.
+		    rde_old_reserved == sh->sh_rdm[find_move("plain-A")].
+		    rdm_old_asize ? (err == 0 && match) : (err != 0 || match),
+		    "plain-A reads back%s (err=%d match=%d)",
+		    sh->sh_rdm[find_move("plain-A")].rdm_ent.rde_old_reserved ==
+		    sh->sh_rdm[find_move("plain-A")].rdm_old_asize ? "" :
+		    " or fails, never with wrong bytes", err, match);
+	}
+	sh->sh_fobj[a].fo_gone = B_TRUE;
+	check_others_read();
+	spa_close(spa, FTAG);
+	kernel_fini();
+	return (failures == 0 ? 0 : 1);
+}
+
+/*
+ * zdb on the damaged pool must run to its end and name the damaged entry;
+ * after the free of an oasize entry, it must report what that free leaked.
+ */
+static void
+run_zdb_damaged(const char *how)
+{
+	const char *zdb = getenv("ZDB") != NULL ? getenv("ZDB") : "zdb";
+	char cmd[PATH_BUF * 2];
+	char line[4096];
+	int named = 0, leaked = 0, status;
+	FILE *fp;
+
+	(void) snprintf(cmd, sizeof (cmd), "%s -bcc -d -Y -e -p %s %s 2>&1",
+	    zdb, dir, POOL);
+	(void) printf("INFO running %s\n", cmd);
+	(void) fflush(stdout);
+	fp = popen(cmd, "r");
+	VERIFY3P(fp, !=, NULL);
+	while (fgets(line, sizeof (line), fp) != NULL) {
+		char *p = line;
+		char *cr;
+
+		while ((cr = strchr(p, '\r')) != NULL)
+			p = cr + 1;
+		(void) printf("zdb| %s%s", p, strchr(p, '\n') ? "" : "\n");
+		if (strstr(p, "damaged redirect entry") != NULL)
+			named++;
+		if (strstr(p, "leaked space") != NULL)
+			leaked++;
+	}
+	status = pclose(fp);
+	check(WIFEXITED(status) && WEXITSTATUS(status) < 128, "zdb runs to "
+	    "its end (status %d)", WIFEXITED(status) ? WEXITSTATUS(status) :
+	    128 + WTERMSIG(status));
+	if (!corrupt_at_use(how)) {
+		check(named >= 1, "zdb names the damaged entry (%d lines)",
+		    named);
+	} else {
+		check(leaked >= 1, "zdb reports the space the free leaked (%d "
+		    "lines)", leaked);
+	}
+}
+
+static int
+run_corrupt(const char *how, policy_t policy)
+{
+	int st;
+
+	(void) printf("INFO corrupt %s, policy %s, ashift %llu\n", how,
+	    policy_names[policy], (u_longlong_t)ashift);
+	VERIFY0(phase("0 setup", setup_free_fn, NULL));
+	st = phase("1 move", child_move_fobjs, &policy);
+	check(st == 0, "the move phase passes (status %d)", st);
+	VERIFY0(phase("2 damage the entry", child_corrupt_write, (void *)how));
+	st = phase("3 read-write import", child_corrupt_rw, (void *)how);
+	check(st == 0, "the read-write phase passes (status %d)", st);
+	st = phase("4 read-only import", child_corrupt_ro, (void *)how);
+	check(st == 0, "the read-only phase passes (status %d)", st);
+	run_zdb_damaged(how);
+	return (0);
+}
+
 static int
 parse_point(const char *s)
 {
@@ -3236,7 +3609,8 @@ usage(void)
 	    "       crash_probe <dir> <ashift> resilver <P1|P2> "
 	    "<offline|offlinescrub|control|replace> [nofix|nowiden|nocols]\n"
 	    "       crash_probe <dir> <ashift> stalebp <P1|P2> [same] "
-	    "[nolive]\n");
+	    "[nolive]\n"
+	    "       crash_probe <dir> <ashift> corrupt <kind> [P1|P2]\n");
 	return (2);
 }
 
@@ -3315,6 +3689,12 @@ main(int argc, char **argv)
 		else if (opt != NULL)
 			return (usage());
 		st = run_resilver(policy, how, fix);
+	} else if (strcmp(mode, "corrupt") == 0 && argc <= 6 &&
+	    corrupt_kind_ok(argv[4])) {
+		policy = argc == 6 ? parse_policy(argv[5], B_FALSE) : P2;
+		if (policy == -1)
+			return (usage());
+		st = run_corrupt(argv[4], policy);
 	} else if (strcmp(mode, "stalebp") == 0) {
 		boolean_t same = B_FALSE, nolive = B_FALSE;
 

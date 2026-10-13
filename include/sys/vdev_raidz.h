@@ -177,6 +177,8 @@ typedef struct vdev_raidz {
 	krwlock_t vd_redirect_lock;
 	uint64_t vd_redirect_obj;
 	list_t vd_redirect_pending;
+	/* Damaged entries a read-only import left out of vd_redirects. */
+	uint64_t vd_redirect_damaged;
 } vdev_raidz_t;
 
 extern int vdev_raidz_attach_check(vdev_t *);
@@ -202,11 +204,13 @@ extern int vdev_raidz_load(vdev_t *);
  * entry says that the block whose DVA starts at rde_offset, born in txg
  * rde_birth, is now stored at rde_new_offset with the layout of txg
  * rde_new_birth, in rde_new_asize bytes, and that [rde_offset, rde_offset +
- * rde_old_reserved) of its old extent is still allocated.  The table is a
- * ZAP in the MOS, keyed by {rde_offset, rde_birth}, named in the vdev's
- * top-level ZAP.
+ * rde_old_reserved) of its old extent, rde_old_asize bytes long, is still
+ * allocated.  The table is a ZAP in the MOS, keyed by {rde_offset,
+ * rde_birth}, named in the vdev's top-level ZAP, whose values are the other
+ * four fields in this order.
  */
 #define	VDEV_TOP_ZAP_RAIDZ_REDIRECTS	"org.openzfs:spike_raidz_redirects"
+#define	RAIDZ_REDIRECT_VALUES		5
 
 typedef struct raidz_redirect_ent {
 	uint64_t rde_offset;
@@ -215,6 +219,7 @@ typedef struct raidz_redirect_ent {
 	uint64_t rde_new_birth;
 	uint64_t rde_new_asize;
 	uint64_t rde_old_reserved;
+	uint64_t rde_old_asize;
 } raidz_redirect_ent_t;
 
 /* What a move keeps allocated of the old extent [O, O + asize). */
@@ -248,6 +253,9 @@ extern boolean_t vdev_raidz_redirect_get(vdev_t *, uint64_t, uint64_t,
 extern boolean_t vdev_raidz_redirect_lookup(spa_t *, uint64_t, uint64_t,
     uint64_t);
 extern uint64_t vdev_raidz_redirect_count(spa_t *, uint64_t);
+extern uint64_t vdev_raidz_redirect_damaged(spa_t *, uint64_t);
+extern boolean_t vdev_raidz_redirect_fits(vdev_t *,
+    const raidz_redirect_ent_t *, uint64_t);
 extern uint64_t vdev_raidz_redirect_hits(void);
 extern boolean_t vdev_raidz_redirect_claim(vdev_t *, uint64_t, uint64_t,
     uint64_t, uint64_t, int *);
@@ -268,6 +276,7 @@ extern int spike_crash_arm_free;
 #define	SPIKE_RESILVER_NEW_EXTENT	2	/* need_resilver at N, t2 */
 extern int spike_resilver_redirects;
 extern int spike_redirect_move_live;
+extern int spike_redirect_keep_none;
 
 /*
  * SPIKE: test-only, what the frees of moved blocks did in a recent txg: how

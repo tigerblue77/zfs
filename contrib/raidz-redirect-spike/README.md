@@ -273,6 +273,59 @@ is not a dataset) and then by its right one.  On the previous commit
 `spill` aborts at ashift 12 and 9; `spillblk` and `xbook` pass there too,
 so those shapes needed no change.
 
+The table load checked only that N was inside the vdev, non-empty and
+born after the block.  Each entry must now be one the move could have
+written: its key two uint64s and its value five; the old extent [O, O +
+old asize) and N aligned extents of one metaslab, N clear of the old
+extent; old_reserved non-zero, aligned and no larger than the old asize;
+the new birth after the birth, no later than the pool's last txg and in a
+later parity epoch.  The value gains the old asize for that: nothing else
+in the entry bounds old_reserved.  The move refuses a block of the
+current epoch, and P3, which keeps nothing, unless the test-only
+`spike_redirect_keep_none` is set, as the probes do for P3 (zdb, through
+`SPIKE_ZDB_KEEP_NONE`).
+
+A damaged entry fails a read-write import with EROFS: ignored, its block
+would be freed whole at an old extent part of which may now be another
+block's, and read and repaired there; used, it would send the same I/O and
+frees elsewhere.  Failing every import, or dropping the table, would make
+every moved block unreadable.  A read-only import, which allocates, frees
+and repairs nothing, loads the sound entries and leaves the damaged ones
+out, with a warning naming each: their blocks are read at their old
+extents, under the checksum.  zdb, which imports read-only, prints the
+warnings and reports what follows (a claim error on the block when P2 freed
+its tail, N leaked).  What the load cannot see is whether an entry fits the
+block that uses it: the free and zdb's claim compare the entry's old asize
+with the DVA's, the free then leaks what the entry holds with a warning and
+the claim fails; a read whose N is too small for the block fails with EIO
+instead of a VERIFY.
+
+    crash_probe <dir> <ashift> corrupt <kind> [P1|P2]
+
+After the free modes' setup and move (P2 unless P1 is given), plain-A's
+entry is rewritten on disk: `misalign`, `nasize`, `nout`, `nspan`, `nzero`
+(N misaligned, of misaligned size, outside the vdev, across two
+metaslabs, empty), `noverlap` (N at O), `reserved0`, `rmisalign`,
+`overreserve` (old_reserved zero, misaligned, old asize + 64K), `birth`,
+`epoch`, `future` (new birth equal to the birth, before the parity-2
+epoch, 1000 txgs ahead), `koffset`, `kout`, `ksize` (key offset
+misaligned, beyond the vdev, a third key integer), `vsize` (three values);
+`oasize` (old_reserved and old asize both 64K too large) and `nsmall` (N
+one sector) pass the load.  A read-write import must refuse each of the
+others with EROFS, a read-only one must load the sound entries, read every
+other object and never return wrong bytes for plain-A, and zdb must run to
+its end and name the entry.  For `oasize` and `nsmall`, the read-write
+import reads plain-A (through N, or EIO) and frees it, which must leak and
+not free twice.  On the previous commit, with the probe built against its
+headers, at ashift 12 and 9 under P2: `nout`, `nzero`, `birth` and `vsize`
+fail every import of the pool, read-only ones and zdb's included
+(EINVAL); every other kind is accepted by a read-write import, and
+freeing plain-A then aborts, except for `epoch`, `future` and `reserved0`
+(and `nsmall` aborts on the read); zdb aborts for `misalign`, `nasize`,
+`rmisalign`, `koffset`, `kout`, `ksize` and `nsmall`.  `ksize` also showed
+that the old load took a key it could not look up for the end of the
+table: it loaded 2 of 8 entries at ashift 12, 2 of 7 at ashift 9.
+
 Not covered: a checkpoint-aware move or free (the flags are computed, never
 exercised), a frozen pool, the table walk that should replace the widened
 window and its cost on a large pool, a mirror beside the raidz vdev,

@@ -5885,7 +5885,19 @@ metaslab_free_dva(spa_t *spa, const dva_t *dva, uint64_t birth,
 	raidz_redirect_ent_t rde;
 	if (spa_syncing_txg(spa) <= spa_freeze_txg(spa) &&
 	    vdev_raidz_redirect_remove(vd, offset, birth, &rde)) {
-		ASSERT3U(rde.rde_old_reserved, <=, size);
+		/*
+		 * An entry that does not fit its block says nothing sure
+		 * about what the block holds: leak it all rather than free
+		 * someone else's space.
+		 */
+		if (!vdev_raidz_redirect_fits(vd, &rde, size)) {
+			cmn_err(CE_WARN, "%s: raidz vdev %llu: the redirect "
+			    "of the block at %llx, born in %llu, does not fit "
+			    "it: leaking what it holds", spa_name(spa),
+			    (u_longlong_t)vd->vdev_id, (u_longlong_t)offset,
+			    (u_longlong_t)birth);
+			return;
+		}
 		if (rde.rde_old_reserved != 0) {
 			metaslab_free_impl(vd, offset, rde.rde_old_reserved,
 			    metaslab_free_is_checkpointed(spa, birth));
@@ -6336,6 +6348,9 @@ metaslab_check_free(spa_t *spa, const blkptr_t *bp)
 		if (spike_redirect_check_enable &&
 		    vdev_raidz_redirect_get(vd, offset,
 		    BP_GET_PHYSICAL_BIRTH(bp), &rde)) {
+			/* The free leaks what an unfit entry holds. */
+			if (!vdev_raidz_redirect_fits(vd, &rde, size))
+				continue;
 			if (rde.rde_old_reserved != 0) {
 				metaslab_check_free_impl(vd, offset,
 				    rde.rde_old_reserved);

@@ -99,6 +99,8 @@ extern uint64_t metaslab_force_ganging;
 extern uint_t metaslab_force_ganging_pct;
 /* Weak: absent from a libzpool without the spike's scan routing. */
 extern int spike_scan_redirect_unsorted __attribute__((weak));
+/* Weak: absent from a libzpool that does not gate P3 behind it. */
+extern int spike_redirect_keep_none __attribute__((weak));
 
 /* What the move does with the old extent of a moved block. */
 typedef enum policy { P1, P2, P3 } policy_t;
@@ -1431,6 +1433,9 @@ main(int argc, char **argv)
 	}
 	dir = argv[1];
 	ashift = strtoull(argv[2], NULL, 10);
+	/* P3 is kept only to show it failing: allow it where it is gated. */
+	if (policy == P3 && &spike_redirect_keep_none != NULL)
+		spike_redirect_keep_none = 1;
 
 	if (argc == 3)
 		run_classic();

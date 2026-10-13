@@ -2498,6 +2498,41 @@ vdev_raidz_redirect_count(spa_t *spa, uint64_t vdev)
 	return (n);
 }
 
+/* SPIKE: the damaged entries a read-only import of vdev <vdev> ignored. */
+uint64_t
+vdev_raidz_redirect_damaged(spa_t *spa, uint64_t vdev)
+{
+	uint64_t n = 0;
+	vdev_t *vd;
+
+	spa_config_enter(spa, SCL_VDEV, FTAG, RW_READER);
+	vd = vdev_lookup_top(spa, vdev);
+	if (vd != NULL && vd->vdev_ops == &vdev_raidz_ops)
+		n = ((vdev_raidz_t *)vd->vdev_tsd)->vd_redirect_damaged;
+	spa_config_exit(spa, SCL_VDEV, FTAG);
+	return (n);
+}
+
+/*
+ * SPIKE: B_TRUE if the entry of a moved block fits the DVA it was found by,
+ * whose allocated size is <size> (a gang header's for a gang DVA).  The
+ * load cannot see the block, so an entry it accepted may still claim
+ * another extent than its block had; the free and the claim of such a
+ * block refuse it rather than free or claim what the entry says.
+ */
+boolean_t
+vdev_raidz_redirect_fits(vdev_t *vd, const raidz_redirect_ent_t *ent,
+    uint64_t size)
+{
+	if (ent->rde_old_asize == size)
+		return (B_TRUE);
+	zfs_dbgmsg("spike: raidz vdev %llu: redirect {%llx, %llu} says its "
+	    "old extent is %llu bytes, its DVA %llu", (u_longlong_t)vd->vdev_id,
+	    (u_longlong_t)ent->rde_offset, (u_longlong_t)ent->rde_birth,
+	    (u_longlong_t)ent->rde_old_asize, (u_longlong_t)size);
+	return (B_FALSE);
+}
+
 /*
  * SPIKE: the min txg a scan whose window is (min_txg, max_txg) needs to
  * reach the moved blocks whose new extent was written in that window.
@@ -2570,23 +2605,119 @@ vdev_raidz_redirect_destroy(vdev_raidz_t *vdrz)
 		kmem_free(rdn, sizeof (*rdn));
 }
 
+/* SPIKE: the index of the parity epoch of txg, 0 on a vdev without any. */
+static uint64_t
+vdev_raidz_epoch_of(vdev_raidz_t *vdrz, uint64_t txg)
+{
+	uint64_t e = 0;
+
+	mutex_enter(&vdrz->vd_expand_lock);
+	for (uint64_t i = 1; vdrz->vd_parity_epochs != NULL &&
+	    i < vdrz->vd_parity_epoch_count; i++) {
+		if (vdrz->vd_parity_epochs[3 * i] > txg)
+			break;
+		e = i;
+	}
+	mutex_exit(&vdrz->vd_expand_lock);
+	return (e);
+}
+
+/*
+ * SPIKE: B_TRUE if [offset, offset + size) is a non-empty extent of vd that
+ * an allocation could have returned: aligned, and within one metaslab.
+ * vdev_metaslab_init() has not run yet when the table loads.
+ */
+static boolean_t
+vdev_raidz_redirect_extent_ok(vdev_t *vd, uint64_t offset, uint64_t size)
+{
+	uint64_t sector = 1ULL << vd->vdev_ashift;
+	uint64_t shift = vd->vdev_ms_shift;
+
+	if (size == 0 || !IS_P2ALIGNED(offset, sector) ||
+	    !IS_P2ALIGNED(size, sector) || offset >= vd->vdev_asize ||
+	    size > vd->vdev_asize - offset)
+		return (B_FALSE);
+	return (shift == 0 || ((offset >> shift) == ((offset + size - 1) >>
+	    shift) && (offset >> shift) < (vd->vdev_asize >> shift)));
+}
+
+/*
+ * SPIKE: NULL if a table entry can stand for a block that the move moved,
+ * or what rules it out.  An entry the move wrote passes; any other one is
+ * damaged and would send reads, repairs, frees and claims where its block
+ * does not lie.  Called once the parity epochs are installed.
+ */
+static const char *
+vdev_raidz_redirect_damage(vdev_t *vd, const raidz_redirect_ent_t *e)
+{
+	vdev_raidz_t *vdrz = vd->vdev_tsd;
+	uint64_t o = e->rde_offset;
+	uint64_t n = e->rde_new_offset;
+
+	if (!vdev_raidz_redirect_extent_ok(vd, o, e->rde_old_asize))
+		return ("the old extent is not an extent of one metaslab");
+	if (e->rde_old_reserved == 0 && !spike_redirect_keep_none)
+		return ("it keeps nothing of the old extent");
+	if (!IS_P2ALIGNED(e->rde_old_reserved, 1ULL << vd->vdev_ashift) ||
+	    e->rde_old_reserved > e->rde_old_asize)
+		return ("it keeps a misaligned part or more of the old extent");
+	if (!vdev_raidz_redirect_extent_ok(vd, n, e->rde_new_asize))
+		return ("the new extent is not an extent of one metaslab");
+	if (n < o + e->rde_old_asize && o < n + e->rde_new_asize)
+		return ("the new extent overlaps the old one");
+	if (e->rde_new_birth <= e->rde_birth)
+		return ("the new birth is not after the birth");
+	if (e->rde_new_birth > spa_last_synced_txg(vd->vdev_spa))
+		return ("the new birth is after the pool's last txg");
+	if (vdev_raidz_epoch_of(vdrz, e->rde_new_birth) <=
+	    vdev_raidz_epoch_of(vdrz, e->rde_birth))
+		return ("the new birth is not in a later parity epoch");
+	return (NULL);
+}
+
+static void
+vdev_raidz_redirect_warn(vdev_t *vd, const raidz_redirect_ent_t *e,
+    const char *why)
+{
+	cmn_err(CE_WARN, "%s: raidz vdev %llu: damaged redirect entry {%llx, "
+	    "%llu} -> {%llx, %llu, asize %llu, kept %llu of %llu}: %s",
+	    spa_name(vd->vdev_spa), (u_longlong_t)vd->vdev_id,
+	    (u_longlong_t)e->rde_offset, (u_longlong_t)e->rde_birth,
+	    (u_longlong_t)e->rde_new_offset, (u_longlong_t)e->rde_new_birth,
+	    (u_longlong_t)e->rde_new_asize, (u_longlong_t)e->rde_old_reserved,
+	    (u_longlong_t)e->rde_old_asize, why);
+}
+
 /*
  * SPIKE: read the vdev's table, if it has one, into memory.  Called from
  * vdev_raidz_load(): no non-MOS block has been read yet, and MOS blocks are
  * never moved, so every redirected read finds its entry.
+ *
+ * Each entry is checked against what the move writes.  A damaged one fails
+ * a read-write import: ignored, its block would be freed whole at its old
+ * extent, part of which may now be another block's, and read and repaired
+ * there; used, it would send the same I/O and frees elsewhere.  Failing
+ * every import, or dropping the table, would make every moved block
+ * unreadable instead.  A read-only import allocates, frees and repairs
+ * nothing: it loads the sound entries and leaves the damaged ones out, so
+ * that their blocks are read at their old extents, where their checksums
+ * tell whether the bytes are still theirs, and zdb can report them.
  */
 static int
 vdev_raidz_redirect_load(vdev_t *vd)
 {
 	vdev_raidz_t *vdrz = vd->vdev_tsd;
-	objset_t *mos = vd->vdev_spa->spa_meta_objset;
+	spa_t *spa = vd->vdev_spa;
+	objset_t *mos = spa->spa_meta_objset;
 	zap_cursor_t zc;
 	zap_attribute_t *za;
+	uint64_t damaged = 0;
 	uint64_t obj;
 	int err;
 
 	vdev_raidz_redirect_destroy(vdrz);
 	vdrz->vd_redirect_obj = 0;
+	vdrz->vd_redirect_damaged = 0;
 	if (vd->vdev_top_zap == 0)
 		return (0);
 	err = zap_lookup(mos, vd->vdev_top_zap, VDEV_TOP_ZAP_RAIDZ_REDIRECTS,
@@ -2601,35 +2732,38 @@ vdev_raidz_redirect_load(vdev_t *vd)
 	    (err = zap_cursor_retrieve(&zc, za)) == 0;
 	    zap_cursor_advance(&zc)) {
 		uint64_t key[2];
-		uint64_t val[4];
-		raidz_redirect_ent_t ent;
+		uint64_t val[RAIDZ_REDIRECT_VALUES];
+		raidz_redirect_ent_t ent = { 0 };
+		const char *why = NULL;
 
-		if (za->za_integer_length != sizeof (uint64_t) ||
-		    za->za_num_integers != 4) {
-			err = SET_ERROR(EINVAL);
-			break;
-		}
 		memcpy(key, za->za_name, sizeof (key));
-		err = zap_lookup_uint64(mos, obj, key, 2, sizeof (uint64_t),
-		    4, val);
-		if (err != 0)
-			break;
-		ent = (raidz_redirect_ent_t) {
-			.rde_offset = key[0], .rde_birth = key[1],
-			.rde_new_offset = val[0], .rde_new_birth = val[1],
-			.rde_new_asize = val[2], .rde_old_reserved = val[3],
-		};
-		/* An entry must not send I/O outside the vdev. */
-		if (ent.rde_new_asize == 0 ||
-		    ent.rde_new_birth <= ent.rde_birth ||
-		    ent.rde_new_offset > vd->vdev_asize ||
-		    ent.rde_new_asize > vd->vdev_asize - ent.rde_new_offset) {
-			err = SET_ERROR(EINVAL);
-			break;
+		ent.rde_offset = key[0];
+		ent.rde_birth = key[1];
+		if (za->za_integer_length != sizeof (uint64_t) ||
+		    za->za_num_integers != RAIDZ_REDIRECT_VALUES) {
+			why = "its value is not five uint64s";
+		} else if ((err = zap_lookup_uint64(mos, obj, key, 2,
+		    sizeof (uint64_t), RAIDZ_REDIRECT_VALUES, val)) != 0) {
+			/* The cursor found it: only its key can be wrong. */
+			if (err != ENOENT)
+				break;
+			err = 0;
+			why = "its key is not two uint64s";
+		} else {
+			ent.rde_new_offset = val[0];
+			ent.rde_new_birth = val[1];
+			ent.rde_new_asize = val[2];
+			ent.rde_old_reserved = val[3];
+			ent.rde_old_asize = val[4];
+			why = vdev_raidz_redirect_damage(vd, &ent);
+			if (why == NULL &&
+			    vdev_raidz_redirect_get(vd, key[0], key[1], NULL))
+				why = "its key is there twice";
 		}
-		if (vdev_raidz_redirect_get(vd, key[0], key[1], NULL)) {
-			err = SET_ERROR(EEXIST);
-			break;
+		if (why != NULL) {
+			vdev_raidz_redirect_warn(vd, &ent, why);
+			damaged++;
+			continue;
 		}
 		vdev_raidz_redirect_insert(vd, &ent);
 	}
@@ -2637,6 +2771,13 @@ vdev_raidz_redirect_load(vdev_t *vd)
 	zap_attribute_free(za);
 	if (err == ENOENT)
 		err = 0;
+	if (err == 0 && damaged != 0 && spa_writeable(spa)) {
+		spa_load_failed(spa, "raidz vdev %llu: %llu damaged redirect "
+		    "entries in object %llu: import read-only",
+		    (u_longlong_t)vd->vdev_id, (u_longlong_t)damaged,
+		    (u_longlong_t)obj);
+		err = SET_ERROR(EROFS);
+	}
 	if (err != 0) {
 		vdev_dbgmsg(vd, "vdev_raidz_load: rejecting redirect table "
 		    "%llu [error=%d]", (u_longlong_t)obj, err);
@@ -2644,8 +2785,16 @@ vdev_raidz_redirect_load(vdev_t *vd)
 		return (err);
 	}
 	vdrz->vd_redirect_obj = obj;
-	vdev_dbgmsg(vd, "vdev_raidz_load: %llu redirects from object %llu",
-	    (u_longlong_t)avl_numnodes(&vdrz->vd_redirects), (u_longlong_t)obj);
+	vdrz->vd_redirect_damaged = damaged;
+	if (damaged != 0) {
+		cmn_err(CE_WARN, "%s: raidz vdev %llu: this read-only import "
+		    "ignores %llu damaged redirect entries; their blocks are "
+		    "read at their old extents", spa_name(spa),
+		    (u_longlong_t)vd->vdev_id, (u_longlong_t)damaged);
+	}
+	vdev_dbgmsg(vd, "vdev_raidz_load: %llu redirects from object %llu, "
+	    "%llu damaged", (u_longlong_t)avl_numnodes(&vdrz->vd_redirects),
+	    (u_longlong_t)obj, (u_longlong_t)damaged);
 	return (0);
 }
 
@@ -2657,8 +2806,9 @@ vdev_raidz_redirect_persist(vdev_t *vd, const raidz_redirect_ent_t *ent,
 	vdev_raidz_t *vdrz = vd->vdev_tsd;
 	objset_t *mos = vd->vdev_spa->spa_meta_objset;
 	uint64_t key[2] = { ent->rde_offset, ent->rde_birth };
-	uint64_t val[4] = { ent->rde_new_offset, ent->rde_new_birth,
-	    ent->rde_new_asize, ent->rde_old_reserved };
+	uint64_t val[RAIDZ_REDIRECT_VALUES] = { ent->rde_new_offset,
+	    ent->rde_new_birth, ent->rde_new_asize, ent->rde_old_reserved,
+	    ent->rde_old_asize };
 
 	ASSERT(dmu_tx_is_syncing(tx));
 	VERIFY3U(vd->vdev_top_zap, !=, 0);
@@ -2672,7 +2822,7 @@ vdev_raidz_redirect_persist(vdev_t *vd, const raidz_redirect_ent_t *ent,
 		    &vdrz->vd_redirect_obj, tx));
 	}
 	VERIFY0(zap_add_uint64(mos, vdrz->vd_redirect_obj, key, 2,
-	    sizeof (uint64_t), 4, val, tx));
+	    sizeof (uint64_t), RAIDZ_REDIRECT_VALUES, val, tx));
 	vdev_raidz_redirect_insert(vd, ent);
 }
 
@@ -3327,14 +3477,31 @@ vdev_raidz_io_start(zio_t *zio)
 		    "off=%llu type=%d", (u_longlong_t)layout.vrl_width,
 		    vdrz->vd_physical_width,
 		    (u_longlong_t)zio->io_offset, (int)zio->io_type);
+	/*
+	 * SPIKE: the new extent was sized for its own layout.  An entry the
+	 * load could not check against its block's size fails the I/O
+	 * instead of reading or writing past it.
+	 */
+	if (redirected) {
+		uint64_t need = vdev_raidz_psize_to_asize_width(vd,
+		    zio->io_size, layout.vrl_width, layout.vrl_nparity);
+
+		if (need > rde.rde_new_asize) {
+			zfs_dbgmsg("spike: %s: redirect {%llx, %llu} holds "
+			    "%llu bytes, its block needs %llu",
+			    spa_name(zio->io_spa),
+			    (u_longlong_t)rde.rde_offset,
+			    (u_longlong_t)rde.rde_birth,
+			    (u_longlong_t)rde.rde_new_asize,
+			    (u_longlong_t)need);
+			zio->io_error = SET_ERROR(EIO);
+			zio_execute(zio);
+			return;
+		}
+	}
 	if (layout.vrl_width != vdrz->vd_physical_width ||
 	    layout.vrl_nparity != vdrz->vd_nparity) {
-		if (redirected) {
-			/* The new extent was sized for its own layout. */
-			VERIFY3U(vdev_raidz_psize_to_asize_width(vd,
-			    zio->io_size, layout.vrl_width, layout.vrl_nparity),
-			    <=, rde.rde_new_asize);
-		} else if (BP_GET_DEDUP(zio->io_bp)) {
+		if (!redirected && BP_GET_DEDUP(zio->io_bp)) {
 			uint64_t required_asize;
 			uint64_t owned_asize;
 
@@ -6393,6 +6560,14 @@ int spike_resilver_redirects = SPIKE_RESILVER_WIDEN |
 int spike_redirect_move_live = 1;
 
 /*
+ * SPIKE, not for merge: test-only.  P3 keeps nothing of the old extent,
+ * which step 4 rejected: the move refuses it, and the load refuses an entry
+ * that keeps nothing, unless this is set, as the tests that show P3 failing
+ * do.
+ */
+int spike_redirect_keep_none = 0;
+
+/*
  * SPIKE, not for merge: test-only crash points.  A test sets
  * spike_crash_point, and spike_crash_txg or lets the move arm it with its own
  * txg; the process then exits with status 99 at that point of that txg.
@@ -6596,6 +6771,10 @@ vdev_raidz_redirect_move_check(void *arg, dmu_tx_t *tx)
 
 	if (spa_has_checkpoint(spa))
 		return (SET_ERROR(ZFS_ERR_CHECKPOINT_EXISTS));
+	/* SPIKE: P3 only for the tests that show it failing. */
+	if (rma->rma_keep == RAIDZ_REDIRECT_KEEP_NONE &&
+	    !spike_redirect_keep_none)
+		return (SET_ERROR(ENOTSUP));
 	if (rma->rma_vdev >= rvd->vdev_children ||
 	    rvd->vdev_child[rma->rma_vdev]->vdev_ops != &vdev_raidz_ops)
 		return (SET_ERROR(EINVAL));
@@ -6660,6 +6839,12 @@ vdev_raidz_redirect_move_sync(void *arg, dmu_tx_t *tx)
 			rdm->rdm_error = SET_ERROR(EEXIST);
 			continue;
 		}
+		/* N would have the layout the block already has. */
+		if (vdev_raidz_epoch_of(vd->vdev_tsd, birth) >=
+		    vdev_raidz_epoch_of(vd->vdev_tsd, txg)) {
+			rdm->rdm_error = SET_ERROR(EINVAL);
+			continue;
+		}
 		/* A free earlier in this txg may have beaten us. */
 		if (!vdev_raidz_extent_allocated(vd, offset, asize)) {
 			rdm->rdm_error = SET_ERROR(ENOENT);
@@ -6711,6 +6896,7 @@ vdev_raidz_redirect_move_sync(void *arg, dmu_tx_t *tx)
 			.rde_new_birth = txg,
 			.rde_new_asize = DVA_GET_ASIZE(&wbp.blk_dva[0]),
 			.rde_old_reserved = keep,
+			.rde_old_asize = asize,
 		};
 
 		/*
@@ -6811,6 +6997,10 @@ vdev_raidz_redirect_claim(vdev_t *vd, uint64_t offset, uint64_t size,
 	if (!spike_redirect_claim_enable || spa_writeable(vd->vdev_spa) ||
 	    !vdev_raidz_redirect_get(vd, offset, birth, &ent))
 		return (B_FALSE);
+	if (!vdev_raidz_redirect_fits(vd, &ent, size)) {
+		*errp = SET_ERROR(EINVAL);
+		return (B_TRUE);
+	}
 	if (ent.rde_old_reserved != 0) {
 		err = metaslab_claim_impl(vd, offset, ent.rde_old_reserved,
 		    txg);
