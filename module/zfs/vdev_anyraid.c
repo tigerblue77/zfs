@@ -3057,13 +3057,25 @@ vdev_anyraid_setup_rebalance(vdev_t *vd, dmu_tx_t *tx)
 				avl_add(&ft, receiver);
 				avl_add(&at, receiver);
 				num_tiles[receiver->cvd]--;
+				/*
+				 * The source stays mapped until the scrub, but
+				 * the plan balances the disks as they will be
+				 * after it, so the next move picks its donor
+				 * from what this one leaves.
+				 */
+				avl_remove(&ft, donor);
+				avl_remove(&at, donor);
+				donor->free++;
+				donor->alloc--;
+				avl_add(&ft, donor);
+				avl_add(&at, donor);
 				break;
 			}
 			if (moved)
 				break;
 			donor = prev_donor;
 		}
-		if (donor == NULL || donor->alloc == 0)
+		if (!moved)
 			break;
 	}
 
