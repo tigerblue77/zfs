@@ -1326,7 +1326,7 @@ vdev_anyraid_mirror_start(zio_t *zio, anyraid_tile_t *tile,
 		uint16_t offset;
 		if (task && task->vart_source_disk == atn->atn_disk) {
 			disk = task->vart_dest_disk;
-			offset = task->vart_source_idx;
+			offset = task->vart_dest_idx;
 		} else {
 			disk = atn->atn_disk;
 			offset = atn->atn_tile_idx;
@@ -1379,7 +1379,7 @@ vdev_anyraid_raidz_map_translate(vdev_t *vd, raidz_map_t *rm,
 		uint16_t offset;
 		if (task && task->vart_source_disk == atn->atn_disk) {
 			disk = task->vart_dest_disk;
-			offset = task->vart_source_idx;
+			offset = task->vart_dest_idx;
 		} else {
 			disk = atn->atn_disk;
 			offset = atn->atn_tile_idx;
