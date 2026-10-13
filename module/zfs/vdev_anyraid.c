@@ -159,6 +159,7 @@ unsigned long anyraid_relocate_max_bytes_pause = 0;
 
 static int tasklist_read(vdev_t *vd);
 static void anyraid_scrub_done(spa_t *spa, dmu_tx_t *tx, void *arg);
+static uint64_t vdev_anyraid_asize(vdev_t *vd, uint64_t psize, uint64_t txg);
 
 struct anyraid_done_arg {
 	vdev_t *vd;
@@ -374,6 +375,7 @@ vdev_anyraid_init(spa_t *spa, nvlist_t *nv, void **tsd)
 	    sizeof (vdev_anyraid_node_t),
 	    offsetof(vdev_anyraid_node_t, van_node));
 	zfs_rangelock_init(&va->vd_rangelock, NULL, NULL);
+	va->vd_move.am_tile = UINT32_MAX;
 	vdev_anyraid_relocate_t *var = &va->vd_relocate;
 	var->var_offset = var->var_failed_offset = UINT64_MAX;
 	list_create(&var->var_list,
@@ -1307,44 +1309,89 @@ vdev_anyraid_close(vdev_t *vd)
 }
 
 /*
- * Configure the mirror_map and then hand the write off to the normal mirror
- * logic.
+ * Where one column of a tile lives.  The I/O path copies these out of the tile
+ * map under vd_lock and never reads a tile node after dropping it, since the
+ * end of a relocation rewrites the node in place.  The column being moved also
+ * has a shadow, which writes go to as well.
+ */
+typedef struct anyraid_col {
+	uint8_t		ac_disk;
+	uint16_t	ac_idx;
+	int16_t		ac_shadow_disk;		/* -1: none */
+	uint16_t	ac_shadow_idx;
+} anyraid_col_t;
+
+/* State of one top-level I/O, in io_aux_vsd; writes only. */
+typedef struct anyraid_io {
+	zfs_locked_range_t *ai_lr;
+	uint32_t	ai_tile;
+	uint32_t	ai_task;
+	int		ai_shadow_col;		/* -1: none */
+	boolean_t	ai_shadow_is_dest;	/* captured ARMED */
+	int		ai_shadow_error;	/* raid0 only */
+} anyraid_io_t;
+
+static inline uint64_t
+anyraid_slot_offset(vdev_t *cvd, vdev_anyraid_t *va, uint16_t idx)
+{
+	return (VDEV_ANYRAID_START_OFFSET(cvd->vdev_ashift) +
+	    idx * va->vd_tile_size);
+}
+
+/*
+ * The logical rows covering [offset, offset + asize).  A row holds one sector
+ * of each column, so a write and a copy of one column collide exactly when
+ * their rows overlap.
  */
 static void
-vdev_anyraid_mirror_start(zio_t *zio, anyraid_tile_t *tile,
-    vdev_anyraid_relocate_task_t *task, zfs_locked_range_t *lr)
+anyraid_rows(vdev_anyraid_t *va, uint_t ashift, uint64_t offset, uint64_t asize,
+    uint64_t *start, uint64_t *size)
+{
+	uint64_t row = (uint64_t)va->vd_width << ashift;
+	uint64_t ltsize = va->vd_width * va->vd_tile_size;
+	uint64_t base = offset - offset % ltsize;
+	uint64_t first = (offset - base) / row;
+	uint64_t last = (offset + asize - base + row - 1) / row;
+
+	ASSERT3U(last * row, <=, ltsize);
+	*start = base + first * row;
+	*size = (last - first) * row;
+}
+
+/*
+ * Configure the mirror_map and then hand the write off to the normal mirror
+ * logic.  The shadow, if any, is the last child, and only writes have one.
+ */
+static void
+vdev_anyraid_mirror_start(zio_t *zio, const anyraid_col_t *cols, int ncols,
+    int shadow_col)
 {
 	vdev_t *vd = zio->io_vd;
 	vdev_anyraid_t *va = vd->vdev_tsd;
-	mirror_map_t *mm = vdev_mirror_map_alloc(va->vd_nparity + 1, B_FALSE,
-	    B_FALSE);
+	int children = ncols + (shadow_col >= 0 ? 1 : 0);
+	mirror_map_t *mm = vdev_mirror_map_alloc(children, B_FALSE, B_FALSE);
 	uint64_t tsize = va->vd_tile_size;
 
-	anyraid_tile_node_t *atn = list_head(&tile->at_list);
-	for (int c = 0; c < mm->mm_children; c++) {
+	for (int c = 0; c < children; c++) {
 		uint8_t disk;
-		uint16_t offset;
-		if (task && task->vart_source_disk == atn->atn_disk) {
-			disk = task->vart_dest_disk;
-			offset = task->vart_source_idx;
+		uint16_t idx;
+		if (c < ncols) {
+			disk = cols[c].ac_disk;
+			idx = cols[c].ac_idx;
 		} else {
-			disk = atn->atn_disk;
-			offset = atn->atn_tile_idx;
+			disk = cols[shadow_col].ac_shadow_disk;
+			idx = cols[shadow_col].ac_shadow_idx;
 		}
-		ASSERT(atn);
 		mirror_child_t *mc = &mm->mm_child[c];
 		vdev_t *cvd = vd->vdev_child[disk];
 		mc->mc_vd = cvd;
-		mc->mc_offset = VDEV_ANYRAID_START_OFFSET(cvd->vdev_ashift) +
-		    offset * tsize + zio->io_offset % tsize;
+		mc->mc_offset = anyraid_slot_offset(cvd, va, idx) +
+		    zio->io_offset % tsize;
 		ASSERT3U(mc->mc_offset, <, cvd->vdev_psize -
 		    VDEV_LABEL_END_SIZE);
 		mm->mm_rebuilding = mc->mc_rebuilding = B_FALSE;
-		atn = list_next(&tile->at_list, atn);
 	}
-	ASSERT(atn == NULL);
 
-	zio->io_aux_vsd = lr;
 	zio->io_vsd = mm;
 	zio->io_vsd_ops = &vdev_mirror_vsd_ops;
 
@@ -1357,41 +1404,29 @@ vdev_anyraid_mirror_start(zio_t *zio, anyraid_tile_t *tile,
  */
 static void
 vdev_anyraid_raidz_map_translate(vdev_t *vd, raidz_map_t *rm,
-    anyraid_tile_t *tile, vdev_anyraid_relocate_task_t *task)
+    const anyraid_col_t *cols, int ncols)
 {
 	vdev_anyraid_t *va = vd->vdev_tsd;
 	ASSERT3U(rm->rm_nrows, ==, 1);
 	raidz_row_t *rr = rm->rm_row[0];
-	anyraid_tile_node_t **mapping = kmem_zalloc(sizeof (*mapping) *
-	    va->vd_width, KM_SLEEP);
-	ASSERT(tile);
-	anyraid_tile_node_t *atn = list_head(&tile->at_list);
-	for (int i = 0; i < va->vd_width; i++) {
-		ASSERT(atn);
-		mapping[i] = atn;
-		atn = list_next(&tile->at_list, atn);
-	}
+	uint64_t start = VDEV_ANYRAID_START_OFFSET(vd->vdev_ashift);
+
+	ASSERT3U(ncols, ==, va->vd_width);
 	ASSERT3U(rr->rr_scols, <=, va->vd_width);
 	for (uint64_t c = 0; c < rr->rr_scols; c++) {
 		raidz_col_t *rc = &rr->rr_col[c];
-		atn = mapping[rc->rc_devidx];
-		uint8_t disk;
-		uint16_t offset;
-		if (task && task->vart_source_disk == atn->atn_disk) {
-			disk = task->vart_dest_disk;
-			offset = task->vart_source_idx;
-		} else {
-			disk = atn->atn_disk;
-			offset = atn->atn_tile_idx;
-		}
+		const anyraid_col_t *ac = &cols[rc->rc_devidx];
 		uint64_t tile_off = rc->rc_offset % va->vd_tile_size;
-		uint64_t disk_off = tile_off +
-		    offset * va->vd_tile_size;
-		rc->rc_offset = VDEV_ANYRAID_START_OFFSET(vd->vdev_ashift) +
-		    disk_off;
-		rc->rc_devidx = disk;
+
+		rc->rc_offset = start + ac->ac_idx * va->vd_tile_size +
+		    tile_off;
+		rc->rc_devidx = ac->ac_disk;
+		if (ac->ac_shadow_disk >= 0) {
+			rc->rc_shadow_devidx = ac->ac_shadow_disk;
+			rc->rc_shadow_offset = start +
+			    ac->ac_shadow_idx * va->vd_tile_size + tile_off;
+		}
 	}
-	kmem_free(mapping, sizeof (*mapping) * va->vd_width);
 }
 
 /*
@@ -1399,18 +1434,16 @@ vdev_anyraid_raidz_map_translate(vdev_t *vd, raidz_map_t *rm,
  * logic.
  */
 static void
-vdev_anyraid_raidz_start(zio_t *zio, anyraid_tile_t *tile,
-    vdev_anyraid_relocate_task_t *task, zfs_locked_range_t *lr)
+vdev_anyraid_raidz_start(zio_t *zio, const anyraid_col_t *cols, int ncols)
 {
 	vdev_t *vd = zio->io_vd;
 	vdev_anyraid_t *va = vd->vdev_tsd;
 	raidz_map_t *rm = vdev_raidz_map_alloc(zio, vd->vdev_ashift,
 	    va->vd_width, va->vd_nparity);
-	vdev_anyraid_raidz_map_translate(vd, rm, tile, task);
+	vdev_anyraid_raidz_map_translate(vd, rm, cols, ncols);
 
 	zio->io_vsd = rm;
 	zio->io_vsd_ops = &vdev_raidz_vsd_ops;
-	zio->io_aux_vsd = lr;
 	vdev_raidz_io_start_impl(zio, rm, va->vd_width, va->vd_width);
 }
 
@@ -1427,6 +1460,17 @@ vdev_anyraid_child_done(zio_t *zio)
 	mutex_exit(&pio->io_lock);
 }
 
+/* raid0 has no redundancy: the shadow leg fails the write too. */
+static void
+vdev_anyraid_shadow_child_done(zio_t *zio)
+{
+	zio_t *pio = zio->io_private;
+	anyraid_io_t *ai = pio->io_aux_vsd;
+
+	ai->ai_shadow_error = zio->io_error;
+	vdev_anyraid_child_done(zio);
+}
+
 static void
 vdev_anyraid_map_free_vsd(zio_t *zio)
 {
@@ -1440,14 +1484,79 @@ const zio_vsd_ops_t vdev_anyraid_vsd_ops = {
 	.vsd_free = vdev_anyraid_map_free_vsd,
 };
 
+/*
+ * Create the tile for a write to a part of the vdev that has none yet.  The
+ * caller holds vd_lock as writer.
+ */
+static anyraid_tile_t *
+anyraid_tile_create(vdev_anyraid_t *va, uint64_t tile_id, avl_index_t where)
+{
+	ASSERT(RW_WRITE_HELD(&va->vd_lock));
+	zfs_dbgmsg("Allocating tile %llu", (u_longlong_t)tile_id);
+	anyraid_tile_t *tile = kmem_alloc(sizeof (*tile), KM_SLEEP);
+	tile->at_tile_id = tile_id;
+	list_create(&tile->at_list, sizeof (anyraid_tile_node_t),
+	    offsetof(anyraid_tile_node_t, atn_node));
+
+	uint_t width = va->vd_nparity + va->vd_ndata;
+	ASSERT3U(width, <=, avl_numnodes(&va->vd_children_tree));
+	vdev_anyraid_node_t **vans = kmem_alloc(sizeof (*vans) * width,
+	    KM_SLEEP);
+	for (int i = 0; i < width; i++) {
+		vans[i] = avl_first(&va->vd_children_tree);
+		ASSERT(vans[i] &&
+		    anyraid_freelist_alloc(&vans[i]->van_freelist) <
+		    vans[i]->van_capacity);
+		avl_remove(&va->vd_children_tree, vans[i]);
+
+		ASSERT3U(vans[i]->van_id, !=, va->vd_contracting_leaf);
+		anyraid_tile_node_t *atn = kmem_alloc(sizeof (*atn), KM_SLEEP);
+		atn->atn_disk = vans[i]->van_id;
+		atn->atn_tile_idx =
+		    anyraid_freelist_pop(&vans[i]->van_freelist);
+		ASSERT3U(atn->atn_tile_idx, <, vans[i]->van_capacity);
+		list_insert_tail(&tile->at_list, atn);
+	}
+	for (int i = 0; i < width; i++)
+		avl_add(&va->vd_children_tree, vans[i]);
+
+	kmem_free(vans, sizeof (*vans) * width);
+	avl_insert(&va->vd_tile_map, tile, where);
+	return (tile);
+}
+
 static void
 vdev_anyraid_io_start(zio_t *zio)
 {
 	vdev_t *vd = zio->io_vd;
 	vdev_anyraid_t *va = vd->vdev_tsd;
 	uint64_t tsize = va->vd_tile_size * va->vd_width;
+	boolean_t write = (zio->io_type == ZIO_TYPE_WRITE);
+	anyraid_io_t *ai = NULL;
 
 	uint64_t start_tile_id = zio->io_offset / tsize;
+
+	/*
+	 * A write holds its rows until every leg has landed, and takes them
+	 * before it looks at the tile: a column copy that starts later waits
+	 * for it and copies what it wrote, and a write that starts later sees
+	 * the move and writes the destination too.  Reads take no lock: the
+	 * source stays complete until the destination is.
+	 */
+	if (write) {
+		uint64_t lstart, lsize;
+		anyraid_rows(va, vd->vdev_ashift, zio->io_offset,
+		    vdev_anyraid_asize(vd, zio->io_size, zio->io_txg),
+		    &lstart, &lsize);
+		ai = kmem_zalloc(sizeof (*ai), KM_SLEEP);
+		ai->ai_shadow_col = -1;
+		ai->ai_lr = zfs_rangelock_enter(&va->vd_rangelock, lstart,
+		    lsize, RL_READER);
+	}
+
+	int ncols = va->vd_nparity + va->vd_ndata;
+	anyraid_col_t *cols = kmem_alloc(sizeof (*cols) * ncols, KM_SLEEP);
+
 	anyraid_tile_t search;
 	search.at_tile_id = start_tile_id;
 	avl_index_t where;
@@ -1467,108 +1576,122 @@ vdev_anyraid_io_start(zio_t *zio)
 		tile = avl_find(&va->vd_tile_map, &search, &where);
 	}
 	if (tile == NULL) {
-		ASSERT3U(zio->io_type, ==, ZIO_TYPE_WRITE);
-		zfs_dbgmsg("Allocating tile %llu for zio %px",
-		    (u_longlong_t)start_tile_id, zio);
-		tile = kmem_alloc(sizeof (*tile), KM_SLEEP);
-		tile->at_tile_id = start_tile_id;
-		list_create(&tile->at_list, sizeof (anyraid_tile_node_t),
-		    offsetof(anyraid_tile_node_t, atn_node));
-
-		uint_t width = va->vd_nparity + va->vd_ndata;
-		ASSERT3U(width, <=, avl_numnodes(&va->vd_children_tree));
-		vdev_anyraid_node_t **vans = kmem_alloc(sizeof (*vans) * width,
-		    KM_SLEEP);
-		for (int i = 0; i < width; i++) {
-			vans[i] = avl_first(&va->vd_children_tree);
-			ASSERT(vans[i] &&
-			    anyraid_freelist_alloc(&vans[i]->van_freelist) <
-			    vans[i]->van_capacity);
-			avl_remove(&va->vd_children_tree, vans[i]);
-
-			ASSERT3U(vans[i]->van_id, !=, va->vd_contracting_leaf);
-			anyraid_tile_node_t *atn =
-			    kmem_alloc(sizeof (*atn), KM_SLEEP);
-			atn->atn_disk = vans[i]->van_id;
-			atn->atn_tile_idx =
-			    anyraid_freelist_pop(&vans[i]->van_freelist);
-			ASSERT3U(atn->atn_tile_idx, <, vans[i]->van_capacity);
-			list_insert_tail(&tile->at_list, atn);
-		}
-		for (int i = 0; i < width; i++)
-			avl_add(&va->vd_children_tree, vans[i]);
-
-		kmem_free(vans, sizeof (*vans) * width);
-		avl_insert(&va->vd_tile_map, tile, where);
+		ASSERT(write);
+		tile = anyraid_tile_create(va, start_tile_id, where);
 	}
 
-	zfs_locked_range_t *lr = zfs_rangelock_enter(&va->vd_rangelock,
-	    zio->io_offset, zio->io_size, RL_READER);
+	int n = 0;
+	for (anyraid_tile_node_t *atn = list_head(&tile->at_list); atn != NULL;
+	    atn = list_next(&tile->at_list, atn), n++) {
+		ASSERT3S(n, <, ncols);
+		cols[n].ac_disk = atn->atn_disk;
+		cols[n].ac_idx = atn->atn_tile_idx;
+		cols[n].ac_shadow_disk = -1;
+		cols[n].ac_shadow_idx = 0;
+	}
+	ASSERT3S(n, ==, ncols);
 
-	vdev_anyraid_relocate_task_t *task = NULL;
-	if (va->vd_relocate.var_state == ARS_SCANNING) {
-		vdev_anyraid_relocate_t *var = &va->vd_relocate;
-		mutex_enter(&var->var_lock);
-		vdev_anyraid_relocate_task_t *vart = list_head(&var->var_list);
-		if (vart && vart->vart_tile == tile->at_tile_id) {
-			ASSERTF(var->var_offset <= zio->io_offset ||
-			    var->var_offset >= zio->io_offset + zio->io_size,
-			    "var_offset %llx is in the middle of IO %llx/%llx "
-			    "%d %llx", (u_longlong_t)var->var_offset,
-			    (u_longlong_t)zio->io_offset,
-			    (u_longlong_t)zio->io_size, zio->io_type,
-			    (u_longlong_t)zio->io_flags);
-			if (var->var_offset >= zio->io_offset + zio->io_size) {
-				task = kmem_zalloc(sizeof (*vart), KM_SLEEP);
-				*task = *vart;
-			}
+	const anyraid_move_t *am = &va->vd_move;
+	if (write && am->am_tile == tile->at_tile_id &&
+	    am->am_phase != ARMP_IDLE) {
+		boolean_t armed = (am->am_phase == ARMP_ARMED);
+		uint8_t disk = armed ? am->am_src_disk : am->am_dst_disk;
+		uint16_t idx = armed ? am->am_src_idx : am->am_dst_idx;
+		for (int c = 0; c < ncols; c++) {
+			if (cols[c].ac_disk != disk || cols[c].ac_idx != idx)
+				continue;
+			cols[c].ac_shadow_disk =
+			    armed ? am->am_dst_disk : am->am_src_disk;
+			cols[c].ac_shadow_idx =
+			    armed ? am->am_dst_idx : am->am_src_idx;
+			ai->ai_shadow_col = c;
+			ai->ai_shadow_is_dest = armed;
+			ai->ai_tile = am->am_tile;
+			ai->ai_task = am->am_task;
+			break;
 		}
-		mutex_exit(&var->var_lock);
+		ASSERT3S(ai->ai_shadow_col, >=, 0);
 	}
 	rw_exit(&va->vd_lock);
+
+	zio->io_aux_vsd = ai;
 
 	switch (va->vd_parity_type) {
 		case VAP_MIRROR:
 			if (va->vd_nparity > 0) {
-				vdev_anyraid_mirror_start(zio, tile, task, lr);
+				vdev_anyraid_mirror_start(zio, cols, ncols,
+				    ai != NULL ? ai->ai_shadow_col : -1);
+				kmem_free(cols, sizeof (*cols) * ncols);
 				zio_execute(zio);
-				if (task)
-					kmem_free(task, sizeof (*task));
 				return;
 			}
 			break;
 		case VAP_RAIDZ:
-			vdev_anyraid_raidz_start(zio, tile, task, lr);
+			vdev_anyraid_raidz_start(zio, cols, ncols);
+			kmem_free(cols, sizeof (*cols) * ncols);
 			zio_execute(zio);
-			if (task)
-				kmem_free(task, sizeof (*task));
 			return;
 		default:
 			ASSERT0(1);
 			PANIC("Invalid parity type: %d", va->vd_parity_type);
 	}
 
-
-	anyraid_tile_node_t *atn = list_head(&tile->at_list);
-	vdev_t *cvd = vd->vdev_child[atn->atn_disk];
-	uint64_t child_offset = atn->atn_tile_idx * tsize +
-	    zio->io_offset % tsize;
-	child_offset += VDEV_ANYRAID_START_OFFSET(cvd->vdev_ashift);
-
+	ASSERT3S(ncols, ==, 1);
 	anyraid_map_t *mm = kmem_alloc(sizeof (*mm), KM_SLEEP);
 	mm->am_abd = abd_get_offset(zio->io_abd, 0);
 	zio->io_vsd = mm;
 	zio->io_vsd_ops = &vdev_anyraid_vsd_ops;
-	zio->io_aux_vsd = lr;
 
-	zio_t *cio = zio_vdev_child_io(zio, NULL, cvd, child_offset,
-	    mm->am_abd, zio->io_size, zio->io_type, zio->io_priority, 0,
-	    vdev_anyraid_child_done, zio);
-	zio_nowait(cio);
+	vdev_t *cvd = vd->vdev_child[cols[0].ac_disk];
+	zio_nowait(zio_vdev_child_io(zio, NULL, cvd,
+	    anyraid_slot_offset(cvd, va, cols[0].ac_idx) +
+	    zio->io_offset % tsize, mm->am_abd, zio->io_size, zio->io_type,
+	    zio->io_priority, 0, vdev_anyraid_child_done, zio));
+	if (ai != NULL && ai->ai_shadow_col >= 0) {
+		cvd = vd->vdev_child[cols[0].ac_shadow_disk];
+		zio_nowait(zio_vdev_child_io(zio, NULL, cvd,
+		    anyraid_slot_offset(cvd, va, cols[0].ac_shadow_idx) +
+		    zio->io_offset % tsize, mm->am_abd, zio->io_size,
+		    zio->io_type, zio->io_priority, 0,
+		    vdev_anyraid_shadow_child_done, zio));
+	}
+	kmem_free(cols, sizeof (*cols) * ncols);
 
 	zio_execute(zio);
-	if (task)
-		kmem_free(task, sizeof (*task));
+}
+
+/*
+ * Return the error of the shadow leg of a write, and fail a mirror write that
+ * landed only there: the shadow is not where the block lives.
+ */
+static int
+anyraid_shadow_done(zio_t *zio, anyraid_io_t *ai)
+{
+	vdev_anyraid_t *va = zio->io_vd->vdev_tsd;
+
+	if (va->vd_parity_type == VAP_RAIDZ) {
+		raidz_row_t *rr = ((raidz_map_t *)zio->io_vsd)->rm_row[0];
+		for (int c = 0; c < rr->rr_cols; c++) {
+			if (rr->rr_col[c].rc_shadow_devidx != INT_MAX)
+				return (rr->rr_col[c].rc_shadow_error);
+		}
+		return (0);
+	}
+	if (va->vd_nparity == 0)
+		return (ai->ai_shadow_error);
+
+	mirror_map_t *mm = zio->io_vsd;
+	int good = 0, error = 0;
+	for (int c = 0; c < mm->mm_children - 1; c++) {
+		mirror_child_t *mc = &mm->mm_child[c];
+		if (mc->mc_tried && mc->mc_error == 0)
+			good++;
+		else
+			error = zio_worst_error(error, mc->mc_error);
+	}
+	if (good == 0 && zio->io_error == 0)
+		zio->io_error = error != 0 ? error : SET_ERROR(EIO);
+	return (mm->mm_child[mm->mm_children - 1].mc_error);
 }
 
 static void
@@ -1592,9 +1715,25 @@ vdev_anyraid_io_done(zio_t *zio)
 	}
 	if (zio->io_stage != ZIO_STAGE_VDEV_IO_DONE)
 		return;
-	zfs_locked_range_t *lr = zio->io_aux_vsd;
-	ASSERT(lr);
-	zfs_rangelock_exit(lr);
+	anyraid_io_t *ai = zio->io_aux_vsd;
+	if (ai == NULL)
+		return;
+
+	/*
+	 * A destination that missed a write captured ARMED must be copied
+	 * again.  A miss that completes after the switch is in the DTL of the
+	 * destination and repaired like any failed write.
+	 */
+	if (ai->ai_shadow_col >= 0 && anyraid_shadow_done(zio, ai) != 0 &&
+	    ai->ai_shadow_is_dest) {
+		rw_enter(&va->vd_lock, RW_READER);
+		if (va->vd_move.am_tile == ai->ai_tile &&
+		    va->vd_move.am_task == ai->ai_task)
+			atomic_swap_32(&va->vd_move.am_dest_dirty, 1);
+		rw_exit(&va->vd_lock);
+	}
+	zfs_rangelock_exit(ai->ai_lr);
+	kmem_free(ai, sizeof (*ai));
 	zio->io_aux_vsd = NULL;
 }
 
@@ -1633,21 +1772,22 @@ vdev_anyraid_need_resilver(vdev_t *vd, const dva_t *dva, size_t psize,
 	anyraid_tile_t search;
 	search.at_tile_id = start_tile_id;
 	avl_index_t where;
+	/* The end of a relocation rewrites tile nodes in place. */
 	rw_enter(&va->vd_lock, RW_READER);
 	anyraid_tile_t *tile = avl_find(&va->vd_tile_map, &search,
 	    &where);
-	rw_exit(&va->vd_lock);
 	ASSERT(tile);
 
+	boolean_t needed = B_FALSE;
 	for (anyraid_tile_node_t *atn = list_head(&tile->at_list);
-	    atn != NULL; atn = list_next(&tile->at_list, atn)) {
+	    atn != NULL && !needed; atn = list_next(&tile->at_list, atn)) {
 		vdev_t *cvd = vd->vdev_child[atn->atn_disk];
 
-		if (!vdev_dtl_empty(cvd, DTL_PARTIAL))
-			return (B_TRUE);
+		needed = !vdev_dtl_empty(cvd, DTL_PARTIAL);
 	}
+	rw_exit(&va->vd_lock);
 
-	return (B_FALSE);
+	return (needed);
 }
 
 /*
@@ -1673,12 +1813,13 @@ vdev_anyraid_xlate(vdev_t *cvd, const zfs_range_seg64_t *logical_rs,
 	anyraid_tile_t search;
 	search.at_tile_id = start_tile_id;
 	avl_index_t where;
+	/* The end of a relocation rewrites tile nodes in place. */
 	rw_enter(&va->vd_lock, RW_READER);
 	anyraid_tile_t *tile = avl_find(&va->vd_tile_map, &search,
 	    &where);
-	rw_exit(&va->vd_lock);
 	// This tile doesn't exist yet
 	if (tile == NULL) {
+		rw_exit(&va->vd_lock);
 		physical_rs->rs_start = physical_rs->rs_end = 0;
 		return;
 	}
@@ -1687,6 +1828,8 @@ vdev_anyraid_xlate(vdev_t *cvd, const zfs_range_seg64_t *logical_rs,
 	for (; atn != NULL; atn = list_next(&tile->at_list, atn), idx++)
 		if (anyraidvd->vdev_child[atn->atn_disk] == cvd)
 			break;
+	uint16_t tile_idx = atn != NULL ? atn->atn_tile_idx : 0;
+	rw_exit(&va->vd_lock);
 	// The tile exists, but isn't stored on this child
 	if (atn == NULL) {
 		physical_rs->rs_start = physical_rs->rs_end = 0;
@@ -1696,7 +1839,7 @@ vdev_anyraid_xlate(vdev_t *cvd, const zfs_range_seg64_t *logical_rs,
 	switch (va->vd_parity_type) {
 		case VAP_MIRROR:
 		{
-			uint64_t child_offset = atn->atn_tile_idx * ptsize +
+			uint64_t child_offset = tile_idx * ptsize +
 			    logical_rs->rs_start % ptsize;
 			child_offset +=
 			    VDEV_ANYRAID_START_OFFSET(cvd->vdev_ashift);
@@ -1713,7 +1856,7 @@ vdev_anyraid_xlate(vdev_t *cvd, const zfs_range_seg64_t *logical_rs,
 			uint64_t tgt_col = idx;
 			uint64_t ashift = anyraidvd->vdev_ashift;
 			uint64_t tile_start = VDEV_ANYRAID_START_OFFSET(
-			    anyraidvd->vdev_ashift) + atn->atn_tile_idx *
+			    anyraidvd->vdev_ashift) + tile_idx *
 			    ptsize;
 
 			/*
@@ -2415,35 +2558,6 @@ tasklist_read(vdev_t *vd)
 		vart->vart_tile = rtp->rtp_tile;
 		vart->vart_task = rtp->rtp_task;
 
-		/*
-		 * We need to disable metaslabs here; any metaslabs that are
-		 * after the first done task but before or containing the
-		 * resume offset.
-		 */
-		if (i >= done && vart->vart_task <= var->var_task) {
-			uint64_t ms_per_tile = va->vd_tile_size >>
-			    vd->vdev_ms_shift;
-			uint64_t start = vart->vart_tile * ms_per_tile;
-			uint64_t end = start + ms_per_tile;
-			for (uint64_t m = start; m < end; m++) {
-				ASSERT(vd->vdev_ms);
-				metaslab_t *ms = vd->vdev_ms[m];
-				if (vart->vart_task == var->var_task) {
-					zfs_range_seg64_t log, phys, rem;
-					log.rs_start = ms->ms_start;
-					log.rs_end = ms->ms_start + ms->ms_size;
-					vdev_xlate(vd->vdev_child[
-					    vart->vart_source_disk], &log,
-					    &phys, &rem);
-					if (phys.rs_start == phys.rs_end ||
-					    phys.rs_start > var->var_offset)
-						continue;
-				}
-				metaslab_disable_nowait(ms);
-				vart->vart_dis_ms++;
-			}
-		}
-
 		rw_enter(&va->vd_lock, RW_WRITER);
 		vdev_anyraid_node_t *van =
 		    va->vd_children[vart->vart_source_disk];
@@ -2507,54 +2621,6 @@ disable_tail:
 		}
 	}
 	return (0);
-}
-
-static void
-anyraid_relocate_sync(void *arg, dmu_tx_t *tx)
-{
-	spa_t *spa = arg;
-	int txgoff = dmu_tx_get_txg(tx) & TXG_MASK;
-	vdev_anyraid_relocate_t *var = spa->spa_anyraid_relocate;
-
-	mutex_enter(&var->var_lock);
-	/*
-	 * Ensure there are no i/os to the range that is being committed.
-	 */
-	uint64_t old_offset = var->var_synced_offset;
-	uint64_t old_task = var->var_synced_task;
-
-	ASSERT3U(var->var_task_pertxg[txgoff], >=, old_task);
-	ASSERT(var->var_task_pertxg[txgoff] > old_task ||
-	    var->var_offset_pertxg[txgoff] >= old_offset);
-
-	uint64_t new_offset =
-	    MIN(var->var_offset_pertxg[txgoff], var->var_failed_offset);
-	uint64_t new_task =
-	    MIN(var->var_task_pertxg[txgoff], var->var_failed_task);
-	/*
-	 * We should not have committed anything that failed.
-	 */
-	mutex_exit(&var->var_lock);
-
-	vdev_t *vd = vdev_lookup_top(spa, var->var_vd);
-	vdev_anyraid_t *va = vd->vdev_tsd;
-
-	zfs_locked_range_t *lr = zfs_rangelock_enter(&va->vd_rangelock,
-	    old_offset, new_offset - old_offset,
-	    RL_WRITER);
-
-	var->var_synced_offset = new_offset;
-	var->var_synced_task = new_task;
-	var->var_offset_pertxg[txgoff] = 0;
-	var->var_task_pertxg[txgoff] = 0;
-	zfs_rangelock_exit(lr);
-
-	mutex_enter(&var->var_lock);
-	var->var_bytes_copied += var->var_bytes_copied_pertxg[txgoff];
-	var->var_bytes_copied_pertxg[txgoff] = 0;
-
-	tasklist_write(spa, var, tx);
-	mutex_exit(&var->var_lock);
 }
 
 static void
@@ -2636,10 +2702,6 @@ anyraid_relocate_complete_sync(void *arg, dmu_tx_t *tx)
 	vdev_anyraid_relocate_t *var = spa->spa_anyraid_relocate;
 	vdev_t *vd = vdev_lookup_top(spa, var->var_vd);
 	vdev_anyraid_t *va = vd->vdev_tsd;
-
-	for (int i = 0; i < TXG_SIZE; i++) {
-		VERIFY0(var->var_offset_pertxg[i]);
-	}
 
 	rw_enter(&va->vd_lock, RW_WRITER);
 	/*
@@ -2979,14 +3041,11 @@ anyraid_relocate_write_done(zio_t *zio)
 		var->var_failed_offset =
 		    MIN(var->var_failed_offset, ama->ama_lr->lr_offset);
 		var->var_failed_task = MIN(var->var_failed_task, ama->ama_tid);
+	} else {
+		var->var_bytes_copied += zio->io_size;
 	}
 	ASSERT3U(var->var_outstanding_bytes, >=, zio->io_size);
 	var->var_outstanding_bytes -= zio->io_size;
-	if (ama->ama_lr->lr_offset + ama->ama_lr->lr_length <
-	    var->var_failed_offset) {
-		var->var_bytes_copied_pertxg[ama->ama_txg & TXG_MASK] +=
-		    zio->io_size;
-	}
 	cv_signal(&var->var_cv);
 	mutex_exit(&var->var_lock);
 
@@ -3008,9 +3067,9 @@ anyraid_relocate_read_done(zio_t *zio)
 	/*
 	 * If the read failed, or if it was done on a vdev that is not fully
 	 * healthy (e.g. a child that has a resilver in progress), we may not
-	 * have the correct data.  Note that it's OK if the write proceeds.
-	 * It may write garbage but the location is otherwise unused and we
-	 * will retry later due to vre_failed_offset.
+	 * have the correct data.  The write still proceeds: the destination
+	 * is not used yet, and the failure keeps the column from being
+	 * switched to it.
 	 */
 	if (zio->io_error != 0 || !vdev_dtl_empty(zio->io_vd, DTL_MISSING)) {
 		zfs_dbgmsg("relocate read failed off=%llu size=%llu txg=%llu "
@@ -3025,214 +3084,206 @@ anyraid_relocate_read_done(zio_t *zio)
 		/* Force a relocate pause on errors */
 		var->var_failed_offset =
 		    MIN(var->var_failed_offset, ama->ama_lr->lr_offset);
+		var->var_failed_task = MIN(var->var_failed_task, ama->ama_tid);
 		mutex_exit(&var->var_lock);
 	}
 	zio_nowait(ama->ama_zio);
 }
 
-static void
-anyraid_relocate_record_progress(vdev_anyraid_relocate_t *var,
-    uint64_t offset, uint64_t task, dmu_tx_t *tx)
+/*
+ * Where slot idx of child cvd starts, computed as the I/O path of this parity
+ * type computes it.
+ */
+static uint64_t
+anyraid_col_start(vdev_t *vd, vdev_t *cvd, uint16_t idx)
 {
-	int txgoff = dmu_tx_get_txg(tx) & TXG_MASK;
-	spa_t *spa = dmu_tx_pool(tx)->dp_spa;
+	vdev_anyraid_t *va = vd->vdev_tsd;
 
-	if (offset == 0)
-		return;
-
-	mutex_enter(&var->var_lock);
-	var->var_offset = offset;
-
-	if (var->var_offset_pertxg[txgoff] == 0) {
-		dsl_sync_task_nowait(dmu_tx_pool(tx), anyraid_relocate_sync,
-		    spa, tx);
+	if (va->vd_parity_type == VAP_RAIDZ) {
+		return (VDEV_ANYRAID_START_OFFSET(vd->vdev_ashift) +
+		    idx * va->vd_tile_size);
 	}
-	var->var_offset_pertxg[txgoff] = offset;
-	var->var_task_pertxg[txgoff] = task;
-	mutex_exit(&var->var_lock);
+	return (anyraid_slot_offset(cvd, va, idx));
 }
 
-static boolean_t
-anyraid_relocate_impl(vdev_t *vd, vdev_anyraid_relocate_t *var,
-    zfs_range_tree_t *rt, dmu_tx_t *tx)
+/* The node of a tile that holds column (disk, idx), if any. */
+static anyraid_tile_node_t *
+anyraid_find_col(vdev_anyraid_t *va, uint32_t tile_id, uint8_t disk,
+    uint16_t idx)
+{
+	ASSERT(RW_LOCK_HELD(&va->vd_lock));
+	anyraid_tile_t search;
+	search.at_tile_id = tile_id;
+	anyraid_tile_t *tile = avl_find(&va->vd_tile_map, &search, NULL);
+	ASSERT(tile);
+	for (anyraid_tile_node_t *atn = list_head(&tile->at_list); atn != NULL;
+	    atn = list_next(&tile->at_list, atn)) {
+		if (atn->atn_disk == disk && atn->atn_tile_idx == idx)
+			return (atn);
+	}
+	return (NULL);
+}
+
+struct anyraid_snap_arg {
+	zfs_range_tree_t *sa_rt;
+	uint64_t	sa_tile_start;
+	uint64_t	sa_row;
+	uint_t		sa_ashift;
+};
+
+/* Add the rows of an allocated logical range, as offsets in a column. */
+static void
+anyraid_snap_add(void *arg, uint64_t start, uint64_t size)
+{
+	struct anyraid_snap_arg *sa = arg;
+	uint64_t first = (start - sa->sa_tile_start) / sa->sa_row;
+	uint64_t last = (start + size - sa->sa_tile_start + sa->sa_row - 1) /
+	    sa->sa_row;
+
+	/* Two blocks can share a row. */
+	zfs_range_tree_clear(sa->sa_rt, first << sa->sa_ashift,
+	    (last - first) << sa->sa_ashift);
+	zfs_range_tree_add(sa->sa_rt, first << sa->sa_ashift,
+	    (last - first) << sa->sa_ashift);
+}
+
+/*
+ * The rows of the moving column that hold allocated space, as offsets in the
+ * column.  It is taken once the task is armed: a block allocated later is
+ * written to the destination as well, and a block allocated earlier is in the
+ * snapshot.
+ */
+static zfs_range_tree_t *
+anyraid_move_snapshot(spa_t *spa, vdev_anyraid_relocate_t *var,
+    vdev_anyraid_relocate_task_t *vart)
+{
+	spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
+	vdev_t *vd = vdev_lookup_top(spa, var->var_vd);
+	vdev_anyraid_t *va = vd->vdev_tsd;
+	uint64_t ltsize = va->vd_width * va->vd_tile_size;
+
+	struct anyraid_snap_arg sa;
+	sa.sa_rt = zfs_range_tree_create(NULL, ZFS_RANGE_SEG64, NULL, 0,
+	    vd->vdev_ashift);
+	sa.sa_tile_start = vart->vart_tile * ltsize;
+	sa.sa_row = (uint64_t)va->vd_width << vd->vdev_ashift;
+	sa.sa_ashift = vd->vdev_ashift;
+
+	uint64_t first = sa.sa_tile_start >> vd->vdev_ms_shift;
+	uint64_t last = MIN(vd->vdev_ms_count,
+	    (sa.sa_tile_start + ltsize) >> vd->vdev_ms_shift);
+	for (uint64_t m = first; m < last; m++) {
+		metaslab_t *msp = vd->vdev_ms[m];
+
+		mutex_enter(&msp->ms_lock);
+		/* A metaslab created this txg has no allocation yet. */
+		if (msp->ms_new) {
+			mutex_exit(&msp->ms_lock);
+			continue;
+		}
+		VERIFY0(metaslab_load(msp));
+
+		/*
+		 * The allocated space is what ms_allocatable lacks.  Space
+		 * being freed is in neither, and is copied too.
+		 */
+		uint64_t shift, start;
+		zfs_range_seg_type_t type = metaslab_calculate_range_tree_type(
+		    vd, msp, &start, &shift);
+		zfs_range_tree_t *rt = zfs_range_tree_create_flags(NULL, type,
+		    NULL, start, shift, ZFS_RT_F_DYN_NAME,
+		    metaslab_rt_name(msp->ms_group, msp,
+		    "anyraid_move_snapshot:rt"));
+		zfs_range_tree_add(rt, msp->ms_start, msp->ms_size);
+		zfs_range_tree_walk(msp->ms_allocatable, zfs_range_tree_remove,
+		    rt);
+		mutex_exit(&msp->ms_lock);
+
+		zfs_range_tree_walk(rt, anyraid_snap_add, &sa);
+		zfs_range_tree_vacate(rt, NULL, NULL);
+		zfs_range_tree_destroy(rt);
+	}
+	spa_config_exit(spa, SCL_CONFIG, FTAG);
+	return (sa.sa_rt);
+}
+
+/*
+ * Copy the first rows of rt, at most anyraid_relocate_max_move_bytes of the
+ * column, from the source slot to the destination slot.
+ */
+static void
+anyraid_move_copy_chunk(vdev_t *vd, vdev_anyraid_relocate_t *var,
+    vdev_anyraid_relocate_task_t *vart, zfs_range_tree_t *rt, dmu_tx_t *tx)
 {
 	spa_t *spa = vd->vdev_spa;
-	uint_t ashift = vd->vdev_top->vdev_ashift;
-	vdev_anyraid_relocate_task_t *vart = list_head(&var->var_list);
 	vdev_anyraid_t *va = vd->vdev_tsd;
+	uint_t ashift = vd->vdev_ashift;
+	uint64_t row = (uint64_t)va->vd_width << ashift;
+	uint64_t tile_start = vart->vart_tile * va->vd_width *
+	    va->vd_tile_size;
 
 	zfs_range_seg_t *rs = zfs_range_tree_first(rt);
 	ASSERT(rs);
 	uint64_t offset = zfs_rs_get_start(rs, rt);
-	ASSERT(IS_P2ALIGNED(offset, 1 << ashift));
 	uint64_t size = zfs_rs_get_end(rs, rt) - offset;
-	ASSERT3U(size, >=, 1 << ashift);
-	ASSERT(IS_P2ALIGNED(size, 1 << ashift));
-
-	size = MIN(size, anyraid_relocate_max_move_bytes);
-	size = MAX(size, 1 << ashift);
-
+	ASSERT(IS_P2ALIGNED(offset, 1ULL << ashift));
+	ASSERT(IS_P2ALIGNED(size, 1ULL << ashift));
+	size = MIN(size, P2ALIGN_TYPED(anyraid_relocate_max_move_bytes,
+	    1ULL << ashift, uint64_t));
+	size = MAX(size, 1ULL << ashift);
 	zfs_range_tree_remove(rt, offset, size);
 
 	anyraid_move_arg_t *ama = kmem_zalloc(sizeof (*ama), KM_SLEEP);
 	ama->ama_var = var;
-	ama->ama_lr = zfs_rangelock_enter(&va->vd_rangelock,
-	    offset, size, RL_WRITER);
 	ama->ama_txg = dmu_tx_get_txg(tx);
 	ama->ama_size = size;
 	ama->ama_tid = vart->vart_task;
 
-	anyraid_relocate_record_progress(var, offset + size, vart->vart_task,
-	    tx);
-
 	/*
-	 * SCL_STATE will be released when the read and write are done,
-	 * by raidz_reflow_write_done().
+	 * SCL_STATE before the rows: a write that waits for them in
+	 * vdev_anyraid_io_start() holds SCL_ZIO.  Both are released by
+	 * anyraid_relocate_write_done().
 	 */
 	spa_config_enter(spa, SCL_STATE, spa, RW_READER);
+	ama->ama_lr = zfs_rangelock_enter(&va->vd_rangelock,
+	    tile_start + (offset >> ashift) * row, (size >> ashift) * row,
+	    RL_WRITER);
 
 	mutex_enter(&var->var_lock);
 	var->var_outstanding_bytes += size;
+	var->var_offset = offset + size;
 	mutex_exit(&var->var_lock);
 
-	/* Allocate ABD and ZIO for each child we write. */
-	int txgoff = dmu_tx_get_txg(tx) & TXG_MASK;
-	zio_t *pio = spa->spa_txg_zio[txgoff];
+	zio_t *pio = spa->spa_txg_zio[ama->ama_txg & TXG_MASK];
 	abd_t *abd = abd_alloc_for_io(size, B_FALSE);
 	vdev_t *source_vd = vd->vdev_child[vart->vart_source_disk];
 	vdev_t *dest_vd = vd->vdev_child[vart->vart_dest_disk];
-	uint64_t source_header =
-	    VDEV_ANYRAID_START_OFFSET(source_vd->vdev_ashift);
-	uint64_t dest_header =
-	    VDEV_ANYRAID_START_OFFSET(dest_vd->vdev_ashift);
-	uint64_t dest_off = dest_header +
-	    vart->vart_dest_idx * va->vd_tile_size +
-	    ((offset - source_header) % va->vd_tile_size);
-	ama->ama_zio = zio_vdev_child_io(pio, NULL,
-	    dest_vd, dest_off, abd, size,
-	    ZIO_TYPE_WRITE, ZIO_PRIORITY_REMOVAL,
-	    ZIO_FLAG_CANFAIL, anyraid_relocate_write_done, ama);
+	ama->ama_zio = zio_vdev_child_io(pio, NULL, dest_vd,
+	    anyraid_col_start(vd, dest_vd, vart->vart_dest_idx) + offset, abd,
+	    size, ZIO_TYPE_WRITE, ZIO_PRIORITY_REMOVAL, ZIO_FLAG_CANFAIL,
+	    anyraid_relocate_write_done, ama);
 
-	zio_nowait(zio_vdev_child_io(pio, NULL,
-	    vd->vdev_child[vart->vart_source_disk],
-	    offset, abd, size, ZIO_TYPE_READ, ZIO_PRIORITY_REMOVAL,
-	    ZIO_FLAG_CANFAIL, anyraid_relocate_read_done, ama));
-	return (zfs_range_tree_numsegs(rt) == 0);
+	zio_nowait(zio_vdev_child_io(pio, NULL, source_vd,
+	    anyraid_col_start(vd, source_vd, vart->vart_source_idx) + offset,
+	    abd, size, ZIO_TYPE_READ, ZIO_PRIORITY_REMOVAL, ZIO_FLAG_CANFAIL,
+	    anyraid_relocate_read_done, ama));
 }
 
-struct physify_arg {
-	zfs_range_tree_t *rt;
-	vdev_t *vd;
-};
-
-static void
-anyraid_rt_physify(void *arg, uint64_t start, uint64_t size)
+/*
+ * Copy the allocated rows of the moving column.  Returns once every chunk has
+ * landed.
+ */
+static int
+anyraid_move_copy_column(spa_t *spa, vdev_anyraid_relocate_t *var,
+    vdev_anyraid_relocate_task_t *vart, zthr_t *zthr)
 {
-	struct physify_arg *pa = (struct physify_arg *)arg;
-	zfs_range_tree_t *rt = pa->rt;
-	vdev_t *vd = pa->vd;
-	ASSERT3U(size, >, 0);
+	zfs_range_tree_t *rt = anyraid_move_snapshot(spa, var, vart);
 
-	zfs_range_seg64_t logical, physical, remain;
-	logical.rs_start = start;
-	logical.rs_end = start + size;
-	vdev_xlate(vd, &logical, &physical, &remain);
-	ASSERT3U(remain.rs_end, ==, remain.rs_start);
-	/*
-	 * This can happen if the tile has actually already been moved,
-	 * but the synced state hasn't caught up.
-	 */
-	if (physical.rs_end == physical.rs_start)
-		return;
-	ASSERT(physical.rs_end - physical.rs_start);
-	zfs_range_tree_add(rt, physical.rs_start,
-	    physical.rs_end - physical.rs_start);
-}
-
-static vdev_t *
-process_one_metaslab(spa_t *spa, metaslab_t *msp, vdev_t *pvd,
-    vdev_anyraid_t *va, vdev_anyraid_relocate_task_t *vart, zthr_t *zthr)
-{
-	vdev_anyraid_relocate_t *var = spa->spa_anyraid_relocate;
-	vdev_t *source_vd = pvd->vdev_child[vart->vart_source_disk];
-	metaslab_disable_nowait(msp);
-	mutex_enter(&msp->ms_lock);
-
-	/*
-	 * The metaslab may be newly created (for the expanded space), in which
-	 * case its trees won't exist yet, so we need to bail out early.
-	 */
-	if (msp->ms_new) {
-		mutex_exit(&msp->ms_lock);
-		metaslab_enable(msp, B_FALSE, B_FALSE);
-		if (vart->vart_dis_ms > 0) {
-			vart->vart_dis_ms--;
-			metaslab_enable(msp, B_FALSE, B_FALSE);
-		}
-		return (pvd);
-	}
-
-	VERIFY0(metaslab_load(msp));
-
-	/*
-	 * We want to copy everything except the free (allocatable) space.
-	 * Note that there may be a little bit more free space (e.g. in
-	 * ms_defer), and it's fine to copy that too.
-	 */
-	uint64_t shift, start;
-	zfs_range_seg_type_t type = metaslab_calculate_range_tree_type(pvd,
-	    msp, &start, &shift);
-	zfs_range_tree_t *rt = zfs_range_tree_create_flags(NULL, type, NULL,
-	    start, shift, ZFS_RT_F_DYN_NAME, metaslab_rt_name(msp->ms_group,
-	    msp, "spa_anyraid_relocate_thread:rt"));
-	zfs_range_tree_add(rt, msp->ms_start, msp->ms_size);
-	zfs_range_tree_walk(msp->ms_allocatable, zfs_range_tree_remove, rt);
-	mutex_exit(&msp->ms_lock);
-
-	/*
-	 * Now we need to convert the logical offsets of the metaslab into the
-	 * physical offsets on disk. We also skip any extents that don't map to
-	 * to the source tile.
-	 */
-	zfs_range_tree_t *phys = zfs_range_tree_create_flags(NULL,
-	    ZFS_RANGE_SEG64, NULL, 0, pvd->vdev_ashift, ZFS_RT_F_DYN_NAME,
-	    metaslab_rt_name(msp->ms_group, msp,
-	    "spa_anyraid_relocate_thread2:rt"));
-	struct physify_arg pa;
-	pa.rt = phys;
-	pa.vd = source_vd;
-	zfs_range_tree_walk(rt, anyraid_rt_physify, &pa);
-	zfs_range_tree_vacate(rt, NULL, NULL);
-	zfs_range_tree_destroy(rt);
-
-	/*
-	 * When we are resuming from a paused relocate (i.e.
-	 * when importing a pool with a relocate in progress),
-	 * discard any state that we have already processed.
-	 */
-	if (vart->vart_task <= var->var_task) {
-		uint64_t end = vart->vart_task == var->var_task ?
-		    var->var_offset : P2ALIGN_TYPED(UINT64_MAX,
-		    (1 << pvd->vdev_ashift), uint64_t);
-		zfs_range_tree_clear(phys, 0, end);
-	}
-
-	while (!zthr_iscancelled(zthr) && !zfs_range_tree_is_empty(phys) &&
+	while (!zthr_iscancelled(zthr) && !zfs_range_tree_is_empty(rt) &&
 	    var->var_failed_offset == UINT64_MAX) {
 		/*
-		 * We need to periodically drop the config lock so that writers
-		 * can get in.  Additionally, we can't wait for a txg to sync
-		 * while holding a config lock (since a waiting writer could
-		 * cause a 3-way deadlock with the sync thread, which also gets
-		 * a config lock for reader).  So we can't hold the config lock
-		 * while calling dmu_tx_assign().
-		 */
-		spa_config_exit(spa, SCL_CONFIG, FTAG);
-		rw_exit(&va->vd_lock);
-
-		/*
-		 * If requested, pause the reflow when the amount specified by
-		 * anyraid_relocate_max_bytes_pause is reached.
+		 * If requested, pause the relocation when the amount specified
+		 * by anyraid_relocate_max_bytes_pause is reached.
 		 *
 		 * This pause is only used during testing or debugging.
 		 */
@@ -3249,172 +3300,219 @@ process_one_metaslab(spa_t *spa, metaslab_t *msp, vdev_t *pvd,
 		}
 		mutex_exit(&var->var_lock);
 
-		dmu_tx_t *tx = dmu_tx_create_dd(spa_get_dsl(spa)->dp_mos_dir);
-
-		VERIFY0(dmu_tx_assign(tx, DMU_TX_WAIT | DMU_TX_SUSPEND));
-		uint64_t txg = dmu_tx_get_txg(tx);
-
 		/*
-		 * Reacquire the vdev_config lock. Theoretically, the vdev_t
-		 * that we're working on may have changed.
+		 * No config lock may be held across dmu_tx_assign(): a waiting
+		 * writer would deadlock with the sync thread.
 		 */
-		rw_enter(&va->vd_lock, RW_READER);
-		spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
-		pvd = vdev_lookup_top(spa, var->var_vd);
+		dmu_tx_t *tx = dmu_tx_create_dd(spa_get_dsl(spa)->dp_mos_dir);
+		VERIFY0(dmu_tx_assign(tx, DMU_TX_WAIT | DMU_TX_SUSPEND));
 
-		boolean_t needsync = anyraid_relocate_impl(pvd, var, phys, tx);
+		spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
+		vdev_t *vd = vdev_lookup_top(spa, var->var_vd);
+		anyraid_move_copy_chunk(vd, var, vart, rt, tx);
+		spa_config_exit(spa, SCL_CONFIG, FTAG);
 
 		dmu_tx_commit(tx);
-
-		if (needsync) {
-			spa_config_exit(spa, SCL_CONFIG, FTAG);
-			rw_exit(&va->vd_lock);
-			txg_wait_synced(spa->spa_dsl_pool, txg);
-			rw_enter(&va->vd_lock, RW_READER);
-			spa_config_enter(spa, SCL_CONFIG, FTAG,
-			    RW_READER);
-		}
 	}
-
-	spa_config_exit(spa, SCL_CONFIG, FTAG);
-
-	metaslab_enable(msp, B_FALSE, B_FALSE);
-	if (vart->vart_dis_ms > 0) {
-		vart->vart_dis_ms--;
-		metaslab_enable(msp, B_FALSE, B_FALSE);
-	}
-	zfs_range_tree_vacate(phys, NULL, NULL);
-	zfs_range_tree_destroy(phys);
-
-	spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
-	return (vdev_lookup_top(spa, var->var_vd));
-}
-
-/*
- * AnyRAID relocate background thread
- */
-static void
-spa_anyraid_relocate_thread(void *arg, zthr_t *zthr)
-{
-	spa_t *spa = arg;
-	vdev_anyraid_relocate_t *var = spa->spa_anyraid_relocate;
-	ASSERT(var);
-	spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
-	vdev_t *pvd = vdev_lookup_top(spa, var->var_vd);
-	vdev_anyraid_t *va = pvd->vdev_tsd;
+	zfs_range_tree_vacate(rt, NULL, NULL);
+	zfs_range_tree_destroy(rt);
 
 	mutex_enter(&var->var_lock);
-	/* Iterate over all the tasks */
-	for (vdev_anyraid_relocate_task_t *vart =
-	    list_head(&var->var_list);
-	    vart != NULL && !zthr_iscancelled(zthr);
-	    vart = list_head(&var->var_list)) {
-		mutex_exit(&var->var_lock);
-		rw_enter(&va->vd_lock, RW_READER);
-		uint16_t ms_shift = pvd->vdev_ms_shift;
-		uint64_t start = (va->vd_width * vart->vart_tile *
-		    va->vd_tile_size) >> ms_shift;
-		uint64_t starting_offset = var->var_offset;
-		uint64_t end = start + ((va->vd_width * va->vd_tile_size) >>
-		    ms_shift);
-		for (uint64_t i = start; i < end && !zthr_iscancelled(zthr);
-		    i++) {
-			pvd = process_one_metaslab(spa, pvd->vdev_ms[i], pvd,
-			    va, vart, zthr);
+	while (var->var_outstanding_bytes != 0)
+		cv_wait(&var->var_cv, &var->var_lock);
+	int error = 0;
+	if (var->var_failed_offset != UINT64_MAX)
+		error = SET_ERROR(EIO);
+	mutex_exit(&var->var_lock);
+
+	if (error == 0 && zthr_iscancelled(zthr))
+		error = SET_ERROR(ECANCELED);
+	return (error);
+}
+
+typedef struct anyraid_flip_arg {
+	vdev_anyraid_relocate_task_t *fa_vart;
+	boolean_t	fa_noswap;	/* switched before an import */
+	boolean_t	fa_force;
+	int		fa_result;
+} anyraid_flip_arg_t;
+
+/*
+ * Switch the moving column to its destination.  This runs in syncing context
+ * so that the task list and every child's tile map record the switch in the
+ * same txg; until that txg has synced, writes still go to the source too.
+ */
+static void
+anyraid_move_flip_sync(void *arg, dmu_tx_t *tx)
+{
+	anyraid_flip_arg_t *fa = arg;
+	vdev_anyraid_relocate_task_t *vart = fa->fa_vart;
+	spa_t *spa = dmu_tx_pool(tx)->dp_spa;
+	vdev_anyraid_relocate_t *var = spa->spa_anyraid_relocate;
+	vdev_t *vd = vdev_lookup_top(spa, var->var_vd);
+	vdev_anyraid_t *va = vd->vdev_tsd;
+	zfs_locked_range_t *lr = NULL;
+
+	if (!fa->fa_noswap) {
+		/*
+		 * Wait for nothing here, but switch only once the writes
+		 * captured ARMED have landed, so that a destination leg that
+		 * failed is known.
+		 */
+		uint64_t ltsize = va->vd_width * va->vd_tile_size;
+		lr = zfs_rangelock_tryenter(&va->vd_rangelock,
+		    vart->vart_tile * ltsize, ltsize, RL_WRITER);
+		if (lr == NULL && !fa->fa_force) {
+			fa->fa_result = SET_ERROR(EAGAIN);
+			return;
 		}
 
-		if (zthr_iscancelled(zthr) ||
-		    var->var_failed_offset != UINT64_MAX) {
-			rw_exit(&va->vd_lock);
-			mutex_enter(&var->var_lock);
-			break;
-		}
-		rw_exit(&va->vd_lock);
 		rw_enter(&va->vd_lock, RW_WRITER);
-
-		anyraid_tile_t search;
-		search.at_tile_id = vart->vart_tile;
-		anyraid_tile_t *tile = avl_find(&va->vd_tile_map, &search,
-		    NULL);
-		boolean_t found = B_FALSE;
-		int count = 0;
-		for (anyraid_tile_node_t *atn = list_head(&tile->at_list); atn;
-		    atn = list_next(&tile->at_list, atn)) {
-			ASSERT(atn);
-			if (atn->atn_disk != vart->vart_source_disk) {
-				count++;
-				continue;
-			}
-			ASSERT3U(atn->atn_tile_idx, ==, vart->vart_source_idx);
-			atn->atn_disk = vart->vart_dest_disk;
-			atn->atn_tile_idx = vart->vart_dest_idx;
-			found = B_TRUE;
-			break;
+		anyraid_tile_node_t *atn = anyraid_find_col(va,
+		    vart->vart_tile, vart->vart_source_disk,
+		    vart->vart_source_idx);
+		VERIFY(atn);
+		if (va->vd_move.am_dest_dirty != 0 ||
+		    var->var_failed_offset != UINT64_MAX ||
+		    !vdev_dtl_empty(vd->vdev_child[vart->vart_source_disk],
+		    DTL_MISSING) ||
+		    !vdev_dtl_empty(vd->vdev_child[vart->vart_dest_disk],
+		    DTL_MISSING)) {
+			rw_exit(&va->vd_lock);
+			if (lr != NULL)
+				zfs_rangelock_exit(lr);
+			fa->fa_result = SET_ERROR(EIO);
+			return;
 		}
-		IMPLY(!found, starting_offset >= end);
-		mutex_enter(&var->var_lock);
-		list_remove(&var->var_list, vart);
-		list_insert_tail(&var->var_done_list, vart);
+		atn->atn_disk = vart->vart_dest_disk;
+		atn->atn_tile_idx = vart->vart_dest_idx;
+		va->vd_move.am_phase = ARMP_COMMITTING;
 		rw_exit(&va->vd_lock);
 	}
-	spa_config_exit(spa, SCL_CONFIG, FTAG);
+
+	mutex_enter(&var->var_lock);
+	list_remove(&var->var_list, vart);
+	list_insert_tail(&var->var_done_list, vart);
+	var->var_synced_task = vart->vart_task;
+	var->var_synced_offset = 0;
+	tasklist_write(spa, var, tx);
 	mutex_exit(&var->var_lock);
 
 	/*
-	 * The txg_wait_synced() here ensures that all relocate zio's have
-	 * completed, and var_failed_offset has been set if necessary.  It
-	 * also ensures that the progress of the last anyraid_relocate_sync()
-	 * is written to disk before anyraid_relocate_complete_sync() changes
-	 * the in-memory var_state.  vdev_anyraid_io_start() uses var_state to
-	 * determine if a relocate is in progress, in which case we may need to
-	 * write to both old and new locations.  Therefore we can only change
-	 * var_state once this is not necessary, which is once the on-disk
-	 * progress (in spa_ubsync) has been set past any possible writes (to
-	 * the end of the last metaslab).
+	 * Write this txg's tile map on every child, after a flush of what the
+	 * copy wrote and before the uberblock that commits the task list.
 	 */
-	txg_wait_synced(spa->spa_dsl_pool, 0);
+	vdev_config_dirty(vd);
+	vdev_dirty(vd, 0, NULL, dmu_tx_get_txg(tx));
 
-	if (!zthr_iscancelled(zthr) && list_head(&var->var_list) == NULL) {
-		/*
-		 * We are not being canceled or paused, so the reflow must be
-		 * complete. In that case also mark it as completed on disk.
-		 */
-		ASSERT3U(var->var_failed_offset, ==, UINT64_MAX);
-		ASSERT(spa->spa_anyraid_relocate);
-		VERIFY0(dsl_sync_task(spa_name(spa), NULL,
-		    anyraid_relocate_complete_sync, spa,
-		    0, ZFS_SPACE_CHECK_NONE));
-	} else {
-		/*
-		 * Wait for all copy zio's to complete and for all the
-		 * raidz_reflow_sync() synctasks to be run.
-		 */
-		spa_history_log_internal(spa, "relocate pause",
-		    NULL, "offset=%llu failed_offset=%lld/%lld",
-		    (long long)var->var_offset,
-		    (long long)var->var_failed_task,
-		    (long long)var->var_failed_offset);
-		if (var->var_failed_offset != UINT64_MAX) {
-			/*
-			 * Reset progress so that we will retry everything
-			 * after the point that something failed.
-			 */
-			var->var_offset = var->var_failed_offset;
-			var->var_task = var->var_failed_task;
-			var->var_failed_offset = UINT64_MAX;
-			var->var_failed_task = UINT64_MAX;
-			var->var_waiting_for_resilver = B_TRUE;
+	if (lr != NULL)
+		zfs_rangelock_exit(lr);
+	fa->fa_result = 0;
+}
+
+/*
+ * How many txgs the switch waits for a moment when no write to the tile is in
+ * flight, before it waits for one in open context and switches regardless.  A
+ * destination leg that then fails is in the DTL, like any failed write.
+ */
+static int anyraid_relocate_flip_tries = 10;
+
+static int
+anyraid_move_flip(spa_t *spa, vdev_anyraid_relocate_t *var,
+    anyraid_flip_arg_t *fa, zthr_t *zthr)
+{
+	vdev_anyraid_relocate_task_t *vart = fa->fa_vart;
+
+	for (int tries = 0; ; tries++) {
+		if (zthr_iscancelled(zthr))
+			return (SET_ERROR(ECANCELED));
+		fa->fa_force = (tries >= anyraid_relocate_flip_tries);
+		if (fa->fa_force) {
+			spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
+			vdev_anyraid_t *va =
+			    vdev_lookup_top(spa, var->var_vd)->vdev_tsd;
+			spa_config_exit(spa, SCL_CONFIG, FTAG);
+			uint64_t ltsize = va->vd_width * va->vd_tile_size;
+			zfs_locked_range_t *lr = zfs_rangelock_enter(
+			    &va->vd_rangelock, vart->vart_tile * ltsize,
+			    ltsize, RL_WRITER);
+			zfs_rangelock_exit(lr);
 		}
+		VERIFY0(dsl_sync_task(spa_name(spa), NULL,
+		    anyraid_move_flip_sync, fa, 0, ZFS_SPACE_CHECK_NONE));
+		if (fa->fa_result != EAGAIN)
+			return (fa->fa_result);
 	}
 }
 
-void
-spa_start_anyraid_relocate_thread(spa_t *spa)
+static void
+anyraid_move_set(spa_t *spa, vdev_anyraid_relocate_t *var,
+    const anyraid_move_t *am)
 {
-	ASSERT0P(spa->spa_anyraid_relocate_zthr);
-	spa->spa_anyraid_relocate_zthr = zthr_create("anyraid_relocate",
-	    spa_anyraid_relocate_thread_check, spa_anyraid_relocate_thread,
-	    spa, defclsyspri);
+	spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
+	vdev_anyraid_t *va = vdev_lookup_top(spa, var->var_vd)->vdev_tsd;
+	rw_enter(&va->vd_lock, RW_WRITER);
+	va->vd_move = *am;
+	rw_exit(&va->vd_lock);
+	spa_config_exit(spa, SCL_CONFIG, FTAG);
+}
+
+/*
+ * Move one column: arm the task so that writes go to both slots, copy what
+ * was allocated before, switch in syncing context, and drop the source once
+ * that txg has synced.  Any failure, pause or import starts the task over.
+ */
+static int
+anyraid_move_one(spa_t *spa, vdev_anyraid_relocate_t *var,
+    vdev_anyraid_relocate_task_t *vart, zthr_t *zthr)
+{
+	anyraid_flip_arg_t fa = { .fa_vart = vart };
+	anyraid_move_t am = {
+		.am_tile = vart->vart_tile,
+		.am_task = vart->vart_task,
+		.am_src_disk = vart->vart_source_disk,
+		.am_dst_disk = vart->vart_dest_disk,
+		.am_src_idx = vart->vart_source_idx,
+		.am_dst_idx = vart->vart_dest_idx,
+		.am_phase = ARMP_ARMED,
+		.am_dest_dirty = 0,
+	};
+	const anyraid_move_t idle = {
+		.am_tile = UINT32_MAX,
+		.am_phase = ARMP_IDLE,
+	};
+
+	mutex_enter(&var->var_lock);
+	var->var_task = vart->vart_task;
+	var->var_offset = 0;
+	mutex_exit(&var->var_lock);
+
+	spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
+	vdev_anyraid_t *va = vdev_lookup_top(spa, var->var_vd)->vdev_tsd;
+	rw_enter(&va->vd_lock, RW_WRITER);
+	boolean_t present = anyraid_find_col(va, vart->vart_tile,
+	    vart->vart_source_disk, vart->vart_source_idx) != NULL;
+	if (present)
+		va->vd_move = am;
+	rw_exit(&va->vd_lock);
+	spa_config_exit(spa, SCL_CONFIG, FTAG);
+
+	/*
+	 * The switch reached the tile map before a crash, but not the task
+	 * list.  Everything committed until then is on both slots.
+	 */
+	if (!present) {
+		fa.fa_noswap = B_TRUE;
+		VERIFY0(dsl_sync_task(spa_name(spa), NULL,
+		    anyraid_move_flip_sync, &fa, 0, ZFS_SPACE_CHECK_NONE));
+		return (fa.fa_result);
+	}
+
+	int error = anyraid_move_copy_column(spa, var, vart, zthr);
+	if (error == 0)
+		error = anyraid_move_flip(spa, var, &fa, zthr);
+	anyraid_move_set(spa, var, &idle);
+	return (error);
 }
 
 static boolean_t
@@ -3426,6 +3524,98 @@ vdev_anyraid_expand_child_replacing(vdev_t *anyraid_vd)
 			return (B_TRUE);
 	}
 	return (B_FALSE);
+}
+
+/* No child misses data or is being replaced. */
+static boolean_t
+anyraid_relocate_healed(spa_t *spa, vdev_anyraid_relocate_t *var)
+{
+	spa_config_enter(spa, SCL_STATE, FTAG, RW_READER);
+	vdev_t *vd = vdev_lookup_top(spa, var->var_vd);
+	boolean_t healed = !vdev_anyraid_expand_child_replacing(vd);
+	for (int c = 0; healed && c < vd->vdev_children; c++)
+		healed = vdev_dtl_empty(vd->vdev_child[c], DTL_MISSING);
+	spa_config_exit(spa, SCL_STATE, FTAG);
+	return (healed);
+}
+
+/*
+ * AnyRAID relocate background thread
+ */
+static void
+spa_anyraid_relocate_thread(void *arg, zthr_t *zthr)
+{
+	spa_t *spa = arg;
+	vdev_anyraid_relocate_t *var = spa->spa_anyraid_relocate;
+	ASSERT(var);
+	int error = 0;
+
+	for (;;) {
+		mutex_enter(&var->var_lock);
+		vdev_anyraid_relocate_task_t *vart = list_head(&var->var_list);
+		mutex_exit(&var->var_lock);
+		if (vart == NULL || zthr_iscancelled(zthr))
+			break;
+		if ((error = anyraid_move_one(spa, var, vart, zthr)) != 0)
+			break;
+	}
+
+	/*
+	 * The txg_wait_synced() here ensures that every relocate zio has
+	 * completed and that the last switch is on disk before
+	 * anyraid_relocate_complete_sync() changes the in-memory var_state.
+	 */
+	txg_wait_synced(spa->spa_dsl_pool, 0);
+
+	mutex_enter(&var->var_lock);
+	boolean_t done = list_head(&var->var_list) == NULL;
+	mutex_exit(&var->var_lock);
+	if (!zthr_iscancelled(zthr) && done) {
+		/*
+		 * We are not being canceled or paused, so the relocation must
+		 * be complete. In that case also mark it as completed on disk.
+		 */
+		ASSERT0(error);
+		ASSERT3U(var->var_failed_offset, ==, UINT64_MAX);
+		ASSERT(spa->spa_anyraid_relocate);
+		VERIFY0(dsl_sync_task(spa_name(spa), NULL,
+		    anyraid_relocate_complete_sync, spa,
+		    0, ZFS_SPACE_CHECK_NONE));
+		return;
+	}
+
+	spa_history_log_internal(spa, "relocate pause",
+	    NULL, "task=%llu error=%d failed_offset=%lld/%lld",
+	    (u_longlong_t)var->var_task, error,
+	    (long long)var->var_failed_task,
+	    (long long)var->var_failed_offset);
+	if (error != EIO)
+		return;
+
+	/*
+	 * Wait for a resilver, then copy the column again from the start.
+	 * The flag is set before the DTLs are tested, so that a resilver
+	 * that ends in between still wakes the thread.
+	 */
+	mutex_enter(&var->var_lock);
+	var->var_failed_offset = UINT64_MAX;
+	var->var_failed_task = UINT64_MAX;
+	var->var_waiting_for_resilver = B_TRUE;
+	mutex_exit(&var->var_lock);
+	if (anyraid_relocate_healed(spa, var)) {
+		mutex_enter(&var->var_lock);
+		var->var_waiting_for_resilver = B_FALSE;
+		mutex_exit(&var->var_lock);
+	}
+}
+
+void
+spa_start_anyraid_relocate_thread(spa_t *spa)
+{
+	ASSERT0P(spa->spa_anyraid_relocate_zthr);
+	spa->spa_anyraid_relocate_zthr = zthr_create("anyraid_relocate",
+	    spa_anyraid_relocate_thread_check, spa_anyraid_relocate_thread,
+	    spa, defclsyspri);
 }
 
 void
@@ -3485,8 +3675,6 @@ spa_anyraid_relocate_get_stats(spa_t *spa, pool_anyraid_relocate_stat_t *pars)
 
 	mutex_enter(&var->var_lock);
 	pars->pars_moved = var->var_bytes_copied;
-	for (int i = 0; i < TXG_SIZE; i++)
-		pars->pars_moved += var->var_bytes_copied_pertxg[i];
 	mutex_exit(&var->var_lock);
 
 	pars->pars_start_time = var->var_start_time;
