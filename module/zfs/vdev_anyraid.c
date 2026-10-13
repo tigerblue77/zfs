@@ -305,6 +305,21 @@ anyraid_child_compare(const void *p1, const void *p2)
 }
 
 /*
+ * vd_children_tree is sorted on free tiles, so a child leaves the tree while
+ * its freelist changes.  The caller holds vd_lock as writer.
+ */
+static void
+anyraid_child_free_tile(vdev_anyraid_t *va, uint8_t disk, uint16_t off)
+{
+	vdev_anyraid_node_t *van = va->vd_children[disk];
+
+	ASSERT(RW_WRITE_HELD(&va->vd_lock));
+	avl_remove(&va->vd_children_tree, van);
+	anyraid_freelist_add(&van->van_freelist, off);
+	avl_add(&va->vd_children_tree, van);
+}
+
+/*
  * Initialize private VDEV specific fields from the nvlist.
  */
 static int
@@ -2430,18 +2445,26 @@ tasklist_read(vdev_t *vd)
 		}
 
 		rw_enter(&va->vd_lock, RW_WRITER);
-		anyraid_freelist_t *af =
-		    &va->vd_children[vart->vart_source_disk]->van_freelist;
+		vdev_anyraid_node_t *van =
+		    va->vd_children[vart->vart_source_disk];
+		anyraid_freelist_t *af = &van->van_freelist;
 		boolean_t sourcefree = anyraid_freelist_isfree(af,
 		    vart->vart_source_idx);
-		if (sourcefree)
+		if (sourcefree) {
+			avl_remove(&va->vd_children_tree, van);
 			anyraid_freelist_remove(af, vart->vart_source_idx);
+			avl_add(&va->vd_children_tree, van);
+		}
 
-		af = &va->vd_children[vart->vart_dest_disk]->van_freelist;
+		van = va->vd_children[vart->vart_dest_disk];
+		af = &van->van_freelist;
 		boolean_t destfree = anyraid_freelist_isfree(af,
 		    vart->vart_dest_idx);
-		if (destfree)
+		if (destfree) {
+			avl_remove(&va->vd_children_tree, van);
 			anyraid_freelist_remove(af, vart->vart_dest_idx);
+			avl_add(&va->vd_children_tree, van);
+		}
 
 		// Either one or the other should be in the mapping already.
 		ASSERT3U(sourcefree, !=, destfree);
@@ -2545,8 +2568,7 @@ anyraid_scrub_done(spa_t *spa, dmu_tx_t *tx, void *arg)
 	for (vdev_anyraid_relocate_task_t *task =
 	    list_head(&var->var_done_list); task;
 	    task = list_head(&var->var_done_list)) {
-		anyraid_freelist_add(
-		    &va->vd_children[task->vart_source_disk]->van_freelist,
+		anyraid_child_free_tile(va, task->vart_source_disk,
 		    task->vart_source_idx);
 		list_remove(&var->var_done_list, task);
 		kmem_free(task, sizeof (*task));
@@ -2559,8 +2581,7 @@ anyraid_scrub_done(spa_t *spa, dmu_tx_t *tx, void *arg)
 	for (vdev_anyraid_relocate_task_t *task =
 	    list_head(&var->var_list); task;
 	    task = list_head(&var->var_list)) {
-		anyraid_freelist_add(
-		    &va->vd_children[task->vart_source_disk]->van_freelist,
+		anyraid_child_free_tile(va, task->vart_source_disk,
 		    task->vart_source_idx);
 		list_remove(&var->var_list, task);
 		kmem_free(task, sizeof (*task));
@@ -2735,8 +2756,10 @@ create_reloc_task(vdev_anyraid_t *va, struct rebal_node *donor, uint16_t offset,
 		task->vart_source_idx = offset;
 	ASSERT(rvan->van_capacity -
 	    anyraid_freelist_alloc(&rvan->van_freelist));
+	avl_remove(&va->vd_children_tree, rvan);
 	task->vart_dest_idx = anyraid_freelist_pop(
 	    &rvan->van_freelist);
+	avl_add(&va->vd_children_tree, rvan);
 	ASSERT3U(task->vart_dest_idx, <, rvan->van_capacity);
 	task->vart_tile = donor->arr[offset];
 	task->vart_task = (*tid)++;
@@ -3645,9 +3668,7 @@ out:
 	if (error != 0) {
 		vdev_anyraid_relocate_task_t *vart;
 		while ((vart = list_remove_head(&var->var_list))) {
-			vdev_anyraid_node_t *van =
-			    va->vd_children[vart->vart_dest_disk];
-			anyraid_freelist_add(&van->van_freelist,
+			anyraid_child_free_tile(va, vart->vart_dest_disk,
 			    vart->vart_dest_idx);
 			kmem_free(vart, sizeof (*vart));
 		}
