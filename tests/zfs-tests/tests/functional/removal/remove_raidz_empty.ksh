@@ -25,8 +25,8 @@
 #
 # STRATEGY:
 # 1. Create a pool with a raidz1 top-level vdev and write some data.
-# 2. For each of a raidz1, raidz2, disk, mirror, special mirror and dedup
-#    top-level vdev:
+# 2. For each of a raidz1, raidz2, raidz3, disk, mirror, special mirror and
+#    dedup top-level vdev:
 #    a. Add the vdev and turn off allocations from it right away.
 #    b. Write more data and verify that the new vdev stays empty.
 #    c. Remove the vdev and verify that it is gone at once, that no
@@ -93,7 +93,7 @@ log_onexit cleanup
 
 typeset -a disk
 typeset -i i
-for i in {1..16}; do
+for i in {1..20}; do
 	disk[$i]="$DISKDIR/dsk$i"
 	log_must mkfile $MINVDEVSIZE ${disk[$i]}
 done
@@ -111,10 +111,12 @@ size_orig=$(get_pool_prop size $TESTPOOL)
 # The vdev ids go up with every vdev added, the ids of the holes are not reused.
 remove_empty_vdev raidz1-1 raidz1 ${disk[4]} ${disk[5]} ${disk[6]}
 remove_empty_vdev raidz2-2 raidz2 ${disk[7]} ${disk[8]} ${disk[9]}
-remove_empty_vdev ${disk[10]} ${disk[10]}
-remove_empty_vdev mirror-4 mirror ${disk[11]} ${disk[12]}
-remove_empty_vdev mirror-5 special mirror ${disk[13]} ${disk[14]}
-remove_empty_vdev ${disk[15]} dedup ${disk[15]}
+remove_empty_vdev raidz3-3 raidz3 ${disk[10]} ${disk[11]} ${disk[12]} \
+    ${disk[13]}
+remove_empty_vdev ${disk[14]} ${disk[14]}
+remove_empty_vdev mirror-5 mirror ${disk[15]} ${disk[16]}
+remove_empty_vdev mirror-6 special mirror ${disk[17]} ${disk[18]}
+remove_empty_vdev ${disk[19]} dedup ${disk[19]}
 
 log_must test "$(zpool history -i $TESTPOOL | \
     grep -c "\[txg:[0-9]*\] vdev remove $TESTPOOL vdev (")" -eq $nremoved
@@ -124,7 +126,7 @@ log_must zdb -e -p $DISKDIR -bcc $TESTPOOL
 log_must zpool import -d $DISKDIR $TESTPOOL
 verify_pool $TESTPOOL
 
-remove_empty_vdev ${disk[16]} ${disk[16]}
+remove_empty_vdev ${disk[20]} ${disk[20]}
 verify_pool $TESTPOOL
 
 log_pass "Empty top-level vdevs are removed from a pool with a raidz vdev."
