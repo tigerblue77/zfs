@@ -2823,10 +2823,12 @@ vdev_raidz_redirect_extent_ok(vdev_t *vd, uint64_t offset, uint64_t size)
  * SPIKE: NULL if a table entry can stand for a block that the move moved,
  * or what rules it out.  An entry the move wrote passes; any other one is
  * damaged and would send reads, repairs, frees and claims where its block
- * does not lie.  Called once the parity epochs are installed.
+ * does not lie.  last_txg is the latest txg a move can have run in.
+ * Called once the parity epochs are installed.
  */
 static const char *
-vdev_raidz_redirect_damage(vdev_t *vd, const raidz_redirect_ent_t *e)
+vdev_raidz_redirect_damage(vdev_t *vd, const raidz_redirect_ent_t *e,
+    uint64_t last_txg)
 {
 	vdev_raidz_t *vdrz = vd->vdev_tsd;
 	uint64_t o = e->rde_offset;
@@ -2845,7 +2847,7 @@ vdev_raidz_redirect_damage(vdev_t *vd, const raidz_redirect_ent_t *e)
 		return ("the new extent overlaps the old one");
 	if (e->rde_new_birth <= e->rde_birth)
 		return ("the new birth is not after the birth");
-	if (e->rde_new_birth > spa_last_synced_txg(vd->vdev_spa))
+	if (e->rde_new_birth > last_txg)
 		return ("the new birth is after the pool's last txg");
 	if (vdev_raidz_epoch_of(vdrz, e->rde_new_birth) <=
 	    vdev_raidz_epoch_of(vdrz, e->rde_birth))
@@ -2890,13 +2892,20 @@ vdev_raidz_redirect_load(vdev_t *vd)
 	zap_cursor_t zc;
 	zap_attribute_t *za;
 	uint64_t damaged = 0;
+	uint64_t records = 0;
 	uint64_t obj;
+	hrtime_t start = gethrtime();
 	int err;
 
 	vdev_raidz_redirect_destroy(vdrz);
 	vdrz->vd_redirect_obj = 0;
 	vdrz->vd_redirect_damaged = 0;
-	if (vd->vdev_top_zap == 0)
+	spike_table_stats.sts_load_calls++;
+	spike_table_stats.sts_load_entries = 0;
+	spike_table_stats.sts_load_records = 0;
+	spike_table_stats.sts_load_ns = 0;
+	/* SPIKE: test-only, the table of a pool that has none. */
+	if (vd->vdev_top_zap == 0 || spike_redirect_load_skip)
 		return (0);
 	err = zap_lookup(mos, vd->vdev_top_zap, VDEV_TOP_ZAP_RAIDZ_REDIRECTS,
 	    sizeof (obj), 1, &obj);
@@ -2914,6 +2923,7 @@ vdev_raidz_redirect_load(vdev_t *vd)
 		raidz_redirect_ent_t ent = { 0 };
 		const char *why = NULL;
 
+		records++;
 		memcpy(key, za->za_name, sizeof (key));
 		ent.rde_offset = key[0];
 		ent.rde_birth = key[1];
@@ -2937,7 +2947,8 @@ vdev_raidz_redirect_load(vdev_t *vd)
 			ent.rde_new_asize = val[2];
 			ent.rde_old_reserved = val[3];
 			ent.rde_old_asize = val[4];
-			why = vdev_raidz_redirect_damage(vd, &ent);
+			why = vdev_raidz_redirect_damage(vd, &ent,
+			    spa_last_synced_txg(spa));
 			if (why == NULL &&
 			    vdev_raidz_redirect_get(vd, key[0], key[1], NULL))
 				why = "its key is there twice";
@@ -2977,6 +2988,10 @@ vdev_raidz_redirect_load(vdev_t *vd)
 	vdev_dbgmsg(vd, "vdev_raidz_load: %llu redirects from object %llu, "
 	    "%llu damaged", (u_longlong_t)avl_numnodes(&vdrz->vd_redirects),
 	    (u_longlong_t)obj, (u_longlong_t)damaged);
+	spike_table_stats.sts_load_entries = avl_numnodes(&vdrz->vd_redirects);
+	spike_table_stats.sts_load_records = records;
+	spike_table_stats.sts_load_ns = gethrtime() - start;
+	spike_table_stats.sts_load_total_ns += spike_table_stats.sts_load_ns;
 	return (0);
 }
 
@@ -6844,6 +6859,11 @@ spike_crash_check(spa_t *spa, uint64_t txg, int point)
 		spike_redirect_stats[txg % SPIKE_REDIRECT_TXGS].rst_passes =
 		    spa_sync_pass(spa);
 	}
+	if (point == SPIKE_CRASH_POST_UB) {
+		spike_table_stats.sts_sync_txg[txg % SPIKE_REDIRECT_TXGS] = txg;
+		spike_table_stats.sts_sync_ns[txg % SPIKE_REDIRECT_TXGS] =
+		    getlrtime() - spa->spa_sync_starttime;
+	}
 	if (point != spike_crash_point || txg != spike_crash_txg || txg == 0)
 		return;
 	cmn_err(CE_NOTE, "%s: spike crash point %d in txg %llu",
@@ -6853,6 +6873,157 @@ spike_crash_check(spa_t *spa, uint64_t txg, int point)
 #else
 	_exit(99);
 #endif
+}
+
+/*
+ * SPIKE, not for merge: test-only, the scale measurements (vdev_raidz.h).
+ */
+spike_table_stat_t spike_table_stats;
+int spike_redirect_load_skip = 0;
+
+typedef struct raidz_redirect_synth_arg {
+	uint64_t rsa_vdev;
+	raidz_redirect_ent_t *rsa_ents;
+	uint64_t rsa_n;
+	int rsa_op;
+	uint64_t rsa_done;
+	uint64_t rsa_txg;
+} raidz_redirect_synth_arg_t;
+
+static int
+vdev_raidz_redirect_synth_check(void *arg, dmu_tx_t *tx)
+{
+	raidz_redirect_synth_arg_t *rsa = arg;
+	vdev_t *rvd = dmu_tx_pool(tx)->dp_spa->spa_root_vdev;
+
+	if (rsa->rsa_vdev >= rvd->vdev_children ||
+	    rvd->vdev_child[rsa->rsa_vdev]->vdev_ops != &vdev_raidz_ops ||
+	    rsa->rsa_op < SPIKE_SYNTH_ADD || rsa->rsa_op > SPIKE_SYNTH_ADD_HOT)
+		return (SET_ERROR(EINVAL));
+	return (0);
+}
+
+/*
+ * A block pointer and a bookmark for a synthetic entry, as the move would
+ * store them: DVA 0 at the old extent, the old birth, a 128K block, and a
+ * checksum that no data has (the walk of a scan would fail to verify it;
+ * no test scans a pool that holds synthetic entries).
+ */
+static void
+vdev_raidz_redirect_synth_bp(vdev_t *vd, const raidz_redirect_ent_t *e,
+    uint64_t i, blkptr_t *bp, zbookmark_phys_t *zb)
+{
+	uint64_t x = e->rde_offset ^ (e->rde_birth << 40);
+	uint64_t ck[4];
+
+	for (int w = 0; w < 4; w++) {
+		x += 0x9e3779b97f4a7c15ULL;
+		ck[w] = x;
+		ck[w] = (ck[w] ^ (ck[w] >> 30)) * 0xbf58476d1ce4e5b9ULL;
+		ck[w] = (ck[w] ^ (ck[w] >> 27)) * 0x94d049bb133111ebULL;
+		ck[w] ^= ck[w] >> 31;
+	}
+	memset(bp, 0, sizeof (*bp));
+	DVA_SET_VDEV(&bp->blk_dva[0], vd->vdev_id);
+	DVA_SET_OFFSET(&bp->blk_dva[0], e->rde_offset);
+	DVA_SET_ASIZE(&bp->blk_dva[0], e->rde_old_asize);
+	BP_SET_LSIZE(bp, SPA_OLD_MAXBLOCKSIZE);
+	BP_SET_PSIZE(bp, SPA_OLD_MAXBLOCKSIZE);
+	BP_SET_COMPRESS(bp, ZIO_COMPRESS_OFF);
+	BP_SET_CHECKSUM(bp, ZIO_CHECKSUM_FLETCHER_4);
+	BP_SET_TYPE(bp, DMU_OT_PLAIN_FILE_CONTENTS);
+	BP_SET_LEVEL(bp, 0);
+	BP_SET_BYTEORDER(bp, ZFS_HOST_BYTEORDER);
+	BP_SET_BIRTH(bp, e->rde_birth, e->rde_birth);
+	BP_SET_FILL(bp, 1);
+	ZIO_SET_CHECKSUM(&bp->blk_cksum, ck[0], ck[1], ck[2], ck[3]);
+	SET_BOOKMARK(zb, 54, 1024 + (i >> 10), 0, i & 1023);
+}
+
+static void
+vdev_raidz_redirect_synth_sync(void *arg, dmu_tx_t *tx)
+{
+	raidz_redirect_synth_arg_t *rsa = arg;
+	spa_t *spa = dmu_tx_pool(tx)->dp_spa;
+	vdev_t *vd = spa->spa_root_vdev->vdev_child[rsa->rsa_vdev];
+	uint64_t txg = dmu_tx_get_txg(tx);
+
+	rsa->rsa_done = 0;
+	rsa->rsa_txg = txg;
+	for (uint64_t i = 0; i < rsa->rsa_n; i++) {
+		raidz_redirect_ent_t *e = &rsa->rsa_ents[i];
+		raidz_redirect_ent_t ent;
+		blkptr_t bp;
+		zbookmark_phys_t zb;
+
+		if (rsa->rsa_op == SPIKE_SYNTH_REMOVE) {
+			if (vdev_raidz_redirect_remove(vd, e->rde_offset,
+			    e->rde_birth, &ent))
+				rsa->rsa_done++;
+			continue;
+		}
+		e->rde_new_birth = txg;
+		if (vdev_raidz_redirect_damage(vd, e, txg) != NULL ||
+		    vdev_raidz_redirect_get(vd, e->rde_offset, e->rde_birth,
+		    NULL))
+			continue;
+		/* This format keeps the block pointer with the entry. */
+		if (rsa->rsa_op != SPIKE_SYNTH_ADD_MEM) {
+			vdev_raidz_redirect_synth_bp(vd, e, i, &bp, &zb);
+			vdev_raidz_redirect_persist(vd, e, &bp, &zb, tx);
+		} else {
+			vdev_raidz_redirect_insert(vd, e);
+		}
+		rsa->rsa_done++;
+	}
+}
+
+int
+vdev_raidz_redirect_synth(spa_t *spa, uint64_t vdev,
+    raidz_redirect_ent_t *ents, uint64_t n, int op, uint64_t *done)
+{
+	raidz_redirect_synth_arg_t rsa = {
+		.rsa_vdev = vdev, .rsa_ents = ents, .rsa_n = n, .rsa_op = op,
+	};
+	int err;
+
+	err = dsl_sync_task(spa_name(spa), vdev_raidz_redirect_synth_check,
+	    vdev_raidz_redirect_synth_sync, &rsa, 0, ZFS_SPACE_CHECK_NONE);
+	done[0] = rsa.rsa_done;
+	done[1] = rsa.rsa_txg;
+	return (err);
+}
+
+/* SPIKE: test-only, in an idle pool (vdev_raidz.h). */
+void
+vdev_raidz_redirect_unload(spa_t *spa, uint64_t vdev)
+{
+	vdev_t *vd;
+
+	spa_config_enter(spa, SCL_VDEV, FTAG, RW_READER);
+	vd = vdev_lookup_top(spa, vdev);
+	if (vd != NULL && vd->vdev_ops == &vdev_raidz_ops) {
+		vdev_raidz_t *vdrz = vd->vdev_tsd;
+
+		rw_enter(&vdrz->vd_redirect_lock, RW_WRITER);
+		vdev_raidz_redirect_destroy(vdrz);
+		rw_exit(&vdrz->vd_redirect_lock);
+	}
+	spa_config_exit(spa, SCL_VDEV, FTAG);
+}
+
+int
+vdev_raidz_redirect_reload(spa_t *spa, uint64_t vdev)
+{
+	vdev_t *vd;
+	int err = SET_ERROR(EINVAL);
+
+	spa_config_enter(spa, SCL_VDEV, FTAG, RW_READER);
+	vd = vdev_lookup_top(spa, vdev);
+	if (vd != NULL && vd->vdev_ops == &vdev_raidz_ops)
+		err = vdev_raidz_redirect_load(vd);
+	spa_config_exit(spa, SCL_VDEV, FTAG);
+	return (err);
 }
 
 typedef struct raidz_redirect_move_arg {

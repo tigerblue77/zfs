@@ -341,6 +341,44 @@ typedef struct spike_redirect_stat {
 } spike_redirect_stat_t;
 extern spike_redirect_stat_t spike_redirect_stats[SPIKE_REDIRECT_TXGS];
 
+/*
+ * SPIKE: test-only, for the scale measurements (scale_probe.c).
+ * vdev_raidz_redirect_synth() adds <n> synthetic entries to raidz vdev
+ * <vdev>'s table in one sync task, persisted (ADD) or in memory only
+ * (ADD_MEM), or removes them as frees of their blocks would (REMOVE), and
+ * says in done[0] how many it did and in done[1] in which txg.  ADD_HOT
+ * persists them without the block pointers the scan reads, where the
+ * format keeps those apart, so that a large table fits a small disk.  An
+ * added entry gets the task's txg as its new birth, must then pass the
+ * load's checks and must have a new key.  Nothing is allocated or freed:
+ * a synthetic entry owns no space, and no real block has its key.
+ * unload drops a vdev's table from memory and reload reads it again (an
+ * idle pool only), so that a test can measure what the table takes;
+ * spike_redirect_load_skip makes every load keep nothing, the table of a
+ * pool that has none.
+ */
+#define	SPIKE_SYNTH_ADD		0
+#define	SPIKE_SYNTH_ADD_MEM	1
+#define	SPIKE_SYNTH_REMOVE	2
+#define	SPIKE_SYNTH_ADD_HOT	3
+extern int vdev_raidz_redirect_synth(spa_t *, uint64_t,
+    raidz_redirect_ent_t *, uint64_t, int, uint64_t *);
+extern void vdev_raidz_redirect_unload(spa_t *, uint64_t);
+extern int vdev_raidz_redirect_reload(spa_t *, uint64_t);
+extern int spike_redirect_load_skip;
+
+typedef struct spike_table_stat {
+	uint64_t sts_load_calls;	/* loads, tryimport's included */
+	uint64_t sts_load_ns;		/* the last one's wall time */
+	uint64_t sts_load_total_ns;
+	uint64_t sts_load_entries;	/* entries the last one kept */
+	uint64_t sts_load_records;	/* records it read */
+	/* What spa_sync() of a recent txg took, by txg % SPIKE_REDIRECT_TXGS */
+	uint64_t sts_sync_txg[SPIKE_REDIRECT_TXGS];
+	uint64_t sts_sync_ns[SPIKE_REDIRECT_TXGS];
+} spike_table_stat_t;
+extern spike_table_stat_t spike_table_stats;
+
 /* SPIKE: test-only crash points; spike_crash_check() calls _exit(99). */
 #define	SPIKE_CRASH_NONE	0
 #define	SPIKE_CRASH_TABLE_DIRTY	1	/* the move's table updates */
