@@ -1274,6 +1274,10 @@ process_options(int argc, char **argv)
 		/* An AnyRAID vdev can only be a top-level vdev */
 		zo->zo_mirrors = 0;
 
+		/* Each data and parity column needs a disk of its own */
+		zo->zo_draid_data = MAX(1, MIN(zo->zo_draid_data,
+		    zo->zo_raid_children - zo->zo_raid_parity));
+
 		(void) strlcpy(zo->zo_raid_type, VDEV_TYPE_ANYRAIDZ,
 		    sizeof (zo->zo_raid_type));
 	} else {
@@ -1475,7 +1479,8 @@ make_vdev_raid(const char *path, const char *aux, const char *pool, size_t size,
 	} else if (strcmp(ztest_opts.zo_raid_type, VDEV_TYPE_ANYRAIDZ) == 0) {
 		enum vdev_anyraid_parity_type type = VAP_RAIDZ;
 		uint64_t ndata = ztest_opts.zo_draid_data;
-		fnvlist_add_uint64(raid, ZPOOL_CONFIG_ANYRAID_NDATA, ndata);
+		fnvlist_add_uint8(raid, ZPOOL_CONFIG_ANYRAID_NDATA,
+		    (uint8_t)ndata);
 		fnvlist_add_uint8(raid, ZPOOL_CONFIG_ANYRAID_PARITY_TYPE,
 		    type);
 	}
