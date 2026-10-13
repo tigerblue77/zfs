@@ -3308,6 +3308,28 @@ metaslab_space_weight(metaslab_t *msp)
 }
 
 /*
+ * AnyRAID vdevs prefer earlier metaslabs, so that fewer tiles get mapped.
+ * Every histogram-derived segment weight goes through here, so that
+ * metaslab_segment_weight(), metaslab_segment_may_passivate() and the
+ * allocation-failure path of metaslab_group_alloc() agree. Completely free
+ * metaslabs (largest segment is the whole metaslab) stay unbiased, as before.
+ */
+static uint64_t
+metaslab_anyraid_bias(metaslab_t *msp, uint64_t weight)
+{
+	vdev_t *vd = msp->ms_group->mg_vd;
+	uint64_t idx = WEIGHT_GET_INDEX(weight);
+
+	if (vd->vdev_ops != &vdev_anyraid_ops || weight == 0 ||
+	    idx <= SPA_MAXBLOCKSHIFT || idx >= highbit64(msp->ms_size) - 1)
+		return (weight);
+
+	WEIGHT_SET_INDEX(weight, idx + 3 -
+	    (msp->ms_id * 4) / vd->vdev_ms_count);
+	return (weight);
+}
+
+/*
  * Return the weight of the specified metaslab, according to the segment-based
  * weighting algorithm. The metaslab must be loaded. This function can
  * be called within a sync pass since it relies only on the metaslab's
@@ -3346,7 +3368,7 @@ metaslab_weight_from_range_tree(metaslab_t *msp)
 			break;
 		}
 	}
-	return (weight);
+	return (metaslab_anyraid_bias(msp, weight));
 }
 
 /*
@@ -3393,7 +3415,7 @@ metaslab_weight_from_spacemap(metaslab_t *msp)
 			break;
 		}
 	}
-	return (weight);
+	return (metaslab_anyraid_bias(msp, weight));
 }
 
 /*
@@ -3445,22 +3467,6 @@ metaslab_segment_weight(metaslab_t *msp)
 		weight = metaslab_weight_from_range_tree(msp);
 	} else {
 		weight = metaslab_weight_from_spacemap(msp);
-	}
-
-	/*
-	 * Anyraid vdevs strongly prefer allocations from earlier regions, in
-	 * order to prevent premature region placement. While this optimization
-	 * is not usually good for segment-based weighting, we enable it for
-	 * that case specifically.
-	 */
-	vdev_t *vd = mg->mg_vd;
-	if (vd->vdev_ops == &vdev_anyraid_ops &&
-	    WEIGHT_GET_INDEX(weight) > SPA_MAXBLOCKSHIFT) {
-		uint64_t id = msp->ms_id;
-		uint64_t count = vd->vdev_ms_count;
-		WEIGHT_SET_INDEX(weight, WEIGHT_GET_INDEX(weight) + 3 -
-		    ((id * 4) / count));
-		weight = MIN(weight, METASLAB_MAX_WEIGHT);
 	}
 
 	/*
