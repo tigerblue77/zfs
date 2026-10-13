@@ -3908,6 +3908,7 @@ ztest_vdev_attach_detach(ztest_ds_t *zd, uint64_t id)
 	int newvd_is_dspare = B_FALSE;
 	int oldvd_is_log;
 	int oldvd_is_special;
+	int oldvd_is_anyraid;
 	int error, expected_error;
 
 	if (ztest_opts.zo_mmp_test)
@@ -4084,7 +4085,8 @@ ztest_vdev_attach_detach(ztest_ds_t *zd, uint64_t id)
 	 * If newvd is a distributed spare and it's being attached to a
 	 * dRAID which is not its parent it should fail with ENOTSUP.
 	 */
-	if (oldvd->vdev_ops == &vdev_anyraid_ops)
+	oldvd_is_anyraid = (oldvd->vdev_ops == &vdev_anyraid_ops);
+	if (oldvd_is_anyraid)
 		expected_error = 0;
 	else if (pvd->vdev_ops != &vdev_mirror_ops &&
 	    pvd->vdev_ops != &vdev_root_ops && (!replacing ||
@@ -4144,6 +4146,13 @@ ztest_vdev_attach_detach(ztest_ds_t *zd, uint64_t id)
 	 * If someone grew the LUN, the replacement may be too small.
 	 */
 	if (error == EOVERFLOW || error == EBUSY)
+		expected_error = error;
+
+	/*
+	 * An AnyRAID vdev refuses a device too small for one tile with
+	 * ENOLCK, and the new device has less room than its size.
+	 */
+	if (error == ENOLCK && oldvd_is_anyraid)
 		expected_error = error;
 
 	if (error == ZFS_ERR_CHECKPOINT_EXISTS ||
