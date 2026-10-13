@@ -12,7 +12,7 @@
 .\" Copyright (c) 2025 iXsystems, Inc.
 .\" Copyright (c) 2025, Klara, Inc.
 .\"
-.Dd November 5, 2025
+.Dd October 13, 2026
 .Dt ZFS-REWRITE 8
 .Os
 .
@@ -92,6 +92,16 @@ this expansion.
 Holes that were never written or were previously zero-compressed are
 not rewritten and will remain holes even if compression is disabled.
 .Pp
+A deduplicated block with a copy on a vdev whose
+.Sy allocating
+vdev property is
+.Sy off
+is rewritten as a new block that is not deduplicated, so that it leaves
+that vdev.
+It then no longer shares space with its duplicates, and neither does any
+other write of the same data while the property is
+.Sy off .
+.Pp
 If a
 .Fl l
 or
@@ -109,5 +119,6 @@ flag is used, rewritten blocks preserve their logical birth time, since
 there are no user data changes.
 .
 .Sh SEE ALSO
+.Xr vdevprops 7 ,
 .Xr zfsprops 7 ,
 .Xr zpool-features 7
