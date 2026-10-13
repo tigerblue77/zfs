@@ -2238,8 +2238,9 @@ boolean_t
 vdev_anyraid_mapped(vdev_t *vd, uint64_t offset, uint64_t txg)
 {
 	vdev_anyraid_t *va = vd->vdev_tsd;
+	uint64_t tsize = va->vd_tile_size * va->vd_width;
 	anyraid_tile_t search;
-	search.at_tile_id = offset / va->vd_tile_size;
+	search.at_tile_id = offset / tsize;
 
 	rw_enter(&va->vd_lock, RW_READER);
 	anyraid_tile_t *tile = avl_find(&va->vd_tile_map, &search, NULL);
