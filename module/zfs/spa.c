@@ -7074,6 +7074,21 @@ spa_create_check_encryption_params(dsl_crypto_params_t *dcp,
 }
 
 /*
+ * Top-level AnyRAID vdevs, whose creation counts against the anyraid feature.
+ */
+static uint64_t
+spa_count_anyraid(vdev_t *rvd)
+{
+	uint64_t n = 0;
+
+	for (uint64_t c = 0; c < rvd->vdev_children; c++) {
+		if (vdev_is_anyraid(rvd->vdev_child[c]))
+			n++;
+	}
+	return (n);
+}
+
+/*
  * Pool Creation
  */
 int
@@ -7095,6 +7110,7 @@ spa_create(const char *pool, nvlist_t *nvroot, nvlist_t *props,
 	boolean_t has_allocclass;
 	boolean_t has_draid;
 	boolean_t has_draid_fdomains;
+	boolean_t has_anyraid;
 	spa_feature_t feat;
 	const char *feat_name;
 	const char *poolname;
@@ -7143,6 +7159,7 @@ spa_create(const char *pool, nvlist_t *nvroot, nvlist_t *props,
 	has_allocclass = B_FALSE;
 	has_draid = B_FALSE;
 	has_draid_fdomains = B_FALSE;
+	has_anyraid = B_FALSE;
 	for (nvpair_t *elem = nvlist_next_nvpair(props, NULL);
 	    elem != NULL; elem = nvlist_next_nvpair(props, elem)) {
 		if (zpool_prop_feature(nvpair_name(elem))) {
@@ -7158,6 +7175,8 @@ spa_create(const char *pool, nvlist_t *nvroot, nvlist_t *props,
 				has_draid = B_TRUE;
 			if (feat == SPA_FEATURE_DRAID_FAIL_DOMAINS)
 				has_draid_fdomains = B_TRUE;
+			if (feat == SPA_FEATURE_ANYRAID)
+				has_anyraid = B_TRUE;
 		}
 	}
 
@@ -7226,6 +7245,8 @@ spa_create(const char *pool, nvlist_t *nvroot, nvlist_t *props,
 	    (ndraid == 0 || has_draid || (error = SET_ERROR(ENOTSUP))) &&
 	    (draid_nfgroup == 0 || has_draid_fdomains ||
 	    (error = SET_ERROR(ENOTSUP))) && error == 0 &&
+	    (spa_count_anyraid(rvd) == 0 || has_anyraid ||
+	    (error = SET_ERROR(ENOTSUP))) &&
 	    (error = spa_validate_aux(spa, nvroot, txg, VDEV_ALLOC_ADD)) == 0) {
 		/*
 		 * instantiate the metaslab groups (this will dirty the vdevs)
@@ -8070,6 +8091,10 @@ spa_vdev_add(spa_t *spa, nvlist_t *nvroot, boolean_t check_ashift)
 		return (spa_vdev_exit(spa, vd, txg, error));
 	}
 
+	if (spa_count_anyraid(vd) > 0 &&
+	    !spa_feature_is_enabled(spa, SPA_FEATURE_ANYRAID))
+		return (spa_vdev_exit(spa, vd, txg, ENOTSUP));
+
 	/*
 	 * We must validate the spares and l2cache devices after checking the
 	 * children.  Otherwise, vdev_inuse() will blindly overwrite the spare.
@@ -8164,9 +8189,7 @@ spa_vdev_add(spa_t *spa, nvlist_t *nvroot, boolean_t check_ashift)
 		dmu_tx_commit(tx);
 	}
 
-	for (uint64_t i = 0; i < vd->vdev_children; i++)
-		if (vdev_is_anyraid(vd->vdev_child[i]))
-			nanyraid++;
+	nanyraid = spa_count_anyraid(vd);
 	if (nanyraid > 0) {
 		dmu_tx_t *tx;
 
