@@ -9096,13 +9096,17 @@ dump_mos_leaked_object_details(objset_t *mos, uint64_t object,
 static void
 mos_leak_vdev_top_zap(vdev_t *vd)
 {
-	/* SPIKE: the raidz vdev's table of moved blocks. */
-	uint64_t redirect_obj;
-	if (spike_zdb_redirect_mos &&
-	    zap_lookup(spa_meta_objset(vd->vdev_spa), vd->vdev_top_zap,
-	    VDEV_TOP_ZAP_RAIDZ_REDIRECTS, sizeof (redirect_obj), 1,
-	    &redirect_obj) == 0)
-		mos_obj_refd(redirect_obj);
+	/* SPIKE: the raidz vdev's table of moved blocks: log and ZAP. */
+	const char *const redirect_keys[] = { VDEV_TOP_ZAP_RAIDZ_REDIRECT_LOG,
+	    VDEV_TOP_ZAP_RAIDZ_REDIRECT_BPS };
+	for (int k = 0; spike_zdb_redirect_mos && k < 2; k++) {
+		uint64_t redirect_obj;
+
+		if (zap_lookup(spa_meta_objset(vd->vdev_spa),
+		    vd->vdev_top_zap, redirect_keys[k], sizeof (redirect_obj),
+		    1, &redirect_obj) == 0)
+			mos_obj_refd(redirect_obj);
+	}
 
 	uint64_t ms_flush_data_obj;
 	int error = zap_lookup(spa_meta_objset(vd->vdev_spa),

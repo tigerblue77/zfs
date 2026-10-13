@@ -436,8 +436,154 @@ Not covered: a checkpoint-aware move or free (the flags are computed, never
 exercised), a frozen pool, a tombstone dropped early because a txg defers
 no free (a nearly full pool), a scan I/O issued in the same sync as the
 free (only a stale holder's read is exercised), a damaged entry whose N
-overlaps another entry's extents, the walk's cost on a large table (it
-looks at every entry; an index by t2 would bound it by the window) and the
-stopgap's on a large pool, two raidz vdevs with entries, a sorted scan
-interrupted while its queues are not empty, a sequential rebuild, kernel
-builds, and scale.
+overlaps another entry's extents, the stopgap's cost on a large pool, two
+raidz vdevs with entries, a sorted scan interrupted while its queues are
+not empty, a sequential rebuild, and kernel builds.  Step 7 takes up the
+walk's cost on a large table and scale.
+
+## Step 7: persistence and scale
+
+The plan's targets, for 1.7e7 entries on one raidz vdev (a 20 TiB pool with
+a tenth of its blocks pinned by snapshots): a lookup in 1 microsecond at
+the 99th percentile, at most 1 GiB of memory for the table, and a table
+load of at most 5 seconds at import.
+
+    scale_probe <dir> <ashift> <command> [args] [<command> [args] ...]
+    table_bench <avl|bt48|bt40|hash> <n> [threads] [rw|rrm|none]
+
+`vdev_raidz_redirect_synth()` (test-only) adds synthetic entries in sync
+tasks of any size, persisted as a move persists them, without their block
+pointers (`ADD_HOT`, so that a full table fits a small disk; no test scans
+such a pool) or in memory only, or removes them as frees do.  Each passes
+the load's checks and has an old birth at an odd sector, where no parity-1
+extent starts, so that no real block is redirected.  `scale_probe` drives
+it on five sparse 4 TiB files (a 20 TiB raidz1 of 1279 metaslabs of 16 GiB,
+512 MiB of incompressible data written at parity 1, then a parity-2
+epoch): lookup latency through the I/O path's own lookup, one thread then
+four (hits, misses at even sectors with old births, and new births), the
+memory a table takes (malloc's in-use bytes, before and after it is
+dropped), the import (with the `spa_tryimport()` that `zpool import` makes
+first), the sync of a txg that adds or removes 1e5 entries, the on-disk
+size, and a read benchmark with `primarycache=none`.  It punches the pool's
+free space out of its files after each persisted batch, so that the files
+take what the pool allocates.  `table_bench` builds candidate structures
+outside of any pool.  All numbers are from the debug userspace build, at
+ashift 12, unless said otherwise.
+
+The current design (an AVL node of 120 bytes per entry under one rwlock, a
+ZAP of 25 values per entry, loaded with a cursor and a lookup per entry)
+missed every target.  With 1.7e7 entries in memory a lookup took 5.3
+microseconds at the 99th percentile (2.9 at the median, 6.5 for misses with
+four threads), the table 128 bytes per entry, 2.03 GiB in all, and the load
+15.6 to 18.6 microseconds per entry: 7.8 s for 5e5 entries, 18.6 s for
+1e6, about 5 minutes for 1.7e7 by extrapolation; `zpool import` paid it
+twice, since its tryimport loaded the table too (1.45 s and 1.43 s for 2e5
+entries).  An entry took 478 bytes of ZAP, 1849 bytes allocated (the MOS
+keeps three copies), so at most 1e6 entries fit this disk, and a txg adding
+or removing 1e5 entries synced in 4.7 to 5.2 s (5e5 entries on disk, 1.7e7
+in memory).
+
+The table is now:
+
+* in memory, per raidz vdev, 1024 open-addressing tables (one per metaslab
+  modulo 1024), linear probing in Robin Hood order with backward-shift
+  deletion, of 40-byte slots: offset, birth, new offset, and the new birth
+  as a 32-bit delta and the three sizes in 512-byte units.  A shard grows by
+  half at 90% use; the load leaves each at 80%.  The key stays {offset,
+  birth}: the kept head sector makes the offset unique among live entries
+  and tombstones under P1 and P2, but not under the test-only P3;
+* read without a lock: a reader counts itself in one of 64 counters, a
+  cache line each (by CPU in the kernel, by a hash of the thread here), and
+  checks that no writer is in; a writer (syncing context or the load) holds
+  the rwlock, raises a flag and waits for the counters to drain before it
+  moves a slot or frees an array, and a reader that finds the flag waits on
+  the rwlock.  No writer section spans an I/O.  A real implementation would
+  rather use RCU or SMR;
+* skipped by a lookup when the table is empty, when the birth is later than
+  every entry's (every block of the last parity epoch, new writes included)
+  or when the metaslab's shard is empty;
+* on disk, a log of 40-byte records (an entry added, a key removed) in a MOS
+  object whose bonus holds the record count and how many of the first are
+  sorted, beside a ZAP keyed like the entries that holds each one's block
+  pointer and bookmark, which only the scan reads.  The move appends an ADD
+  and adds the block pointer, the free's txg appends a REMOVE and removes
+  it, in the txgs they did before.  When the records pass twice the entries
+  (plus 65536), or the unsorted tail outgrows the sorted part, the next
+  sync of the vdev rewrites the log in key order, one record per live
+  entry, in a new object that replaces the old one in the same txg: not
+  during an import, which waits for its txgs.  A table of the earlier
+  format is refused (ENOTSUP);
+* loaded by reading the log in windows of 2^20 records, sorting each by
+  shard (stably: the records of a key stay in order) and replaying the
+  shards' runs in parallel tasks, then trimming each shard to 80% use; a
+  tryimport skips the load (it reads only MOS blocks, never moved).  Each
+  ADD is checked as before, and also a record of unknown type, an ADD of a
+  key the table holds, a REMOVE of a key it does not hold, and a header
+  that counts more records than the object holds, with the same answers: a
+  read-write import fails with EROFS, a read-only one leaves the record
+  out;
+* walked by the scan metaslab by metaslab, skipping a shard whose entries
+  were all moved before the window, from a sorted copy of the metaslab's
+  keys in the window, kept while the walk is in it.
+
+With 1.7e7 entries loaded from disk: a lookup takes 0.62 to 0.69
+microseconds at the 99th percentile (0.58 to 0.60 with four threads, 0.27
+to 0.31 at the median), and 33 to 40 ns at the median (63 at the 99th
+percentile) when the birth is after every entry's; the table takes 50.0 bytes per entry (0.79 GiB) after a load of a
+sorted log and 51.8 (0.82 GiB) after one of a log in random order; the
+import takes 2.7 to 3.3 s, of which the load is 2.6 to 3.1 s (1.3 to 1.6 s
+of it in `dmu_read()`), warm or after `echo 3 > drop_caches`, and the
+tryimport loads nothing.  The log takes 40 bytes per entry, 63 to 72
+allocated; the block-pointer ZAP takes 382, 1555 allocated at ashift 12 and
+833 at ashift 9.  A txg adding 1e5 entries with their block pointers syncs
+in 2.2 to 2.3 s, one removing them in 1.8 to 1.9 s.  A condense of 1.7e7
+entries takes 2.0 s and its txg syncs in 4.4 s, with both logs on disk
+until then.  On the way: replaying a log in random order record by record
+took 8.5 to 9.3 s; sorted by shard per window, 4.8 s; with parallel tasks,
+2.8 to 3.1 s.  In `table_bench` at 1.7e7 entries, a btree of 40-byte
+elements took 58 bytes per entry and 2.5 to 2.7 microseconds at the 99th
+percentile, and a hash table behind one rwlock 1.5 microseconds at the 99th
+percentile with four threads (0.6 to 0.7 with no lock).
+
+What the table costs a raidz read it does not redirect, measured on 512 MiB
+of 16K blocks read with `primarycache=none` from a warm page cache: about
+110 microseconds of wall time and 225 of CPU per block with one thread in
+this build.  Alternating the base commit, the previous design with an
+empty and a full (1.7e7, in memory) table and this one with an empty and a
+full (1.7e7, loaded) table, 4 rounds in each order, 32 passes each, every
+spike variant reads 2.6 to 3.9% slower than the base commit with one
+thread (2 to 3 standard errors), the full tables no slower than the empty
+ones; with four threads the variants are within 2% of the base but this
+design's full table (+3.4% wall, +4.2% CPU, 2 to 3 standard errors).  The
+order of the variants moved a variant's mean by up to 6%, so differences
+under about 3% are not resolved here; the lookup itself costs what the
+microbenchmark says, under a microsecond per I/O.
+
+    crash_probe <dir> <ashift> move <point> <P1|P2> condense
+    crash_probe <dir> <ashift> fcrash <point> <P1|P2> [condense|condensebad]
+    crash_probe <dir> <ashift> corrupt <kind> [P1|P2] [lax]
+
+`condense` rewrites the log in the txg of the move, or of the free
+(`spike_redirect_condense` 1 and 2); at every crash point the import must
+find the state before or after, and at POST_UB a log in key order with one
+record per entry.  `condensebad` keeps the freed entries in the rewritten
+log (`spike_redirect_condense_tombs`): at POST_UB the freed block's entry
+comes back.  The corrupt mode now damages plain-A's record in the log;
+`rtype` (an unknown type) and `rdup` (a second ADD of its key) replace
+`ksize` and `vsize`, and `nasize` and `rmisalign`, sizes misaligned by half
+a sector, cannot be written at ashift 9, where the log's 512-byte units are
+a sector.  `lax` (`spike_redirect_load_lax`) skips the load's checks of
+the log's structure.  `scale_probe`'s other switches: `SCALE_LOAD_SKIP`
+(`spike_redirect_load_skip`, an empty table) and `SCALE_CONDENSE`.
+
+Every target is met in this build: at most 0.69 microseconds at the 99th
+percentile, 0.82 GiB and an import of 3.3 s.  The previous design missed
+them by 5 to 6.5x, 2x and, extrapolated from 5e5 and 1e6 entries, about
+60x.
+
+Not covered: a release build of the module (only the lookup was timed in a
+release build of the userspace libraries), a kernel, the scan walk's cost
+measured on a large table (it is bounded by the shards moved in the
+window, by construction), a condense spread over txgs (one rewrites the
+whole log in one txg), two raidz vdevs, and pools of the earlier spike
+format, which are refused.

@@ -166,22 +166,18 @@ typedef struct vdev_raidz {
 	uint64_t vd_parity_epoch_count;
 
 	/*
-	 * SPIKE, not for merge: blocks moved to a new extent, as
-	 * raidz_redirect_node_t's keyed by {old offset, physical birth}, and
-	 * the MOS ZAP that holds them (0 until the first move).  The lock
-	 * protects the tree and the lists; the I/O path takes it as a reader.
-	 * The entry of a freed block stays in the tree as a tombstone, which
-	 * I/O still follows, until its extents leave the defer trees: on the
-	 * pending list until vdev_sync() removes its key from the ZAP in the
-	 * txg of the free, then on the tombstone list.
+	 * SPIKE, not for merge: blocks moved to a new extent.  In memory, a
+	 * table keyed by {old offset, physical birth} (vdev_raidz.c), which
+	 * the I/O path reads without a lock; on disk, the log of its records
+	 * and the ZAP of the block pointers a scan reads (0 until the first
+	 * move).  The entry of a freed block stays in the table as a
+	 * tombstone, which I/O still follows, until its extents leave the
+	 * defer trees.
 	 */
-	avl_tree_t vd_redirects;
-	krwlock_t vd_redirect_lock;
-	uint64_t vd_redirect_obj;
-	list_t vd_redirect_pending;
-	list_t vd_redirect_tombs;
-	uint64_t vd_redirect_ntombs;	/* pending and tombs */
-	/* Damaged entries a read-only import left out of vd_redirects. */
+	struct raidz_redirect_table *vd_rdt;
+	uint64_t vd_redirect_obj;	/* the ZAP of block pointers */
+	uint64_t vd_redirect_log;	/* the log */
+	/* Damaged records a read-only import left out of the table. */
 	uint64_t vd_redirect_damaged;
 } vdev_raidz_t;
 
@@ -209,19 +205,25 @@ extern int vdev_raidz_load(vdev_t *);
  * rde_birth, is now stored at rde_new_offset with the layout of txg
  * rde_new_birth, in rde_new_asize bytes, and that [rde_offset, rde_offset +
  * rde_old_reserved) of its old extent, rde_old_asize bytes long, is still
- * allocated.  The table is a ZAP in the MOS, keyed by {rde_offset,
- * rde_birth}, named in the vdev's top-level ZAP, whose values are the other
- * five fields in this order, then the block pointer the move found live
- * and the bookmark it was named by: what a scan needs to read the block
- * and verify it without finding its block pointer.  Only the five fields
- * are kept in memory.
+ * allocated.
+ *
+ * On disk, the vdev's top-level ZAP names two MOS objects.  The log holds
+ * raidz_redirect_rec_t records: an entry added, or a key removed, in the
+ * order they happened; its bonus holds {records, how many of the first are
+ * sorted by key, one per entry}, and the load replays it.  The ZAP of block
+ * pointers, keyed by {rde_offset, rde_birth}, holds the block pointer the
+ * move found live and the bookmark it was named by: what a scan needs to
+ * read the block and verify it without finding its block pointer.  A table
+ * of the earlier spike format, one ZAP of both, is refused.
  */
-#define	VDEV_TOP_ZAP_RAIDZ_REDIRECTS	"org.openzfs:spike_raidz_redirects"
-#define	RAIDZ_REDIRECT_ENT_VALUES	5
+#define	VDEV_TOP_ZAP_RAIDZ_REDIRECT_LOG	"org.openzfs:spike_raidz_redirect_log"
+#define	VDEV_TOP_ZAP_RAIDZ_REDIRECT_BPS	"org.openzfs:spike_raidz_redirect_bps"
+#define	VDEV_TOP_ZAP_RAIDZ_REDIRECTS_OLD	\
+	"org.openzfs:spike_raidz_redirects"
 #define	RAIDZ_REDIRECT_BP_VALUES	(sizeof (blkptr_t) / sizeof (uint64_t))
 #define	RAIDZ_REDIRECT_ZB_VALUES	4
-#define	RAIDZ_REDIRECT_VALUES		(RAIDZ_REDIRECT_ENT_VALUES + \
-	RAIDZ_REDIRECT_BP_VALUES + RAIDZ_REDIRECT_ZB_VALUES)
+#define	RAIDZ_REDIRECT_BPS_VALUES	(RAIDZ_REDIRECT_BP_VALUES + \
+	RAIDZ_REDIRECT_ZB_VALUES)
 
 typedef struct raidz_redirect_ent {
 	uint64_t rde_offset;
@@ -232,6 +234,64 @@ typedef struct raidz_redirect_ent {
 	uint64_t rde_old_reserved;
 	uint64_t rde_old_asize;
 } raidz_redirect_ent_t;
+
+typedef struct raidz_redirect_table raidz_redirect_table_t;
+
+/*
+ * A record of the log, 40 bytes: the key, its type in the birth's top byte,
+ * then for an ADD the new offset and birth, and the new asize, old asize
+ * and old_reserved in 512-byte units, 21 bits each.  A REMOVE has only the
+ * key.
+ */
+typedef struct raidz_redirect_rec {
+	uint64_t rr_offset;
+	uint64_t rr_birth;
+	uint64_t rr_new_offset;
+	uint64_t rr_new_birth;
+	uint64_t rr_sizes;
+} raidz_redirect_rec_t;
+
+#define	RAIDZ_REDIRECT_REC_ADD		1ULL
+#define	RAIDZ_REDIRECT_REC_REMOVE	2ULL
+#define	RAIDZ_REDIRECT_REC_TYPE_SHIFT	56
+#define	RAIDZ_REDIRECT_REC_BIRTH_MAX	((1ULL << 56) - 1)
+#define	RAIDZ_REDIRECT_REC_SIZE_BITS	21
+#define	RAIDZ_REDIRECT_REC_SIZE_MAX	((1ULL << 21) - 1)
+
+static inline void
+raidz_redirect_rec_make(raidz_redirect_rec_t *r, uint64_t type,
+    const raidz_redirect_ent_t *e)
+{
+	r->rr_offset = e->rde_offset;
+	r->rr_birth = (e->rde_birth & RAIDZ_REDIRECT_REC_BIRTH_MAX) |
+	    (type << RAIDZ_REDIRECT_REC_TYPE_SHIFT);
+	r->rr_new_offset = r->rr_new_birth = r->rr_sizes = 0;
+	if (type != RAIDZ_REDIRECT_REC_ADD)
+		return;
+	r->rr_new_offset = e->rde_new_offset;
+	r->rr_new_birth = e->rde_new_birth;
+	r->rr_sizes = (e->rde_new_asize >> 9) |
+	    ((e->rde_old_asize >> 9) << RAIDZ_REDIRECT_REC_SIZE_BITS) |
+	    ((e->rde_old_reserved >> 9) << (2 * RAIDZ_REDIRECT_REC_SIZE_BITS));
+}
+
+/* The record's entry in *e (only the key for a REMOVE); its type. */
+static inline uint64_t
+raidz_redirect_rec_read(const raidz_redirect_rec_t *r, raidz_redirect_ent_t *e)
+{
+	uint64_t m = RAIDZ_REDIRECT_REC_SIZE_MAX;
+
+	e->rde_offset = r->rr_offset;
+	e->rde_birth = r->rr_birth & RAIDZ_REDIRECT_REC_BIRTH_MAX;
+	e->rde_new_offset = r->rr_new_offset;
+	e->rde_new_birth = r->rr_new_birth;
+	e->rde_new_asize = (r->rr_sizes & m) << 9;
+	e->rde_old_asize = ((r->rr_sizes >> RAIDZ_REDIRECT_REC_SIZE_BITS) &
+	    m) << 9;
+	e->rde_old_reserved = ((r->rr_sizes >>
+	    (2 * RAIDZ_REDIRECT_REC_SIZE_BITS)) & m) << 9;
+	return (r->rr_birth >> RAIDZ_REDIRECT_REC_TYPE_SHIFT);
+}
 
 /* What a move keeps allocated of the old extent [O, O + asize). */
 typedef enum raidz_redirect_keep {
@@ -347,15 +407,21 @@ extern spike_redirect_stat_t spike_redirect_stats[SPIKE_REDIRECT_TXGS];
  * <vdev>'s table in one sync task, persisted (ADD) or in memory only
  * (ADD_MEM), or removes them as frees of their blocks would (REMOVE), and
  * says in done[0] how many it did and in done[1] in which txg.  ADD_HOT
- * persists them without the block pointers the scan reads, where the
- * format keeps those apart, so that a large table fits a small disk.  An
+ * persists them without the block pointers the scan reads, so that a
+ * large table fits a small disk (no test scans such a pool).  An
  * added entry gets the task's txg as its new birth, must then pass the
  * load's checks and must have a new key.  Nothing is allocated or freed:
  * a synthetic entry owns no space, and no real block has its key.
  * unload drops a vdev's table from memory and reload reads it again (an
  * idle pool only), so that a test can measure what the table takes;
  * spike_redirect_load_skip makes every load keep nothing, the table of a
- * pool that has none.
+ * pool that has none.  spike_redirect_condense condenses every log at its
+ * vdev's next sync (1), in the txg of the next free of a moved block (2),
+ * or never (-1), instead of when it is due (0);
+ * spike_redirect_condense_tombs makes a condense keep the entries of freed
+ * blocks, as one that forgot the frees of its txg would.
+ * spike_redirect_load_lax makes the load skip a record of unknown type and
+ * take a second ADD of a key, as a load without those checks would.
  */
 #define	SPIKE_SYNTH_ADD		0
 #define	SPIKE_SYNTH_ADD_MEM	1
@@ -366,6 +432,9 @@ extern int vdev_raidz_redirect_synth(spa_t *, uint64_t,
 extern void vdev_raidz_redirect_unload(spa_t *, uint64_t);
 extern int vdev_raidz_redirect_reload(spa_t *, uint64_t);
 extern int spike_redirect_load_skip;
+extern int spike_redirect_condense;
+extern int spike_redirect_condense_tombs;
+extern int spike_redirect_load_lax;
 
 typedef struct spike_table_stat {
 	uint64_t sts_load_calls;	/* loads, tryimport's included */
@@ -376,6 +445,11 @@ typedef struct spike_table_stat {
 	/* What spa_sync() of a recent txg took, by txg % SPIKE_REDIRECT_TXGS */
 	uint64_t sts_sync_txg[SPIKE_REDIRECT_TXGS];
 	uint64_t sts_sync_ns[SPIKE_REDIRECT_TXGS];
+	uint64_t sts_load_read_ns;	/* of the last load, in dmu_read() */
+	uint64_t sts_condense_calls;
+	uint64_t sts_condense_txg;	/* the last one's */
+	uint64_t sts_condense_records;
+	uint64_t sts_condense_ns;
 } spike_table_stat_t;
 extern spike_table_stat_t spike_table_stats;
 

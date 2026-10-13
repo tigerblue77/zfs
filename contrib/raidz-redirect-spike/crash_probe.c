@@ -6,17 +6,18 @@
  * moved block release what it holds, in one txg with its redirect (part B),
  * and do resilvers and txg-ranged scrubs rebuild moved blocks (step 6)?
  *
- *   crash_probe <dir> <ashift> move <point> <P1|P2> [split]
+ *   crash_probe <dir> <ashift> move <point> <P1|P2> [split|condense]
  *   crash_probe <dir> <ashift> guard <mos|zil|stale|checkpoint|wrongzb>
  *   crash_probe <dir> <ashift> guard <spill|spillblk|xbook>
  *   crash_probe <dir> <ashift> free <plain|dedup|clone|gang|snap> <P1|P2>
  *   crash_probe <dir> <ashift> free plain P3 [nocheck]
- *   crash_probe <dir> <ashift> fcrash <point> <P1|P2> [late]
+ *   crash_probe <dir> <ashift> fcrash <point> <P1|P2>
+ *       [late|condense|condensebad]
  *   crash_probe <dir> <ashift> converge <P1|P2> [nolog]
  *   crash_probe <dir> <ashift> resilver <P1|P2>
  *       <offline|offlinescrub|control|replace> [nofix|nowiden|nocols]
  *   crash_probe <dir> <ashift> stalebp <P1|P2> [same] [nolive]
- *   crash_probe <dir> <ashift> corrupt <kind> [P1|P2]
+ *   crash_probe <dir> <ashift> corrupt <kind> [P1|P2] [lax]
  *   crash_probe <dir> <ashift> tomb <read|repair>
  *   crash_probe <dir> <ashift> rpass <R1|R2|R3|R4|R5|R6> <P1|P2>
  *       [none|stopgap|pass|both|noverify]
@@ -237,6 +238,10 @@ extern spike_scan_pass_stat_t spike_scan_pass_stats __attribute__((weak));
 extern uint64_t spike_scan_watch[2][3] __attribute__((weak));
 extern int spike_scan_redirect_batch __attribute__((weak));
 extern int spike_scan_redirect_verify __attribute__((weak));
+/* Weak: the log, its structure checks and its condense, before step 7. */
+extern int spike_redirect_load_lax __attribute__((weak));
+extern int spike_redirect_condense __attribute__((weak));
+extern int spike_redirect_condense_tombs __attribute__((weak));
 /* Weak: the previous step's in-memory table, absent from this one. */
 extern int vdev_raidz_redirect_add(uint64_t, uint64_t, uint64_t, uint64_t,
     uint64_t, uint64_t) __attribute__((weak));
@@ -277,6 +282,7 @@ typedef struct shared {
 	fobj_t			sh_fobj[MAXOBJS];
 	blkptr_t		sh_snap_bp;	/* the snapshot-only block */
 	uint64_t		sh_free_txg;	/* txg of the armed free */
+	int			sh_condense;	/* log condensed in it */
 	boolean_t		sh_small;	/* setup adds small-Z */
 	int			sh_watch;	/* resilver: child watched */
 	int			sh_replaced;	/* resilver: replaced + 1 */
@@ -983,6 +989,32 @@ state_name(int state)
 }
 
 /* Child B: what a fresh, read-only import of the crashed pool sees. */
+/*
+ * The redirect log as the imported pool has it: its object, records and
+ * sorted records (a condensed log has as many of each as entries).  0 if
+ * this libzpool has no log.
+ */
+static uint64_t
+log_report(spa_t *spa, uint64_t *records, uint64_t *sorted)
+{
+	vdev_raidz_t *vdrz = spa->spa_root_vdev->vdev_child[0]->vdev_tsd;
+	uint64_t hdr[2] = { 0, 0 };
+	dmu_buf_t *db;
+
+	if (&spike_redirect_condense == NULL || vdrz->vd_redirect_log == 0)
+		return (0);
+	VERIFY0(dmu_bonus_hold(spa_meta_objset(spa), vdrz->vd_redirect_log,
+	    FTAG, &db));
+	memcpy(hdr, db->db_data, sizeof (hdr));
+	dmu_buf_rele(db, FTAG);
+	(void) printf("INFO the redirect log is object %llu: %llu records, "
+	    "the first %llu sorted\n", (u_longlong_t)vdrz->vd_redirect_log,
+	    (u_longlong_t)hdr[0], (u_longlong_t)hdr[1]);
+	*records = hdr[0];
+	*sorted = hdr[1];
+	return (vdrz->vd_redirect_log);
+}
+
 static int
 child_verify(boolean_t committed)
 {
@@ -999,6 +1031,17 @@ child_verify(boolean_t committed)
 	(void) printf("INFO read-only import at txg %llu; expecting the "
 	    "state %s the move\n", (u_longlong_t)spa_last_synced_txg(spa),
 	    committed ? "after" : "before");
+	{
+		uint64_t rec, srt;
+
+		if (log_report(spa, &rec, &srt) != 0 && committed &&
+		    sh->sh_condense) {
+			check(rec == srt && rec == vdev_raidz_redirect_count(
+			    spa, 0), "B the log was condensed in the move's "
+			    "txg: %llu records, all sorted, one per entry",
+			    (u_longlong_t)rec);
+		}
+	}
 
 	/* The move's txg T, from the first block it allocated N for. */
 	for (int i = 0; i < sh->sh_nmoves; i++) {
@@ -2116,18 +2159,74 @@ held_allocated(spa_t *spa, int i)
 	return (n);
 }
 
-/* 0 if move i has its key in the table, whatever its value's size. */
+/*
+ * The vdev's redirect log as the pool holds it (the open txg's records
+ * included): its records, in an array to kmem_free(), and their count.
+ */
+static uint64_t
+log_read(spa_t *spa, raidz_redirect_rec_t **recs)
+{
+	vdev_raidz_t *vdrz = spa->spa_root_vdev->vdev_child[0]->vdev_tsd;
+	objset_t *mos = spa_meta_objset(spa);
+	uint64_t hdr[2];
+	dmu_buf_t *db;
+
+	*recs = NULL;
+	if (vdrz->vd_redirect_log == 0)
+		return (0);
+	VERIFY0(dmu_bonus_hold(mos, vdrz->vd_redirect_log, FTAG, &db));
+	memcpy(hdr, db->db_data, sizeof (hdr));
+	dmu_buf_rele(db, FTAG);
+	if (hdr[0] == 0)
+		return (0);
+	*recs = kmem_alloc(hdr[0] * sizeof (**recs), KM_SLEEP);
+	VERIFY0(dmu_read(mos, vdrz->vd_redirect_log, 0,
+	    hdr[0] * sizeof (**recs), *recs, DMU_READ_NO_PREFETCH));
+	return (hdr[0]);
+}
+
+/* Whether the log, replayed, holds the key {o, b}. */
+static boolean_t
+log_holds(spa_t *spa, uint64_t o, uint64_t b)
+{
+	raidz_redirect_rec_t *recs;
+	uint64_t n = log_read(spa, &recs);
+	boolean_t live = B_FALSE;
+
+	for (uint64_t r = 0; r < n; r++) {
+		raidz_redirect_ent_t e;
+		uint64_t type = raidz_redirect_rec_read(&recs[r], &e);
+
+		if (e.rde_offset == o && e.rde_birth == b)
+			live = (type == RAIDZ_REDIRECT_REC_ADD);
+	}
+	if (recs != NULL)
+		kmem_free(recs, n * sizeof (*recs));
+	return (live);
+}
+
+/*
+ * 0 if move i has its entry in the table on disk, its key live in the log
+ * and its block pointer in the ZAP; ENOENT if it has neither; EIO if it
+ * has one only.
+ */
 static int
 zap_entry(spa_t *spa, int i)
 {
 	vdev_raidz_t *vdrz = spa->spa_root_vdev->vdev_child[0]->vdev_tsd;
 	uint64_t key[2] = { DVA_GET_OFFSET(&sh->sh_bp[i].blk_dva[0]),
 	    BP_GET_PHYSICAL_BIRTH(&sh->sh_bp[i]) };
+	boolean_t live = log_holds(spa, key[0], key[1]);
+	boolean_t bp = vdrz->vd_redirect_obj != 0 &&
+	    zap_length_uint64(spa_meta_objset(spa), vdrz->vd_redirect_obj,
+	    key, 2, NULL, NULL) == 0;
 
-	if (vdrz->vd_redirect_obj == 0)
-		return (ENOENT);
-	return (zap_length_uint64(spa_meta_objset(spa), vdrz->vd_redirect_obj,
-	    key, 2, NULL, NULL));
+	if (live != bp) {
+		(void) printf("INFO %s: the log %s its key, the ZAP %s its "
+		    "block pointer\n", sh->sh_name[i], live ? "holds" :
+		    "lacks", bp ? "holds" : "lacks");
+	}
+	return (live && bp ? 0 : !live && !bp ? ENOENT : EIO);
 }
 
 /* Whether move i has a live entry in memory; a tombstone is not one. */
@@ -2546,6 +2645,7 @@ child_converge(void *arg)
 typedef struct fcrash_args {
 	int		fc_point;
 	boolean_t	fc_late;
+	int		fc_condense;	/* 1: in the free's txg, 2: badly */
 } fcrash_args_t;
 
 /* Child A of fcrash: free plain-A with the crash armed for its txg. */
@@ -2559,6 +2659,16 @@ child_fcrash(void *arg)
 
 	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
 	spa = import_pool();
+	if (fc->fc_condense != 0 && &spike_redirect_condense == NULL) {
+		(void) printf("SKIP this libzpool has no log to condense\n");
+		return (2);
+	}
+	sh->sh_condense = fc->fc_condense;
+	if (fc->fc_condense != 0) {
+		/* The log is rewritten in the txg of the free. */
+		spike_redirect_condense = 2;
+		spike_redirect_condense_tombs = (fc->fc_condense == 2);
+	}
 	if (&spike_crash_arm_free != NULL) {
 		spike_crash_point = fc->fc_point;
 		spike_crash_arm_free = 1;
@@ -2571,9 +2681,12 @@ child_fcrash(void *arg)
 	}
 	txg = free_fobjs(spa, &a, 1);
 	sh->sh_free_txg = txg;
-	(void) printf("INFO freeing plain-A in txg %llu, crash at %s%s\n",
+	(void) printf("INFO freeing plain-A in txg %llu, crash at %s%s%s\n",
 	    (u_longlong_t)txg, point_names[fc->fc_point],
-	    fc->fc_late ? ", table updated a txg late" : "");
+	    fc->fc_late ? ", table updated a txg late" : "",
+	    fc->fc_condense == 1 ? ", log condensed in that txg" :
+	    fc->fc_condense == 2 ? ", log condensed in that txg, keeping "
+	    "freed entries" : "");
 	txg_wait_synced(spa_get_dsl(spa), txg);
 	if (&spike_crash_arm_free == NULL) {
 		(void) printf("INFO the free's txg has synced; exiting as a "
@@ -2605,6 +2718,17 @@ child_fverify(void *arg)
 	(void) printf("INFO read-only import at txg %llu; expecting the "
 	    "state %s the free\n", (u_longlong_t)spa_last_synced_txg(spa),
 	    committed ? "after" : "before");
+	{
+		uint64_t rec, srt;
+
+		if (log_report(spa, &rec, &srt) != 0 && committed &&
+		    sh->sh_condense) {
+			check(rec == srt && rec == vdev_raidz_redirect_count(
+			    spa, 0) + (sh->sh_condense == 2), "B the log was "
+			    "condensed in the free's txg: %llu records, all "
+			    "sorted, one per entry", (u_longlong_t)rec);
+		}
+	}
 	check(committed ? spa_last_synced_txg(spa) >= f_txg :
 	    spa_last_synced_txg(spa) < f_txg, "B the newest uberblock, txg "
 	    "%llu, is %s the free's txg %llu",
@@ -2703,15 +2827,17 @@ run_free(const char *which, policy_t policy, boolean_t nocheck)
 }
 
 static int
-run_fcrash(int point, policy_t policy, boolean_t late)
+run_fcrash(int point, policy_t policy, boolean_t late, int condense)
 {
-	fcrash_args_t fc = { point, late };
+	fcrash_args_t fc = { point, late, condense };
 	boolean_t committed = (point == SPIKE_CRASH_POST_UB);
 	int st;
 
-	(void) printf("INFO fcrash, crash at %s, policy %s, ashift %llu%s\n",
+	(void) printf("INFO fcrash, crash at %s, policy %s, ashift %llu%s%s\n",
 	    point_names[point], policy_names[policy], (u_longlong_t)ashift,
-	    late ? ", late table removal" : "");
+	    late ? ", late table removal" : "", condense == 1 ?
+	    ", condense" : condense == 2 ? ", condense keeping freed entries" :
+	    "");
 	VERIFY0(phase("0 setup", setup_free_fn, NULL));
 	st = phase("1 move", child_move_fobjs, &policy);
 	check(st == 0, "the move phase passes (status %d)", st);
@@ -3369,17 +3495,20 @@ run_stalebp(policy_t policy, boolean_t same, boolean_t nolive)
 }
 
 /*
- * The corrupt mode: plain-A's entry, rewritten as a damaged table could
- * hold it.  Each kind but oasize and nsmall breaks one rule that every
- * entry the move writes keeps.  Those two keep them all, but oasize claims
- * a larger old extent than plain-A's DVA has, which only the free and the
- * claim can see, and nsmall a new extent of one sector, too small for
- * plain-A, which only its I/O can see.
+ * The corrupt mode: plain-A's record in the log, rewritten as a damaged
+ * table could hold it.  Each kind but oasize and nsmall breaks one rule
+ * that every record the move writes keeps.  Those two keep them all, but
+ * oasize claims a larger old extent than plain-A's DVA has, which only the
+ * free and the claim can see, and nsmall a new extent of one sector, too
+ * small for plain-A, which only its I/O can see.  rtype gives the record
+ * an unknown type, and rdup appends a second ADD of plain-A's key; the
+ * other kinds rewrite one field of its ADD.  The log stores sizes in
+ * 512-byte units: at ashift 9, nasize and rmisalign cannot be written.
  */
 static const char *const corrupt_kinds[] = {
 	"misalign", "nasize", "nout", "nspan", "nzero", "noverlap",
 	"reserved0", "rmisalign", "overreserve", "birth", "epoch", "future",
-	"koffset", "kout", "ksize", "vsize", "oasize", "nsmall", NULL
+	"koffset", "kout", "rtype", "rdup", "oasize", "nsmall", NULL
 };
 
 /* The kinds the load cannot see, which their use must refuse. */
@@ -3387,6 +3516,13 @@ static boolean_t
 corrupt_at_use(const char *how)
 {
 	return (strcmp(how, "oasize") == 0 || strcmp(how, "nsmall") == 0);
+}
+
+/* The kinds after which the load still holds plain-A's sound entry. */
+static boolean_t
+corrupt_keeps_entry(const char *how)
+{
+	return (strcmp(how, "rdup") == 0);
 }
 
 static boolean_t
@@ -3397,6 +3533,13 @@ corrupt_kind_ok(const char *how)
 			return (B_TRUE);
 	}
 	return (B_FALSE);
+}
+
+static boolean_t
+corrupt_expressible(const char *how)
+{
+	return (ashift > SPA_MINBLOCKSHIFT || (strcmp(how, "nasize") != 0 &&
+	    strcmp(how, "rmisalign") != 0));
 }
 
 static void
@@ -3410,87 +3553,97 @@ corrupt_sync(void *arg, dmu_tx_t *tx)
 	int i = find_move("plain-A");
 	uint64_t sector = 1ULL << vd->vdev_ashift;
 	uint64_t oasize = sh->sh_rdm[i].rdm_old_asize;
-	uint64_t key[3] = { DVA_GET_OFFSET(&sh->sh_bp[i].blk_dva[0]),
-	    BP_GET_PHYSICAL_BIRTH(&sh->sh_bp[i]), 0 };
-	uint64_t nkey[3];
-	uint64_t val[32] = { 0 };
-	uint64_t isz, nint, nlen = 2, nval;
+	uint64_t key[2] = { DVA_GET_OFFSET(&sh->sh_bp[i].blk_dva[0]),
+	    BP_GET_PHYSICAL_BIRTH(&sh->sh_bp[i]) };
+	raidz_redirect_rec_t *recs, rec;
+	raidz_redirect_ent_t e;
+	uint64_t n = log_read(spa, &recs);
+	uint64_t r = n, at, type = RAIDZ_REDIRECT_REC_ADD;
 
-	VERIFY0(zap_length_uint64(mos, vdrz->vd_redirect_obj, key, 2, &isz,
-	    &nint));
-	VERIFY(isz == 8 && nint >= 4 && nint <= 25);
-	VERIFY0(zap_lookup_uint64(mos, vdrz->vd_redirect_obj, key, 2, 8, nint,
-	    val));
-	(void) printf("INFO plain-A's entry {%llx, %llu}: %llu values: N=%llx "
-	    "t2=%llu new asize %llu kept %llu%s%llu\n", (u_longlong_t)key[0],
-	    (u_longlong_t)key[1], (u_longlong_t)nint, (u_longlong_t)val[0],
-	    (u_longlong_t)val[1], (u_longlong_t)val[2], (u_longlong_t)val[3],
-	    nint >= 5 ? " old asize " : " (old asize, from the move) ",
-	    (u_longlong_t)(nint >= 5 ? val[4] : oasize));
-	memcpy(nkey, key, sizeof (nkey));
-	nval = nint;
+	for (uint64_t k = 0; k < n; k++) {
+		if (raidz_redirect_rec_read(&recs[k], &e) ==
+		    RAIDZ_REDIRECT_REC_ADD && e.rde_offset == key[0] &&
+		    e.rde_birth == key[1])
+			r = k;
+	}
+	VERIFY3U(r, <, n);
+	(void) raidz_redirect_rec_read(&recs[r], &e);
+	(void) printf("INFO plain-A's record %llu of %llu in log %llu "
+	    "{%llx, %llu}: N=%llx t2=%llu new asize %llu kept %llu old asize "
+	    "%llu\n", (u_longlong_t)r, (u_longlong_t)n,
+	    (u_longlong_t)vdrz->vd_redirect_log, (u_longlong_t)key[0],
+	    (u_longlong_t)key[1], (u_longlong_t)e.rde_new_offset,
+	    (u_longlong_t)e.rde_new_birth, (u_longlong_t)e.rde_new_asize,
+	    (u_longlong_t)e.rde_old_reserved, (u_longlong_t)e.rde_old_asize);
+	at = r;
 	if (strcmp(how, "misalign") == 0) {
-		val[0] += sector / 2;
+		e.rde_new_offset += sector / 2;
 	} else if (strcmp(how, "nasize") == 0) {
-		val[2] += sector / 2;
+		e.rde_new_asize += sector / 2;
 	} else if (strcmp(how, "nout") == 0) {
-		val[0] = P2ALIGN_TYPED(vd->vdev_asize, sector, uint64_t);
+		e.rde_new_offset = P2ALIGN_TYPED(vd->vdev_asize, sector,
+		    uint64_t);
 	} else if (strcmp(how, "nspan") == 0) {
-		uint64_t m = val[0] >> vd->vdev_ms_shift;
+		uint64_t m = e.rde_new_offset >> vd->vdev_ms_shift;
 
 		if (m + 1 >= vd->vdev_ms_count)
 			m--;
-		val[0] = ((m + 1) << vd->vdev_ms_shift) - sector;
+		e.rde_new_offset = ((m + 1) << vd->vdev_ms_shift) - sector;
 	} else if (strcmp(how, "nzero") == 0) {
-		val[2] = 0;
+		e.rde_new_asize = 0;
 	} else if (strcmp(how, "noverlap") == 0) {
-		val[0] = key[0];
+		e.rde_new_offset = key[0];
 	} else if (strcmp(how, "reserved0") == 0) {
-		val[3] = 0;
+		e.rde_old_reserved = 0;
 	} else if (strcmp(how, "rmisalign") == 0) {
-		val[3] += sector / 2;
+		e.rde_old_reserved += sector / 2;
 	} else if (strcmp(how, "overreserve") == 0) {
-		val[3] = oasize + 65536;
+		e.rde_old_reserved = oasize + 65536;
 	} else if (strcmp(how, "birth") == 0) {
-		val[1] = key[1];
+		e.rde_new_birth = key[1];
 	} else if (strcmp(how, "epoch") == 0) {
-		val[1] = sh->sh_epoch_txg - 1;
-		VERIFY3U(val[1], >, key[1]);
+		e.rde_new_birth = sh->sh_epoch_txg - 1;
+		VERIFY3U(e.rde_new_birth, >, key[1]);
 	} else if (strcmp(how, "future") == 0) {
-		val[1] = dmu_tx_get_txg(tx) + 1000;
+		e.rde_new_birth = dmu_tx_get_txg(tx) + 1000;
 	} else if (strcmp(how, "koffset") == 0) {
-		nkey[0] += sector / 2;
+		e.rde_offset += sector / 2;
 	} else if (strcmp(how, "kout") == 0) {
-		nkey[0] = P2ALIGN_TYPED(vd->vdev_asize, sector, uint64_t) +
+		e.rde_offset = P2ALIGN_TYPED(vd->vdev_asize, sector, uint64_t) +
 		    sector;
-	} else if (strcmp(how, "ksize") == 0) {
-		nlen = 3;
-		nkey[2] = 7;
-	} else if (strcmp(how, "vsize") == 0) {
-		nval = 3;
+	} else if (strcmp(how, "rtype") == 0) {
+		type = 3;
+	} else if (strcmp(how, "rdup") == 0) {
+		at = n;
 	} else if (strcmp(how, "nsmall") == 0) {
-		val[2] = sector;
+		e.rde_new_asize = sector;
 	} else {
 		/* oasize: kept and old asize, consistent, but too large. */
-		val[3] = oasize + 65536;
-		if (nint >= 5)
-			val[4] = oasize + 65536;
+		e.rde_old_reserved = oasize + 65536;
+		e.rde_old_asize = oasize + 65536;
 	}
-	if (nlen != 2 || nval != nint || nkey[0] != key[0]) {
-		VERIFY0(zap_remove_uint64(mos, vdrz->vd_redirect_obj, key, 2,
-		    tx));
-		VERIFY0(zap_add_uint64(mos, vdrz->vd_redirect_obj, nkey, nlen,
-		    8, nval, val, tx));
-	} else {
-		VERIFY0(zap_update_uint64(mos, vdrz->vd_redirect_obj, key, 2,
-		    8, nval, val, tx));
+	raidz_redirect_rec_make(&rec, type, &e);
+	dmu_write(mos, vdrz->vd_redirect_log, at * sizeof (rec), sizeof (rec),
+	    &rec, tx, DMU_READ_NO_PREFETCH);
+	if (at == n) {
+		dmu_buf_t *db;
+		uint64_t hdr[2];
+
+		VERIFY0(dmu_bonus_hold(mos, vdrz->vd_redirect_log, FTAG, &db));
+		dmu_buf_will_dirty(db, tx);
+		memcpy(hdr, db->db_data, sizeof (hdr));
+		hdr[0]++;
+		memcpy(db->db_data, hdr, sizeof (hdr));
+		dmu_buf_rele(db, FTAG);
 	}
-	(void) printf("INFO rewrote it (%s): key {%llx, %llu}%s, %llu values: "
-	    "N=%llx t2=%llu new asize %llu kept %llu old asize %llu\n", how,
-	    (u_longlong_t)nkey[0], (u_longlong_t)nkey[1],
-	    nlen == 3 ? " and a third key integer" : "", (u_longlong_t)nval,
-	    (u_longlong_t)val[0], (u_longlong_t)val[1], (u_longlong_t)val[2],
-	    (u_longlong_t)val[3], (u_longlong_t)val[4]);
+	(void) printf("INFO wrote it (%s) as record %llu, type %llu: key "
+	    "{%llx, %llu}: N=%llx t2=%llu new asize %llu kept %llu old asize "
+	    "%llu\n", how, (u_longlong_t)at, (u_longlong_t)type,
+	    (u_longlong_t)e.rde_offset, (u_longlong_t)e.rde_birth,
+	    (u_longlong_t)e.rde_new_offset, (u_longlong_t)e.rde_new_birth,
+	    (u_longlong_t)e.rde_new_asize, (u_longlong_t)e.rde_old_reserved,
+	    (u_longlong_t)e.rde_old_asize);
+	kmem_free(recs, n * sizeof (*recs));
 }
 
 /* Phase 2: rewrite plain-A's entry on disk. */
@@ -3610,8 +3763,9 @@ child_corrupt_ro(void *arg)
 {
 	const char *how = arg;
 	boolean_t use = corrupt_at_use(how);
+	boolean_t keeps = corrupt_keeps_entry(how);
 	int a = find_fobj("plain-A");
-	uint64_t want = sh->sh_nmoves - 1;
+	uint64_t want = sh->sh_nmoves - (keeps ? 0 : 1);
 	boolean_t match;
 	spa_t *spa;
 	int err;
@@ -3635,7 +3789,11 @@ child_corrupt_ro(void *arg)
 	} else {
 		(void) printf("INFO this libzpool counts no damaged entry\n");
 	}
-	if (!use) {
+	if (keeps) {
+		err = read_fobj(a, &match);
+		check(err == 0 && match, "plain-A reads back through its sound "
+		    "entry (err=%d match=%d)", err, match);
+	} else if (!use) {
 		err = read_fobj(a, &match);
 		(void) printf("INFO plain-A, read at its old extent: err=%d "
 		    "match=%d\n", err, match);
@@ -3680,7 +3838,7 @@ run_zdb_damaged(const char *how)
 		while ((cr = strchr(p, '\r')) != NULL)
 			p = cr + 1;
 		(void) printf("zdb| %s%s", p, strchr(p, '\n') ? "" : "\n");
-		if (strstr(p, "damaged redirect entry") != NULL)
+		if (strstr(p, "damaged redirect record") != NULL)
 			named++;
 		if (strstr(p, "leaked space") != NULL)
 			leaked++;
@@ -3705,6 +3863,12 @@ run_corrupt(const char *how, policy_t policy)
 
 	(void) printf("INFO corrupt %s, policy %s, ashift %llu\n", how,
 	    policy_names[policy], (u_longlong_t)ashift);
+	if (!corrupt_expressible(how)) {
+		(void) printf("SKIP %s cannot be written at ashift %llu: the "
+		    "log stores sizes in 512-byte units\n", how,
+		    (u_longlong_t)ashift);
+		return (2);
+	}
 	VERIFY0(phase("0 setup", setup_free_fn, NULL));
 	st = phase("1 move", child_move_fobjs, &policy);
 	check(st == 0, "the move phase passes (status %d)", st);
@@ -3750,6 +3914,42 @@ tomb_lookup(spa_t *spa, uint64_t offset, uint64_t birth)
 {
 	return (vdev_raidz_redirect_get(spa->spa_root_vdev->vdev_child[0],
 	    offset, birth, NULL));
+}
+
+/*
+ * What holds [off, off + len): allocatable, still freeing or deferred, or
+ * none of those, that is allocated again.
+ */
+static void
+space_report(spa_t *spa, const char *what, uint64_t off, uint64_t len)
+{
+	metaslab_t *msp = ms_of(spa, off, len);
+	uint64_t s, l;
+	boolean_t held = B_FALSE;
+
+	mutex_enter(&msp->ms_lock);
+	VERIFY0(metaslab_load(msp));
+	held = zfs_range_tree_find_in(msp->ms_freeing, off, len, &s, &l) ||
+	    zfs_range_tree_find_in(msp->ms_freed, off, len, &s, &l);
+	for (int t = 0; t < TXG_DEFER_SIZE; t++) {
+		held = held || zfs_range_tree_find_in(msp->ms_defer[t], off,
+		    len, &s, &l);
+	}
+	(void) printf("INFO %s [%llx, +%llu): %s allocatable, %s, %llu of its "
+	    "bytes allocatable\n", what, (u_longlong_t)off, (u_longlong_t)len,
+	    zfs_range_tree_contains(msp->ms_allocatable, off, len) ? "all" :
+	    "not all", held ? "partly in a freeing or defer tree" :
+	    "in no freeing or defer tree",
+	    (u_longlong_t)tree_overlap(msp->ms_allocatable, off, len));
+	mutex_exit(&msp->ms_lock);
+}
+
+static void
+tomb_space_report(spa_t *spa, uint64_t o, uint64_t kept,
+    const raidz_redirect_ent_t *e)
+{
+	space_report(spa, "kept", o, kept);
+	space_report(spa, "N", e->rde_new_offset, e->rde_new_asize);
 }
 
 static int
@@ -3928,6 +4128,9 @@ child_tomb(void *arg)
 	check(in_allocatable(spa, o, kept) && in_allocatable(spa,
 	    e->rde_new_offset, e->rde_new_asize), "[O, O + kept) and N are "
 	    "allocatable again");
+	if (!in_allocatable(spa, o, kept) || !in_allocatable(spa,
+	    e->rde_new_offset, e->rde_new_asize))
+		tomb_space_report(spa, o, kept, e);
 	sh->sh_fobj[a].fo_gone = B_TRUE;
 	check_others_read();
 	export_pool(spa);
@@ -4223,17 +4426,17 @@ rp_damage_bp_sync(void *arg, dmu_tx_t *tx)
 	int i = find_move("plain-A");
 	uint64_t key[2] = { DVA_GET_OFFSET(&sh->sh_bp[i].blk_dva[0]),
 	    BP_GET_PHYSICAL_BIRTH(&sh->sh_bp[i]) };
-	uint64_t val[RAIDZ_REDIRECT_VALUES];
+	uint64_t val[RAIDZ_REDIRECT_BPS_VALUES];
 	blkptr_t bp;
 
 	VERIFY0(zap_lookup_uint64(mos, vdrz->vd_redirect_obj, key, 2, 8,
-	    RAIDZ_REDIRECT_VALUES, val));
-	memcpy(&bp, &val[RAIDZ_REDIRECT_ENT_VALUES], sizeof (bp));
+	    RAIDZ_REDIRECT_BPS_VALUES, val));
+	memcpy(&bp, val, sizeof (bp));
 	VERIFY(DVA_EQUAL(&bp.blk_dva[0], &sh->sh_bp[i].blk_dva[0]));
 	DVA_SET_VDEV(&bp.blk_dva[0], 99);
-	memcpy(&val[RAIDZ_REDIRECT_ENT_VALUES], &bp, sizeof (bp));
+	memcpy(val, &bp, sizeof (bp));
 	VERIFY0(zap_update_uint64(mos, vdrz->vd_redirect_obj, key, 2, 8,
-	    RAIDZ_REDIRECT_VALUES, val, tx));
+	    RAIDZ_REDIRECT_BPS_VALUES, val, tx));
 	(void) printf("INFO plain-A's stored block pointer now names vdev 99 "
 	    "in DVA 0\n");
 }
@@ -4818,20 +5021,21 @@ static int
 usage(void)
 {
 	(void) fprintf(stderr, "usage: crash_probe <dir> <ashift> move "
-	    "<TABLE_DIRTY|MS_SYNCED|PRE_UB|POST_UB> <P1|P2> [split]\n"
+	    "<TABLE_DIRTY|MS_SYNCED|PRE_UB|POST_UB> <P1|P2> [split|condense]\n"
 	    "       crash_probe <dir> <ashift> guard "
 	    "<mos|zil|stale|checkpoint|wrongzb|spill|spillblk|xbook>\n"
 	    "       crash_probe <dir> <ashift> free "
 	    "<plain|dedup|clone|gang|snap> <P1|P2> | free plain P3 "
 	    "[nocheck]\n"
 	    "       crash_probe <dir> <ashift> fcrash "
-	    "<TABLE_DIRTY|MS_SYNCED|PRE_UB|POST_UB> <P1|P2> [late]\n"
+	    "<TABLE_DIRTY|MS_SYNCED|PRE_UB|POST_UB> <P1|P2> "
+	    "[late|condense|condensebad]\n"
 	    "       crash_probe <dir> <ashift> converge <P1|P2> [nolog]\n"
 	    "       crash_probe <dir> <ashift> resilver <P1|P2> "
 	    "<offline|offlinescrub|control|replace> [nofix|nowiden|nocols]\n"
 	    "       crash_probe <dir> <ashift> stalebp <P1|P2> [same] "
 	    "[nolive]\n"
-	    "       crash_probe <dir> <ashift> corrupt <kind> [P1|P2]\n"
+	    "       crash_probe <dir> <ashift> corrupt <kind> [P1|P2] [lax]\n"
 	    "       crash_probe <dir> <ashift> tomb <read|repair>\n"
 	    "       crash_probe <dir> <ashift> rpass <R1|R2|R3|R4|R5|R6> "
 	    "<P1|P2> [none|stopgap|pass|both|noverify]\n");
@@ -4859,10 +5063,21 @@ main(int argc, char **argv)
 	if (strcmp(mode, "move") == 0 && argc >= 6) {
 		point = parse_point(argv[4]);
 		policy = parse_policy(argv[5], B_FALSE);
-		if (point == -1 || policy == -1 ||
-		    (opt != NULL && strcmp(opt, "split") != 0))
+		if (point == -1 || policy == -1 || (opt != NULL &&
+		    strcmp(opt, "split") != 0 && strcmp(opt, "condense") != 0))
 			return (usage());
-		st = run_move(point, policy, opt != NULL);
+		if (opt != NULL && strcmp(opt, "condense") == 0) {
+			if (&spike_redirect_condense == NULL) {
+				(void) printf("SKIP: no log to condense\n");
+				return (2);
+			}
+			/* The log is rewritten in the txg of the move. */
+			spike_redirect_condense = 1;
+			sh->sh_condense = 1;
+			(void) printf("INFO spike_redirect_condense=1\n");
+		}
+		st = run_move(point, policy, opt != NULL &&
+		    strcmp(opt, "split") == 0);
 	} else if (strcmp(mode, "guard") == 0 && argc == 5 &&
 	    (strcmp(argv[4], "mos") == 0 || strcmp(argv[4], "zil") == 0 ||
 	    strcmp(argv[4], "stale") == 0 ||
@@ -4882,12 +5097,17 @@ main(int argc, char **argv)
 			return (usage());
 		st = run_free(argv[4], policy, opt != NULL);
 	} else if (strcmp(mode, "fcrash") == 0 && argc >= 6) {
+		int condense = opt == NULL ? 0 :
+		    strcmp(opt, "condense") == 0 ? 1 :
+		    strcmp(opt, "condensebad") == 0 ? 2 : 0;
+
 		point = parse_point(argv[4]);
 		policy = parse_policy(argv[5], B_FALSE);
-		if (point == -1 || policy == -1 ||
-		    (opt != NULL && strcmp(opt, "late") != 0))
+		if (point == -1 || policy == -1 || (opt != NULL &&
+		    strcmp(opt, "late") != 0 && condense == 0))
 			return (usage());
-		st = run_fcrash(point, policy, opt != NULL);
+		st = run_fcrash(point, policy, opt != NULL && condense == 0,
+		    condense);
 	} else if (strcmp(mode, "converge") == 0 && argc <= 6) {
 		policy = parse_policy(argv[4], B_FALSE);
 		if (policy == -1 ||
@@ -4913,11 +5133,19 @@ main(int argc, char **argv)
 		else if (opt != NULL)
 			return (usage());
 		st = run_resilver(policy, how, fix);
-	} else if (strcmp(mode, "corrupt") == 0 && argc <= 6 &&
+	} else if (strcmp(mode, "corrupt") == 0 && argc <= 7 &&
 	    corrupt_kind_ok(argv[4])) {
-		policy = argc == 6 ? parse_policy(argv[5], B_FALSE) : P2;
+		policy = argc >= 6 ? parse_policy(argv[5], B_FALSE) : P2;
 		if (policy == -1)
 			return (usage());
+		/* The load without its checks of the log's structure. */
+		if (argc == 7 && strcmp(argv[6], "lax") == 0 &&
+		    &spike_redirect_load_lax != NULL) {
+			spike_redirect_load_lax = 1;
+			(void) printf("INFO spike_redirect_load_lax=1\n");
+		} else if (argc == 7) {
+			return (usage());
+		}
 		st = run_corrupt(argv[4], policy);
 	} else if (strcmp(mode, "tomb") == 0 && argc == 5 &&
 	    (strcmp(argv[4], "read") == 0 || strcmp(argv[4], "repair") == 0)) {

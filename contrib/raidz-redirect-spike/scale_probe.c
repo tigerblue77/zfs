@@ -17,13 +17,14 @@
  *                       region and the parameters go to <dir>/params.
  *   import <ro|rw> [cold]  find the pool (a tryimport) and import it, timed;
  *                       cold first drops the page cache.
- *   synth <from> <n> <disk|hot|mem> <batch>  add synthetic entries
- *                       from..from+n-1 (see gen_entry(); from must be the
- *                       number already there) with
+ *   synth <from> <n> <disk|hot|mem> <batch> [sorted]  add synthetic
+ *                       entries from..from+n-1 (see gen_entry(); from must
+ *                       be the number already there) with
  *                       vdev_raidz_redirect_synth(), in sync tasks of
- *                       <batch> entries; disk persists them with their
- *                       stored block pointers, hot without them where the
- *                       format can, mem in memory only.
+ *                       <batch> entries, in key order with sorted; disk
+ *                       persists them with their stored block pointers,
+ *                       hot without them where the format can, mem in
+ *                       memory only.
  *   lookup <threads>    time 1e6 lookups per thread with the I/O path's own
  *                       vdev_raidz_redirect_get(): hits (random entries),
  *                       misses (random even sectors, old births) and new
@@ -40,9 +41,11 @@
  *                       with <threads> threads; wall time, CPU time and the
  *                       raidz vdev's read count.
  *   ondisk              what the table's objects hold and take on disk.
+ *   condense            condense the log now (the redesign's format).
  *   export
  *
- * Environment: SCALE_UNIVERSE sets U (see gen_entry());
+ * Environment: SCALE_UNIVERSE sets U (see gen_entry()); SCALE_CONDENSE sets
+ * spike_redirect_condense (-1: never condense the log);
  * SCALE_ARC_MB caps the ARC (1024 by default); SCALE_LOAD_SKIP
  * sets spike_redirect_load_skip, so that the table loads empty.  Spike
  * symbols are weak: read works on a libzpool without the spike, to measure
@@ -108,6 +111,7 @@ extern uint64_t vdev_raidz_redirect_count(spa_t *, uint64_t)
 extern uint64_t vdev_raidz_redirect_hits(void) __attribute__((weak));
 extern int spike_redirect_load_skip __attribute__((weak));
 extern spike_table_stat_t spike_table_stats __attribute__((weak));
+extern int spike_redirect_condense __attribute__((weak));
 
 typedef struct params {
 	uint64_t	p_ashift;
@@ -473,6 +477,13 @@ print_load_stats(const char *what)
 	    spike_table_stats.sts_load_total_ns / 1e9,
 	    (u_longlong_t)spike_table_stats.sts_load_entries,
 	    (u_longlong_t)spike_table_stats.sts_load_records);
+#ifdef	RAIDZ_REDIRECT_REC_ADD
+	/* Only the redesign's libzpool has these. */
+	if (&spike_redirect_condense != NULL) {
+		(void) printf("MEASURE %s table load in dmu_read=%.3f s\n",
+		    what, spike_table_stats.sts_load_read_ns / 1e9);
+	}
+#endif
 }
 
 static void
@@ -487,6 +498,7 @@ cmd_import(const char *how, boolean_t cold)
 		.lpc_printerr = B_TRUE
 	};
 	uint64_t t0, t1, t2, l0 = 0, l1 = 0, rss0;
+	nvlist_t *tryconf;
 	int err;
 
 	if (cold) {
@@ -508,6 +520,10 @@ cmd_import(const char *how, boolean_t cold)
 		l0 = spike_table_stats.sts_load_total_ns;
 	t0 = now_ns();
 	VERIFY0(zpool_find_config(&lpch, POOL, &config, &ia));
+	/* What "zpool import" asks the kernel for first. */
+	tryconf = spa_tryimport(config);
+	VERIFY3P(tryconf, !=, NULL);
+	fnvlist_free(tryconf);
 	t1 = now_ns();
 	if (&spike_table_stats != NULL)
 		l1 = spike_table_stats.sts_load_total_ns;
@@ -517,7 +533,8 @@ cmd_import(const char *how, boolean_t cold)
 	VERIFY0(err);
 	VERIFY0(spa_open(POOL, &spa, FTAG));
 	params_load();
-	live_n = P.p_n;
+	/* With the load skipped, the table starts empty. */
+	live_n = getenv("SCALE_LOAD_SKIP") != NULL ? 0 : P.p_n;
 	(void) printf("MEASURE import %s%s find+tryimport=%.3f s import=%.3f s "
 	    "total=%.3f s rss_delta=%llu\n", how, cold ? " cold" : " warm",
 	    (t1 - t0) / 1e9, (t2 - t1) / 1e9, (t2 - t0) / 1e9,
@@ -635,9 +652,39 @@ punch_free(void)
 	    (u_longlong_t)ms, (now_ns() - t0) / 1e9);
 }
 
-static void
-cmd_synth(uint64_t from, uint64_t n, const char *how, uint64_t batch)
+static int
+ent_compare(const void *a, const void *b)
 {
+	const raidz_redirect_ent_t *x = a, *y = b;
+	int c = TREE_CMP(x->rde_offset, y->rde_offset);
+
+	return (c != 0 ? c : TREE_CMP(x->rde_birth, y->rde_birth));
+}
+
+/*
+ * Entries from..from+n-1 in key order, so that a log they are appended to
+ * is in key order: what a condensed log holds.
+ */
+static raidz_redirect_ent_t *
+sorted_entries(uint64_t from, uint64_t n)
+{
+	raidz_redirect_ent_t *all = malloc(n * sizeof (*all));
+	uint64_t t0 = now_ns();
+
+	VERIFY3P(all, !=, NULL);
+	for (uint64_t i = 0; i < n; i++)
+		gen_entry(from + i, &all[i]);
+	qsort(all, n, sizeof (*all), ent_compare);
+	(void) printf("INFO sorted %llu entries in %.1f s\n", (u_longlong_t)n,
+	    (now_ns() - t0) / 1e9);
+	return (all);
+}
+
+static void
+cmd_synth(uint64_t from, uint64_t n, const char *how, uint64_t batch,
+    boolean_t sorted)
+{
+	raidz_redirect_ent_t *all = sorted ? sorted_entries(from, n) : NULL;
 	int op = strcmp(how, "mem") == 0 ? SPIKE_SYNTH_ADD_MEM :
 	    strcmp(how, "hot") == 0 ? SPIKE_SYNTH_ADD_HOT : SPIKE_SYNTH_ADD;
 	raidz_redirect_ent_t *e = malloc(batch * sizeof (*e));
@@ -652,8 +699,12 @@ cmd_synth(uint64_t from, uint64_t n, const char *how, uint64_t batch)
 		uint64_t m = MIN(batch, from + n - j), done[2] = { 0, 0 };
 		uint64_t t1 = now_ns();
 
-		for (uint64_t i = 0; i < m; i++)
-			gen_entry(j + i, &e[i]);
+		for (uint64_t i = 0; i < m; i++) {
+			if (all != NULL)
+				e[i] = all[j - from + i];
+			else
+				gen_entry(j + i, &e[i]);
+		}
 		VERIFY0(vdev_raidz_redirect_synth(spa, 0, e, m, op, done));
 		txg_wait_synced(spa_get_dsl(spa), done[1]);
 		added += done[0];
@@ -685,6 +736,7 @@ cmd_synth(uint64_t from, uint64_t n, const char *how, uint64_t batch)
 	    (u_longlong_t)(rss_bytes() - rss0),
 	    (u_longlong_t)vdev_raidz_redirect_count(spa, 0));
 	free(e);
+	free(all);
 }
 
 typedef struct lq {
@@ -997,21 +1049,77 @@ cmd_ondisk(void)
 	objset_t *mos = spa_meta_objset(spa);
 	vdev_t *vd = spa->spa_root_vdev->vdev_child[0];
 	uint64_t count = vdev_raidz_redirect_count(spa, 0);
+	/* By name: the earlier format had one ZAP, this one a log and one. */
+	static const char *const keys[] = {
+	    "org.openzfs:spike_raidz_redirects",
+	    "org.openzfs:spike_raidz_redirect_log",
+	    "org.openzfs:spike_raidz_redirect_bps" };
+	static const char *const what[] = { "zap", "log", "bps-zap" };
 	uint64_t obj;
 
-	if (zap_lookup(mos, vd->vdev_top_zap, VDEV_TOP_ZAP_RAIDZ_REDIRECTS,
-	    sizeof (obj), 1, &obj) == 0) {
-		zap_stats_t zs;
+	for (int k = 0; k < 3; k++) {
+		if (zap_lookup(mos, vd->vdev_top_zap, keys[k], sizeof (obj), 1,
+		    &obj) != 0)
+			continue;
+		object_report(what[k], obj, count);
+		if (k == 1) {
+			dmu_buf_t *db;
+			uint64_t hdr[2];
 
-		object_report("zap", obj, count);
-		VERIFY0(zap_get_stats(mos, obj, &zs));
-		(void) printf("INFO zap leafs=%llu entries=%llu blocks=%llu "
-		    "ptrtbl=%llu\n", (u_longlong_t)zs.zs_num_leafs,
-		    (u_longlong_t)zs.zs_num_entries,
-		    (u_longlong_t)zs.zs_num_blocks,
-		    (u_longlong_t)zs.zs_ptrtbl_len);
+			VERIFY0(dmu_bonus_hold(mos, obj, FTAG, &db));
+			memcpy(hdr, db->db_data, sizeof (hdr));
+			dmu_buf_rele(db, FTAG);
+			(void) printf("INFO log records=%llu sorted=%llu\n",
+			    (u_longlong_t)hdr[0], (u_longlong_t)hdr[1]);
+		} else {
+			zap_stats_t zs;
+
+			VERIFY0(zap_get_stats(mos, obj, &zs));
+			(void) printf("INFO %s leafs=%llu entries=%llu "
+			    "blocks=%llu ptrtbl=%llu\n", what[k],
+			    (u_longlong_t)zs.zs_num_leafs,
+			    (u_longlong_t)zs.zs_num_entries,
+			    (u_longlong_t)zs.zs_num_blocks,
+			    (u_longlong_t)zs.zs_ptrtbl_len);
+		}
 	}
 }
+
+#ifdef	RAIDZ_REDIRECT_REC_ADD
+static void
+dirty_sync(void *arg, dmu_tx_t *tx)
+{
+	(void) arg;
+	vdev_dirty(spa->spa_root_vdev->vdev_child[0], 0, NULL,
+	    dmu_tx_get_txg(tx));
+}
+
+/* Condense the log now: in the next txg, which dirties the vdev. */
+static void
+cmd_condense(void)
+{
+	uint64_t t0 = now_ns(), txg, c0;
+
+	VERIFY3P(&spike_redirect_condense, !=, NULL);
+	c0 = spike_table_stats.sts_condense_calls;
+	spike_redirect_condense = 1;
+	VERIFY0(dsl_sync_task(POOL, NULL, dirty_sync, NULL, 0,
+	    ZFS_SPACE_CHECK_NONE));
+	txg = spa_last_synced_txg(spa);
+	txg_wait_synced(spa_get_dsl(spa), 0);
+	(void) printf("MEASURE condense calls=%llu txg=%llu records=%llu "
+	    "condense=%.3f s txg sync=%.3f s call=%.3f s\n",
+	    (u_longlong_t)(spike_table_stats.sts_condense_calls - c0),
+	    (u_longlong_t)spike_table_stats.sts_condense_txg,
+	    (u_longlong_t)spike_table_stats.sts_condense_records,
+	    spike_table_stats.sts_condense_ns / 1e9,
+	    sync_ns(spike_table_stats.sts_condense_txg) / 1e9,
+	    (now_ns() - t0) / 1e9);
+	(void) txg;
+	punch_free();
+}
+
+#endif
 
 static void
 usage(void)
@@ -1048,6 +1156,12 @@ main(int argc, char **argv)
 		file_size = strtoull(e, NULL, 0) << 30;
 	zfs_arc_max = (getenv("SCALE_ARC_MB") != NULL ?
 	    strtoull(getenv("SCALE_ARC_MB"), NULL, 0) : 1024) << 20;
+#ifdef	RAIDZ_REDIRECT_REC_ADD
+	if ((e = getenv("SCALE_CONDENSE")) != NULL) {
+		VERIFY3P(&spike_redirect_condense, !=, NULL);
+		spike_redirect_condense = atoi(e);
+	}
+#endif
 	if (getenv("SCALE_LOAD_SKIP") != NULL) {
 		VERIFY3P(&spike_redirect_load_skip, !=, NULL);
 		spike_redirect_load_skip = 1;
@@ -1079,10 +1193,13 @@ main(int argc, char **argv)
 			}
 			cmd_import(how, cold);
 		} else if (strcmp(c, "synth") == 0 && i + 4 < argc) {
+			boolean_t sorted = i + 5 < argc &&
+			    strcmp(argv[i + 5], "sorted") == 0;
+
 			cmd_synth(strtoull(argv[i + 1], NULL, 0),
 			    strtoull(argv[i + 2], NULL, 0), argv[i + 3],
-			    strtoull(argv[i + 4], NULL, 0));
-			i += 4;
+			    strtoull(argv[i + 4], NULL, 0), sorted);
+			i += sorted ? 5 : 4;
 		} else if (strcmp(c, "lookup") == 0 && i + 1 < argc) {
 			cmd_lookup(atoi(argv[++i]));
 		} else if (strcmp(c, "memory") == 0) {
@@ -1101,6 +1218,10 @@ main(int argc, char **argv)
 			i += 2;
 		} else if (strcmp(c, "ondisk") == 0) {
 			cmd_ondisk();
+#ifdef	RAIDZ_REDIRECT_REC_ADD
+		} else if (strcmp(c, "condense") == 0) {
+			cmd_condense();
+#endif
 		} else if (strcmp(c, "export") == 0) {
 			cmd_export();
 		} else {

@@ -2403,38 +2403,102 @@ vdev_raidz_layout_for_alloc(vdev_raidz_t *vdrz, uint64_t txg)
 /*
  * SPIKE, not for merge: persistent block redirects (see vdev_raidz.h).  The
  * block pointers are not changed: I/O to the old DVA of a moved block is
- * sent to its new extent.  vdev_raidz_load() reads the vdev's table into
- * vd_redirects, and vdev_raidz_redirect_move() adds to both in the txg that
- * moves the block.  When the block is freed, vdev_raidz_redirect_remove()
- * turns its entry into a tombstone and vdev_raidz_redirect_sync() takes it
- * out of the table, in the txg of the free; vdev_raidz_redirect_expire()
- * drops the tombstone once the block's extents leave the defer trees.
+ * sent to its new extent.  vdev_raidz_load() reads the vdev's table, and
+ * vdev_raidz_redirect_move() adds to it in the txg that moves the block.
+ * When the block is freed, vdev_raidz_redirect_remove() turns its entry
+ * into a tombstone and vdev_raidz_redirect_sync() takes it off the disk, in
+ * the txg of the free; vdev_raidz_redirect_expire() drops the tombstone
+ * once the block's extents leave the defer trees.
+ *
+ * In memory, the entries are 40-byte slots of open-addressing tables
+ * (linear probing in Robin Hood order, backward-shift deletion), one per
+ * group of metaslabs (RDT_SHARDS, by metaslab index), sized for 80% use
+ * when loaded.  Readers, the I/O path first, take no lock: each counts
+ * itself in one of RDT_READERS counters, a cache line each, and checks
+ * that no writer is in.  A writer, in syncing context or at load, raises
+ * rdt_writer and waits for every counter to drain before it moves a slot
+ * or frees an array; a reader that finds it in waits on rdt_lock.
+ * SPIKE: a real implementation would rather use RCU or SMR.
+ *
+ * On disk, the table is a log of fixed-size records in a MOS object (an
+ * entry added, a key removed), which the load reads in large chunks, and a
+ * ZAP keyed like the entries holding the block pointer and bookmark of each,
+ * which only a scan reads.  rdt_log_condense() rewrites the log in key
+ * order, one record per entry, once it holds too many other records.
  */
-typedef struct raidz_redirect_node {
-	avl_node_t rdn_link;
-	/* On vd_redirect_pending, then vd_redirect_tombs, once freed. */
-	list_node_t rdn_pending;
-	raidz_redirect_ent_t rdn_ent;
-	boolean_t rdn_tomb;
-	uint64_t rdn_free_txg;
-	uint64_t rdn_free_pass;
-} raidz_redirect_node_t;
+typedef struct raidz_redirect_slot {
+	uint64_t rs_offset;
+	uint64_t rs_birth;		/* 0: an empty slot */
+	uint64_t rs_new_offset;
+	uint32_t rs_new_delta;		/* new birth - birth */
+	uint32_t rs_new_asize;		/* in SPA_MINBLOCKSIZE units */
+	uint32_t rs_old_asize;		/* in SPA_MINBLOCKSIZE units */
+	uint32_t rs_old_reserved;	/* the same, and RS_TOMB */
+} raidz_redirect_slot_t;
+
+#define	RS_TOMB		(1U << 31)
+#define	RS_BYTES(u)	((uint64_t)((u) & ~RS_TOMB) << SPA_MINBLOCKSHIFT)
+
+typedef struct raidz_redirect_shard {
+	raidz_redirect_slot_t *rrs_slots;
+	uint32_t rrs_cap;		/* slots, 0 if none */
+	uint32_t rrs_count;		/* entries, tombstones included */
+	/* No entry it took since the table was loaded has a later t2. */
+	uint64_t rrs_max_new_birth;
+} raidz_redirect_shard_t;
+
+#define	RDT_SHARDS	1024
+#define	RDT_READERS	64
+#define	RDT_MIN_CAP	16
+#define	RDT_CONDENSE_MIN	65536
+
+typedef struct raidz_redirect_reader {
+	volatile uint64_t rrr_count;
+	uint64_t rrr_pad[7];
+} raidz_redirect_reader_t;
+
+/* A freed entry, until its tombstone is dropped. */
+typedef struct raidz_redirect_tomb {
+	list_node_t rrt_link;
+	uint64_t rrt_offset;
+	uint64_t rrt_birth;
+	uint64_t rrt_free_txg;
+	uint64_t rrt_free_pass;
+} raidz_redirect_tomb_t;
+
+struct raidz_redirect_table {
+	raidz_redirect_reader_t rdt_readers[RDT_READERS];
+	volatile uint32_t rdt_writer;
+	krwlock_t rdt_lock;
+	void *rdt_raw;			/* what kmem_zalloc() returned */
+	uint64_t rdt_ms_shift;		/* set while the table is empty */
+	uint64_t rdt_count;		/* entries, tombstones included */
+	uint64_t rdt_ntombs;
+	uint64_t rdt_max_birth;		/* no entry has a later birth */
+	/* Freed entries: their keys still on disk, then gone from it. */
+	kmutex_t rdt_tomb_lock;
+	list_t rdt_pending;
+	list_t rdt_tombs;
+	/* The log: its records, and how many of the first are sorted. */
+	uint64_t rdt_log_records;
+	uint64_t rdt_log_sorted;
+	/* The scan walk's sorted view of one metaslab's entries. */
+	uint64_t rdt_walk_ms;
+	uint64_t rdt_walk_min;
+	uint64_t rdt_walk_max;
+	uint64_t *rdt_walk;		/* {offset, birth} pairs */
+	uint64_t rdt_walk_n;
+	uint64_t rdt_walk_size;		/* pairs allocated */
+	raidz_redirect_shard_t rdt_shards[RDT_SHARDS];
+};
 
 static volatile uint64_t raidz_redirect_hit_count;
-
-static int
-vdev_raidz_redirect_compare(const void *x1, const void *x2)
-{
-	const raidz_redirect_ent_t *e1 = &((const raidz_redirect_node_t *)
-	    x1)->rdn_ent;
-	const raidz_redirect_ent_t *e2 = &((const raidz_redirect_node_t *)
-	    x2)->rdn_ent;
-
-	int cmp = TREE_CMP(e1->rde_offset, e2->rde_offset);
-	if (cmp != 0)
-		return (cmp);
-	return (TREE_CMP(e1->rde_birth, e2->rde_birth));
-}
+spike_table_stat_t spike_table_stats;
+int spike_redirect_load_skip = 0;
+int spike_redirect_condense = 0;
+int spike_redirect_condense_tombs = 0;
+int spike_redirect_load_lax = 0;
+static uint64_t spike_redirect_condense_txg;
 
 uint64_t
 vdev_raidz_redirect_hits(void)
@@ -2442,27 +2506,360 @@ vdev_raidz_redirect_hits(void)
 	return (raidz_redirect_hit_count);
 }
 
+static raidz_redirect_table_t *
+rdt_alloc(void)
+{
+	size_t size = sizeof (raidz_redirect_table_t) + 64;
+	void *raw = kmem_zalloc(size, KM_SLEEP);
+	raidz_redirect_table_t *t = (void *)P2ROUNDUP((uintptr_t)raw, 64);
+
+	t->rdt_raw = raw;
+	t->rdt_walk_ms = UINT64_MAX;
+	rw_init(&t->rdt_lock, NULL, RW_DEFAULT, NULL);
+	mutex_init(&t->rdt_tomb_lock, NULL, MUTEX_DEFAULT, NULL);
+	list_create(&t->rdt_pending, sizeof (raidz_redirect_tomb_t),
+	    offsetof(raidz_redirect_tomb_t, rrt_link));
+	list_create(&t->rdt_tombs, sizeof (raidz_redirect_tomb_t),
+	    offsetof(raidz_redirect_tomb_t, rrt_link));
+	return (t);
+}
+
+/* The reader counter of the calling thread: its CPU's, or a hash. */
+static inline int
+rdt_reader_slot(void)
+{
+#ifdef _KERNEL
+	return ((int)(CPU_SEQID_UNSTABLE % RDT_READERS));
+#else
+	return ((int)(((uint64_t)(uintptr_t)curthread *
+	    0x9e3779b97f4a7c15ULL) >> 58));
+#endif
+}
+
+/*
+ * Enter as a reader: the counter's index, or -1 if a writer was in and
+ * the reader holds rdt_lock instead.  The counter is raised before
+ * rdt_writer is read, and the writer raises rdt_writer before it reads the
+ * counters, each with a full barrier between: one of them sees the other.
+ */
+static int
+rdt_read_enter(raidz_redirect_table_t *t)
+{
+	int r = rdt_reader_slot();
+
+	atomic_inc_64(&t->rdt_readers[r].rrr_count);
+	membar_sync();
+	if (t->rdt_writer == 0)
+		return (r);
+	atomic_dec_64(&t->rdt_readers[r].rrr_count);
+	rw_enter(&t->rdt_lock, RW_READER);
+	return (-1);
+}
+
+static void
+rdt_read_exit(raidz_redirect_table_t *t, int r)
+{
+	if (r < 0) {
+		rw_exit(&t->rdt_lock);
+		return;
+	}
+	membar_sync();
+	atomic_dec_64(&t->rdt_readers[r].rrr_count);
+}
+
+static void
+rdt_write_enter(raidz_redirect_table_t *t)
+{
+	rw_enter(&t->rdt_lock, RW_WRITER);
+	t->rdt_writer = 1;
+	membar_sync();
+	for (int r = 0; r < RDT_READERS; r++) {
+		while (t->rdt_readers[r].rrr_count != 0)
+			kpreempt(KPREEMPT_SYNC);
+	}
+	membar_sync();
+}
+
+static void
+rdt_write_exit(raidz_redirect_table_t *t)
+{
+	membar_sync();
+	t->rdt_writer = 0;
+	rw_exit(&t->rdt_lock);
+}
+
+static inline raidz_redirect_shard_t *
+rdt_shard(raidz_redirect_table_t *t, uint64_t offset)
+{
+	return (&t->rdt_shards[(offset >> t->rdt_ms_shift) &
+	    (RDT_SHARDS - 1)]);
+}
+
+/* The slot an offset hashes to, in a table of cap slots. */
+static inline uint32_t
+rdt_home(uint64_t offset, uint32_t cap)
+{
+	uint64_t h = (offset >> SPA_MINBLOCKSHIFT) * 0x9e3779b97f4a7c15ULL;
+
+	return ((uint32_t)(((h >> 32) * (uint64_t)cap) >> 32));
+}
+
+static inline uint32_t
+rdt_dist(uint32_t i, uint32_t home, uint32_t cap)
+{
+	return (i >= home ? i - home : i + cap - home);
+}
+
+static raidz_redirect_slot_t *
+rdt_shard_find(const raidz_redirect_shard_t *sh, uint64_t offset,
+    uint64_t birth)
+{
+	uint32_t cap = sh->rrs_cap;
+	uint32_t i;
+
+	if (sh->rrs_count == 0)
+		return (NULL);
+	i = rdt_home(offset, cap);
+	for (uint32_t d = 0; ; d++) {
+		raidz_redirect_slot_t *s = &sh->rrs_slots[i];
+
+		if (s->rs_birth == 0)
+			return (NULL);
+		if (s->rs_offset == offset && s->rs_birth == birth)
+			return (s);
+		if (rdt_dist(i, rdt_home(s->rs_offset, cap), cap) < d)
+			return (NULL);
+		if (++i == cap)
+			i = 0;
+	}
+}
+
+/* Put *e in sh, which has room for it and does not hold its key. */
+static void
+rdt_shard_put(raidz_redirect_shard_t *sh, const raidz_redirect_slot_t *e)
+{
+	raidz_redirect_slot_t cur = *e;
+	uint32_t cap = sh->rrs_cap;
+	uint32_t i = rdt_home(cur.rs_offset, cap);
+	uint32_t d = 0;
+
+	for (;;) {
+		raidz_redirect_slot_t *s = &sh->rrs_slots[i];
+		uint32_t sd;
+
+		if (s->rs_birth == 0) {
+			*s = cur;
+			sh->rrs_count++;
+			return;
+		}
+		sd = rdt_dist(i, rdt_home(s->rs_offset, cap), cap);
+		if (sd < d) {
+			raidz_redirect_slot_t tmp = *s;
+
+			*s = cur;
+			cur = tmp;
+			d = sd;
+		}
+		if (++i == cap)
+			i = 0;
+		d++;
+	}
+}
+
+static void
+rdt_shard_resize(raidz_redirect_shard_t *sh, uint64_t ncap)
+{
+	raidz_redirect_slot_t *old = sh->rrs_slots;
+	uint32_t ocap = sh->rrs_cap;
+
+	VERIFY(ncap > sh->rrs_count || (ncap == 0 && sh->rrs_count == 0));
+	VERIFY3U(ncap, <=, UINT32_MAX);
+	sh->rrs_slots = ncap == 0 ? NULL :
+	    vmem_zalloc(ncap * sizeof (raidz_redirect_slot_t), KM_SLEEP);
+	sh->rrs_cap = (uint32_t)ncap;
+	sh->rrs_count = 0;
+	for (uint32_t i = 0; i < ocap; i++) {
+		if (old[i].rs_birth != 0)
+			rdt_shard_put(sh, &old[i]);
+	}
+	if (old != NULL)
+		vmem_free(old, ocap * sizeof (raidz_redirect_slot_t));
+}
+
+/*
+ * Room in sh for n more entries: at most 90% of the slots used, and two
+ * thirds after a resize.  The load trims each shard to 80% at its end.
+ */
+static void
+rdt_shard_reserve(raidz_redirect_shard_t *sh, uint64_t n)
+{
+	uint64_t want = (uint64_t)sh->rrs_count + n;
+
+	if (want * 10 < (uint64_t)sh->rrs_cap * 9)
+		return;
+	rdt_shard_resize(sh, MAX(RDT_MIN_CAP, want * 3 / 2));
+}
+
+static void
+rdt_shard_del(raidz_redirect_shard_t *sh, raidz_redirect_slot_t *s)
+{
+	uint32_t cap = sh->rrs_cap;
+	uint32_t i = (uint32_t)(s - sh->rrs_slots);
+
+	for (;;) {
+		uint32_t j = i + 1 == cap ? 0 : i + 1;
+		raidz_redirect_slot_t *n = &sh->rrs_slots[j];
+
+		if (n->rs_birth == 0 ||
+		    rdt_dist(j, rdt_home(n->rs_offset, cap), cap) == 0) {
+			memset(&sh->rrs_slots[i], 0, sizeof (*s));
+			break;
+		}
+		sh->rrs_slots[i] = *n;
+		i = j;
+	}
+	sh->rrs_count--;
+	if (sh->rrs_count == 0)
+		rdt_shard_resize(sh, 0);
+	else if (sh->rrs_cap > 4 * RDT_MIN_CAP &&
+	    (uint64_t)sh->rrs_count * 4 < sh->rrs_cap)
+		rdt_shard_resize(sh, MAX(RDT_MIN_CAP, sh->rrs_count * 3 / 2));
+}
+
+static void
+rdt_slot_to_ent(const raidz_redirect_slot_t *s, raidz_redirect_ent_t *e)
+{
+	e->rde_offset = s->rs_offset;
+	e->rde_birth = s->rs_birth;
+	e->rde_new_offset = s->rs_new_offset;
+	e->rde_new_birth = s->rs_birth + s->rs_new_delta;
+	e->rde_new_asize = RS_BYTES(s->rs_new_asize);
+	e->rde_old_asize = RS_BYTES(s->rs_old_asize);
+	e->rde_old_reserved = RS_BYTES(s->rs_old_reserved);
+}
+
+/* The entry must have passed vdev_raidz_redirect_damage(). */
+static void
+rdt_ent_to_slot(const raidz_redirect_ent_t *e, raidz_redirect_slot_t *s)
+{
+	s->rs_offset = e->rde_offset;
+	s->rs_birth = e->rde_birth;
+	s->rs_new_offset = e->rde_new_offset;
+	s->rs_new_delta = (uint32_t)(e->rde_new_birth - e->rde_birth);
+	s->rs_new_asize = (uint32_t)(e->rde_new_asize >> SPA_MINBLOCKSHIFT);
+	s->rs_old_asize = (uint32_t)(e->rde_old_asize >> SPA_MINBLOCKSHIFT);
+	s->rs_old_reserved = (uint32_t)(e->rde_old_reserved >>
+	    SPA_MINBLOCKSHIFT);
+}
+
+/* Free every entry, tombstone and array; no reader may be in. */
+static void
+rdt_clear(raidz_redirect_table_t *t)
+{
+	raidz_redirect_tomb_t *rrt;
+
+	for (int i = 0; i < RDT_SHARDS; i++) {
+		raidz_redirect_shard_t *sh = &t->rdt_shards[i];
+
+		if (sh->rrs_slots != NULL) {
+			vmem_free(sh->rrs_slots,
+			    sh->rrs_cap * sizeof (raidz_redirect_slot_t));
+		}
+		memset(sh, 0, sizeof (*sh));
+	}
+	mutex_enter(&t->rdt_tomb_lock);
+	while ((rrt = list_remove_head(&t->rdt_pending)) != NULL)
+		kmem_free(rrt, sizeof (*rrt));
+	while ((rrt = list_remove_head(&t->rdt_tombs)) != NULL)
+		kmem_free(rrt, sizeof (*rrt));
+	mutex_exit(&t->rdt_tomb_lock);
+	if (t->rdt_walk != NULL)
+		vmem_free(t->rdt_walk,
+		    t->rdt_walk_size * 2 * sizeof (uint64_t));
+	t->rdt_walk = NULL;
+	t->rdt_walk_n = t->rdt_walk_size = 0;
+	t->rdt_walk_ms = UINT64_MAX;
+	t->rdt_count = t->rdt_ntombs = t->rdt_max_birth = 0;
+	t->rdt_log_records = t->rdt_log_sorted = 0;
+}
+
+static void
+rdt_free(raidz_redirect_table_t *t)
+{
+	rdt_clear(t);
+	list_destroy(&t->rdt_pending);
+	list_destroy(&t->rdt_tombs);
+	mutex_destroy(&t->rdt_tomb_lock);
+	rw_destroy(&t->rdt_lock);
+	kmem_free(t->rdt_raw, sizeof (raidz_redirect_table_t) + 64);
+}
+
+/* Add an entry whose key the table does not hold; a writer is in. */
+static void
+rdt_insert_locked(vdev_t *vd, raidz_redirect_table_t *t,
+    const raidz_redirect_ent_t *e)
+{
+	raidz_redirect_shard_t *sh;
+	raidz_redirect_slot_t s;
+
+	if (t->rdt_count == 0)
+		t->rdt_ms_shift = vd->vdev_ms_shift;
+	sh = rdt_shard(t, e->rde_offset);
+	rdt_ent_to_slot(e, &s);
+	rdt_shard_reserve(sh, 1);
+	rdt_shard_put(sh, &s);
+	t->rdt_count++;
+	t->rdt_max_birth = MAX(t->rdt_max_birth, e->rde_birth);
+	sh->rrs_max_new_birth = MAX(sh->rrs_max_new_birth, e->rde_new_birth);
+	if ((e->rde_offset >> t->rdt_ms_shift) == t->rdt_walk_ms)
+		t->rdt_walk_ms = UINT64_MAX;
+}
+
+static void
+vdev_raidz_redirect_insert(vdev_t *vd, const raidz_redirect_ent_t *ent)
+{
+	raidz_redirect_table_t *t = ((vdev_raidz_t *)vd->vdev_tsd)->vd_rdt;
+
+	rdt_write_enter(t);
+	rdt_insert_locked(vd, t, ent);
+	rdt_write_exit(t);
+}
+
+/*
+ * SPIKE: the lookup of every raidz I/O.  It skips the table when no entry
+ * can match: the table is empty, or the birth is later than any entry's
+ * (every block born in the last parity epoch, new writes included), or
+ * the group of metaslabs holding the offset has none.  The first two are
+ * read outside the reader count, where a writer may be changing them: a
+ * stale value only misses an entry being added, for a block whose old
+ * extent still holds it until its txg and TXG_DEFER_SIZE more have
+ * synced, as without these checks.
+ */
 static boolean_t
 vdev_raidz_redirect_find(vdev_t *vd, uint64_t offset, uint64_t birth,
     raidz_redirect_ent_t *ent, boolean_t tombs)
 {
-	vdev_raidz_t *vdrz;
-	raidz_redirect_node_t search;
-	raidz_redirect_node_t *rdn;
+	raidz_redirect_table_t *t;
+	raidz_redirect_shard_t *sh;
+	raidz_redirect_slot_t *s;
+	boolean_t found = B_FALSE;
+	int r;
 
 	if (vd == NULL || vd->vdev_ops != &vdev_raidz_ops)
 		return (B_FALSE);
-	vdrz = vd->vdev_tsd;
-	search.rdn_ent.rde_offset = offset;
-	search.rdn_ent.rde_birth = birth;
-	rw_enter(&vdrz->vd_redirect_lock, RW_READER);
-	rdn = avl_find(&vdrz->vd_redirects, &search, NULL);
-	if (rdn != NULL && rdn->rdn_tomb && !tombs)
-		rdn = NULL;
-	if (rdn != NULL && ent != NULL)
-		*ent = rdn->rdn_ent;
-	rw_exit(&vdrz->vd_redirect_lock);
-	return (rdn != NULL);
+	t = ((vdev_raidz_t *)vd->vdev_tsd)->vd_rdt;
+	if (t->rdt_count == 0 || birth > t->rdt_max_birth)
+		return (B_FALSE);
+	r = rdt_read_enter(t);
+	sh = rdt_shard(t, offset);
+	s = rdt_shard_find(sh, offset, birth);
+	if (s != NULL && (tombs || !(s->rs_old_reserved & RS_TOMB))) {
+		found = B_TRUE;
+		if (ent != NULL)
+			rdt_slot_to_ent(s, ent);
+	}
+	rdt_read_exit(t, r);
+	return (found);
 }
 
 /*
@@ -2515,13 +2912,12 @@ vdev_raidz_redirect_nodes(spa_t *spa, uint64_t vdev, boolean_t tombs)
 	spa_config_enter(spa, SCL_VDEV, FTAG, RW_READER);
 	vd = vdev_lookup_top(spa, vdev);
 	if (vd != NULL && vd->vdev_ops == &vdev_raidz_ops) {
-		vdev_raidz_t *vdrz = vd->vdev_tsd;
+		raidz_redirect_table_t *t =
+		    ((vdev_raidz_t *)vd->vdev_tsd)->vd_rdt;
 
-		rw_enter(&vdrz->vd_redirect_lock, RW_READER);
-		n = tombs ? vdrz->vd_redirect_ntombs :
-		    avl_numnodes(&vdrz->vd_redirects) -
-		    vdrz->vd_redirect_ntombs;
-		rw_exit(&vdrz->vd_redirect_lock);
+		rw_enter(&t->rdt_lock, RW_READER);
+		n = tombs ? t->rdt_ntombs : t->rdt_count - t->rdt_ntombs;
+		rw_exit(&t->rdt_lock);
 	}
 	spa_config_exit(spa, SCL_VDEV, FTAG);
 	return (n);
@@ -2587,21 +2983,23 @@ vdev_raidz_redirect_stored_bp(vdev_t *vd, const raidz_redirect_ent_t *ent,
 	vdev_raidz_t *vdrz = vd->vdev_tsd;
 	spa_t *spa = vd->vdev_spa;
 	uint64_t key[2] = { ent->rde_offset, ent->rde_birth };
-	uint64_t val[RAIDZ_REDIRECT_VALUES];
-	const uint64_t *zbv = &val[RAIDZ_REDIRECT_ENT_VALUES +
-	    RAIDZ_REDIRECT_BP_VALUES];
+	uint64_t val[RAIDZ_REDIRECT_BPS_VALUES];
+	const uint64_t *zbv = &val[RAIDZ_REDIRECT_BP_VALUES];
 	boolean_t named = B_FALSE;
-	int err;
+	int err = ENOENT;
 
-	err = zap_lookup_uint64(spa->spa_meta_objset, vdrz->vd_redirect_obj,
-	    key, 2, sizeof (uint64_t), RAIDZ_REDIRECT_VALUES, val);
+	if (vdrz->vd_redirect_obj != 0) {
+		err = zap_lookup_uint64(spa->spa_meta_objset,
+		    vdrz->vd_redirect_obj, key, 2, sizeof (uint64_t),
+		    RAIDZ_REDIRECT_BPS_VALUES, val);
+	}
 	if (err != 0) {
 		zfs_dbgmsg("spike: %s: redirect {%llx, %llu}: no stored block "
 		    "pointer (%d)", spa_name(spa), (u_longlong_t)key[0],
 		    (u_longlong_t)key[1], err);
 		return (SET_ERROR(ECKSUM));
 	}
-	memcpy(bp, &val[RAIDZ_REDIRECT_ENT_VALUES], sizeof (blkptr_t));
+	memcpy(bp, val, sizeof (blkptr_t));
 	SET_BOOKMARK(zb, zbv[0], zbv[1], (int64_t)zbv[2], zbv[3]);
 	if (!spike_scan_redirect_verify)
 		return (0);
@@ -2642,22 +3040,29 @@ vdev_raidz_redirect_scan_min_txg(spa_t *spa, uint64_t min_txg,
 		return (min_txg);
 	for (uint64_t c = 0; c < rvd->vdev_children; c++) {
 		vdev_t *vd = rvd->vdev_child[c];
-		vdev_raidz_t *vdrz;
-		raidz_redirect_node_t *rdn;
+		raidz_redirect_table_t *t;
+		int r;
 
 		if (vd->vdev_ops != &vdev_raidz_ops)
 			continue;
-		vdrz = vd->vdev_tsd;
-		rw_enter(&vdrz->vd_redirect_lock, RW_READER);
-		for (rdn = avl_first(&vdrz->vd_redirects); rdn != NULL;
-		    rdn = AVL_NEXT(&vdrz->vd_redirects, rdn)) {
-			const raidz_redirect_ent_t *e = &rdn->rdn_ent;
+		t = ((vdev_raidz_t *)vd->vdev_tsd)->vd_rdt;
+		r = rdt_read_enter(t);
+		for (int i = 0; i < RDT_SHARDS; i++) {
+			const raidz_redirect_shard_t *sh = &t->rdt_shards[i];
 
-			if (!rdn->rdn_tomb && e->rde_new_birth > min_txg &&
-			    e->rde_new_birth < max_txg && e->rde_birth <= min)
-				min = e->rde_birth - 1;
+			for (uint32_t j = 0; j < sh->rrs_cap; j++) {
+				const raidz_redirect_slot_t *s =
+				    &sh->rrs_slots[j];
+				uint64_t t2 = s->rs_birth + s->rs_new_delta;
+
+				if (s->rs_birth != 0 &&
+				    !(s->rs_old_reserved & RS_TOMB) &&
+				    t2 > min_txg && t2 < max_txg &&
+				    s->rs_birth <= min)
+					min = s->rs_birth - 1;
+			}
 		}
-		rw_exit(&vdrz->vd_redirect_lock);
+		rdt_read_exit(t, r);
 	}
 	if (min != min_txg) {
 		zfs_dbgmsg("spike: scan of %s widened from (%llu, %llu) to "
@@ -2685,12 +3090,79 @@ vdev_raidz_redirect_scan_min_txg(spa_t *spa, uint64_t min_txg,
  * zfs_blkptr_verify(), so that a damaged table cannot send a scan read
  * elsewhere or to a panic.  Tombstones are skipped: their blocks are
  * freed.  Syncing context, which no free or move runs beside.
+ *
+ * The walk goes metaslab by metaslab.  It skips a group of metaslabs none
+ * of whose entries was moved in the window, and takes a sorted copy of the
+ * window's keys of the metaslab it is in, kept until it moves on: no entry
+ * can enter the window once the scan has started, since every later move
+ * has a later t2, and a key whose entry has left it since is skipped.
  */
 #define	SPIKE_SCAN_WALK_MAX	1024
 spike_scan_pass_stat_t spike_scan_pass_stats;
 uint64_t spike_scan_watch[2][3];
 int spike_scan_redirect_batch = 0;
 int spike_scan_redirect_verify = 1;
+
+static int
+rdt_pair_compare(const void *x1, const void *x2)
+{
+	const uint64_t *a = x1;
+	const uint64_t *b = x2;
+	int cmp = TREE_CMP(a[0], b[0]);
+
+	return (cmp != 0 ? cmp : TREE_CMP(a[1], b[1]));
+}
+
+/* The sorted keys of metaslab ms in the window, in rdt_walk. */
+static uint64_t
+rdt_walk_build(raidz_redirect_table_t *t, uint64_t ms, uint64_t min_txg,
+    uint64_t max_txg)
+{
+	const raidz_redirect_shard_t *sh;
+	uint64_t looked;
+	int r;
+
+	t->rdt_walk_n = 0;
+	sh = &t->rdt_shards[ms & (RDT_SHARDS - 1)];
+	/* Allocate outside the reader count, for what the shard holds. */
+	for (;;) {
+		uint64_t want = sh->rrs_count;
+
+		if (t->rdt_walk_size < want) {
+			if (t->rdt_walk != NULL) {
+				vmem_free(t->rdt_walk,
+				    t->rdt_walk_size * 2 * sizeof (uint64_t));
+			}
+			t->rdt_walk_size = MAX(want, 64);
+			t->rdt_walk = vmem_alloc(t->rdt_walk_size * 2 *
+			    sizeof (uint64_t), KM_SLEEP);
+		}
+		r = rdt_read_enter(t);
+		if (sh->rrs_count <= t->rdt_walk_size)
+			break;
+		rdt_read_exit(t, r);
+	}
+	looked = sh->rrs_count;
+	for (uint32_t j = 0; j < sh->rrs_cap; j++) {
+		const raidz_redirect_slot_t *s = &sh->rrs_slots[j];
+		uint64_t t2 = s->rs_birth + s->rs_new_delta;
+
+		if (s->rs_birth == 0 ||
+		    (s->rs_offset >> t->rdt_ms_shift) != ms ||
+		    s->rs_birth > min_txg || t2 <= min_txg || t2 >= max_txg)
+			continue;
+		t->rdt_walk[2 * t->rdt_walk_n] = s->rs_offset;
+		t->rdt_walk[2 * t->rdt_walk_n + 1] = s->rs_birth;
+		t->rdt_walk_n++;
+	}
+	rdt_read_exit(t, r);
+	qsort(t->rdt_walk, t->rdt_walk_n, 2 * sizeof (uint64_t),
+	    rdt_pair_compare);
+	t->rdt_walk_ms = ms;
+	t->rdt_walk_min = min_txg;
+	t->rdt_walk_max = max_txg;
+	return (looked);
+}
 
 int
 vdev_raidz_redirect_scan_next(spa_t *spa, uint64_t *cursor, uint64_t min_txg,
@@ -2703,100 +3175,142 @@ vdev_raidz_redirect_scan_next(spa_t *spa, uint64_t *cursor, uint64_t min_txg,
 
 	for (uint64_t v = cursor[0]; v < rvd->vdev_children; v++) {
 		vdev_t *vd = rvd->vdev_child[v];
-		vdev_raidz_t *vdrz;
-		raidz_redirect_node_t search;
-		raidz_redirect_node_t *rdn;
-		avl_index_t where;
-		boolean_t found = B_FALSE;
+		raidz_redirect_table_t *t;
+		uint64_t off = v == cursor[0] ? cursor[1] : 0;
+		uint64_t birth = v == cursor[0] ? cursor[2] : 0;
+		uint64_t nms;
 
 		if (vd->vdev_ops != &vdev_raidz_ops)
 			continue;
-		vdrz = vd->vdev_tsd;
-		search.rdn_ent.rde_offset = v == cursor[0] ? cursor[1] : 0;
-		search.rdn_ent.rde_birth = v == cursor[0] ? cursor[2] : 0;
-		rw_enter(&vdrz->vd_redirect_lock, RW_READER);
-		rdn = avl_find(&vdrz->vd_redirects, &search, &where);
-		rdn = rdn != NULL ? AVL_NEXT(&vdrz->vd_redirects, rdn) :
-		    avl_nearest(&vdrz->vd_redirects, where, AVL_AFTER);
-		for (; rdn != NULL && walked < SPIKE_SCAN_WALK_MAX;
-		    rdn = AVL_NEXT(&vdrz->vd_redirects, rdn)) {
-			const raidz_redirect_ent_t *e = &rdn->rdn_ent;
+		t = ((vdev_raidz_t *)vd->vdev_tsd)->vd_rdt;
+		if (t->rdt_count == 0)
+			continue;
+		nms = (vd->vdev_asize >> t->rdt_ms_shift) + 1;
+		for (uint64_t ms = off >> t->rdt_ms_shift; ms < nms; ms++) {
+			const raidz_redirect_shard_t *sh =
+			    &t->rdt_shards[ms & (RDT_SHARDS - 1)];
+			uint64_t lo, hi;
 
-			walked++;
-			st->sps_walked++;
-			cursor[0] = v;
-			cursor[1] = e->rde_offset;
-			cursor[2] = e->rde_birth;
-			if (rdn->rdn_tomb) {
-				st->sps_tombs++;
+			if (ms != off >> t->rdt_ms_shift) {
+				off = ms << t->rdt_ms_shift;
+				birth = 0;
+			}
+			if (walked >= SPIKE_SCAN_WALK_MAX) {
+				cursor[0] = v;
+				cursor[1] = off;
+				cursor[2] = birth;
+				return (SET_ERROR(EAGAIN));
+			}
+			if (sh->rrs_count == 0 ||
+			    sh->rrs_max_new_birth <= min_txg)
 				continue;
+			if (t->rdt_walk_ms != ms ||
+			    t->rdt_walk_min != min_txg ||
+			    t->rdt_walk_max != max_txg) {
+				uint64_t looked = rdt_walk_build(t, ms,
+				    min_txg, max_txg);
+
+				walked += looked;
+				st->sps_walked += looked;
 			}
-			if (e->rde_birth <= min_txg &&
-			    e->rde_new_birth > min_txg &&
-			    e->rde_new_birth < max_txg) {
-				*ent = *e;
-				found = B_TRUE;
-				break;
+			/* The first key after {off, birth}. */
+			lo = 0;
+			hi = t->rdt_walk_n;
+			while (lo < hi) {
+				uint64_t mid = (lo + hi) / 2;
+				const uint64_t *p = &t->rdt_walk[2 * mid];
+
+				if (p[0] < off ||
+				    (p[0] == off && p[1] <= birth))
+					lo = mid + 1;
+				else
+					hi = mid;
+			}
+			for (; lo < t->rdt_walk_n; lo++) {
+				const uint64_t *p = &t->rdt_walk[2 * lo];
+				raidz_redirect_slot_t *s;
+				boolean_t live = B_FALSE;
+				int r;
+
+				cursor[0] = v;
+				cursor[1] = off = p[0];
+				cursor[2] = birth = p[1];
+				r = rdt_read_enter(t);
+				s = rdt_shard_find(rdt_shard(t, p[0]), p[0],
+				    p[1]);
+				if (s != NULL && (s->rs_old_reserved & RS_TOMB))
+					st->sps_tombs++;
+				else if (s != NULL)
+					live = B_TRUE;
+				if (live)
+					rdt_slot_to_ent(s, ent);
+				rdt_read_exit(t, r);
+				if (live) {
+					st->sps_in_window++;
+					return (vdev_raidz_redirect_stored_bp(
+					    vd, ent, bp, zb));
+				}
 			}
 		}
-		rw_exit(&vdrz->vd_redirect_lock);
-		if (found) {
-			st->sps_in_window++;
-			return (vdev_raidz_redirect_stored_bp(vd, ent, bp, zb));
-		}
-		if (walked >= SPIKE_SCAN_WALK_MAX)
-			return (SET_ERROR(EAGAIN));
 	}
 	cursor[0] = rvd->vdev_children;
 	cursor[1] = cursor[2] = 0;
 	return (SET_ERROR(ENOENT));
 }
 
-static void
-vdev_raidz_redirect_insert(vdev_t *vd, const raidz_redirect_ent_t *ent)
-{
-	vdev_raidz_t *vdrz = vd->vdev_tsd;
-	raidz_redirect_node_t *rdn = kmem_zalloc(sizeof (*rdn), KM_SLEEP);
+/*
+ * SPIKE: the starts of the parity epochs of vd (the first, 0, implied), as
+ * a table to look txgs up in without vd_expand_lock.  Free with
+ * rdt_epochs_free().
+ */
+typedef struct rdt_epochs {
+	uint64_t *re_start;
+	uint64_t re_n;
+} rdt_epochs_t;
 
-	rdn->rdn_ent = *ent;
-	rw_enter(&vdrz->vd_redirect_lock, RW_WRITER);
-	avl_add(&vdrz->vd_redirects, rdn);
-	rw_exit(&vdrz->vd_redirect_lock);
+static void
+rdt_epochs_get(vdev_raidz_t *vdrz, rdt_epochs_t *ep)
+{
+	mutex_enter(&vdrz->vd_expand_lock);
+	ep->re_n = vdrz->vd_parity_epochs != NULL ?
+	    vdrz->vd_parity_epoch_count : 0;
+	ep->re_start = ep->re_n == 0 ? NULL :
+	    kmem_alloc(ep->re_n * sizeof (uint64_t), KM_SLEEP);
+	for (uint64_t i = 0; i < ep->re_n; i++)
+		ep->re_start[i] = vdrz->vd_parity_epochs[3 * i];
+	mutex_exit(&vdrz->vd_expand_lock);
 }
 
 static void
-vdev_raidz_redirect_destroy(vdev_raidz_t *vdrz)
+rdt_epochs_free(rdt_epochs_t *ep)
 {
-	raidz_redirect_node_t *rdn;
-	void *cookie = NULL;
-
-	/*
-	 * Only a txg that never synced leaves keys pending.  Both lists hold
-	 * nodes of the tree, which frees them.
-	 */
-	while (list_remove_head(&vdrz->vd_redirect_pending) != NULL)
-		;
-	while (list_remove_head(&vdrz->vd_redirect_tombs) != NULL)
-		;
-	vdrz->vd_redirect_ntombs = 0;
-	while ((rdn = avl_destroy_nodes(&vdrz->vd_redirects, &cookie)) != NULL)
-		kmem_free(rdn, sizeof (*rdn));
+	if (ep->re_start != NULL)
+		kmem_free(ep->re_start, ep->re_n * sizeof (uint64_t));
 }
 
 /* SPIKE: the index of the parity epoch of txg, 0 on a vdev without any. */
 static uint64_t
-vdev_raidz_epoch_of(vdev_raidz_t *vdrz, uint64_t txg)
+rdt_epoch_of(const rdt_epochs_t *ep, uint64_t txg)
 {
 	uint64_t e = 0;
 
-	mutex_enter(&vdrz->vd_expand_lock);
-	for (uint64_t i = 1; vdrz->vd_parity_epochs != NULL &&
-	    i < vdrz->vd_parity_epoch_count; i++) {
-		if (vdrz->vd_parity_epochs[3 * i] > txg)
+	for (uint64_t i = 1; i < ep->re_n; i++) {
+		if (ep->re_start[i] > txg)
 			break;
 		e = i;
 	}
-	mutex_exit(&vdrz->vd_expand_lock);
+	return (e);
+}
+
+static uint64_t
+vdev_raidz_epoch_of(vdev_raidz_t *vdrz, uint64_t txg)
+{
+	rdt_epochs_t ep;
+	uint64_t e;
+
+	rdt_epochs_get(vdrz, &ep);
+	e = rdt_epoch_of(&ep, txg);
+	rdt_epochs_free(&ep);
 	return (e);
 }
 
@@ -2823,17 +3337,19 @@ vdev_raidz_redirect_extent_ok(vdev_t *vd, uint64_t offset, uint64_t size)
  * SPIKE: NULL if a table entry can stand for a block that the move moved,
  * or what rules it out.  An entry the move wrote passes; any other one is
  * damaged and would send reads, repairs, frees and claims where its block
- * does not lie.  last_txg is the latest txg a move can have run in.
- * Called once the parity epochs are installed.
+ * does not lie.  last_txg is the latest txg a move can have run in, ep the
+ * vdev's parity epochs.  Its fields must also fit a log record and a slot.
  */
 static const char *
 vdev_raidz_redirect_damage(vdev_t *vd, const raidz_redirect_ent_t *e,
-    uint64_t last_txg)
+    uint64_t last_txg, const rdt_epochs_t *ep)
 {
-	vdev_raidz_t *vdrz = vd->vdev_tsd;
 	uint64_t o = e->rde_offset;
 	uint64_t n = e->rde_new_offset;
+	uint64_t umax = RAIDZ_REDIRECT_REC_SIZE_MAX << SPA_MINBLOCKSHIFT;
 
+	if (e->rde_birth == 0 || e->rde_birth > RAIDZ_REDIRECT_REC_BIRTH_MAX)
+		return ("its birth cannot be a block's");
 	if (!vdev_raidz_redirect_extent_ok(vd, o, e->rde_old_asize))
 		return ("the old extent is not an extent of one metaslab");
 	if (e->rde_old_reserved == 0 && !spike_redirect_keep_none)
@@ -2849,154 +3365,540 @@ vdev_raidz_redirect_damage(vdev_t *vd, const raidz_redirect_ent_t *e,
 		return ("the new birth is not after the birth");
 	if (e->rde_new_birth > last_txg)
 		return ("the new birth is after the pool's last txg");
-	if (vdev_raidz_epoch_of(vdrz, e->rde_new_birth) <=
-	    vdev_raidz_epoch_of(vdrz, e->rde_birth))
+	if (rdt_epoch_of(ep, e->rde_new_birth) <=
+	    rdt_epoch_of(ep, e->rde_birth))
 		return ("the new birth is not in a later parity epoch");
+	/* SPIKE: limits of this format, which no real block reaches. */
+	if (e->rde_new_birth - e->rde_birth > UINT32_MAX ||
+	    e->rde_old_asize > umax || e->rde_new_asize > umax)
+		return ("its fields do not fit the table's format");
 	return (NULL);
 }
 
 static void
 vdev_raidz_redirect_warn(vdev_t *vd, const raidz_redirect_ent_t *e,
-    const char *why)
+    uint64_t rec, const char *why)
 {
-	cmn_err(CE_WARN, "%s: raidz vdev %llu: damaged redirect entry {%llx, "
-	    "%llu} -> {%llx, %llu, asize %llu, kept %llu of %llu}: %s",
+	cmn_err(CE_WARN, "%s: raidz vdev %llu: damaged redirect record %llu "
+	    "{%llx, %llu} -> {%llx, %llu, asize %llu, kept %llu of %llu}: %s",
 	    spa_name(vd->vdev_spa), (u_longlong_t)vd->vdev_id,
-	    (u_longlong_t)e->rde_offset, (u_longlong_t)e->rde_birth,
-	    (u_longlong_t)e->rde_new_offset, (u_longlong_t)e->rde_new_birth,
-	    (u_longlong_t)e->rde_new_asize, (u_longlong_t)e->rde_old_reserved,
-	    (u_longlong_t)e->rde_old_asize, why);
+	    (u_longlong_t)rec, (u_longlong_t)e->rde_offset,
+	    (u_longlong_t)e->rde_birth, (u_longlong_t)e->rde_new_offset,
+	    (u_longlong_t)e->rde_new_birth, (u_longlong_t)e->rde_new_asize,
+	    (u_longlong_t)e->rde_old_reserved, (u_longlong_t)e->rde_old_asize,
+	    why);
+}
+
+/*
+ * SPIKE: the load reads the log in windows of RDT_LOAD_WINDOW records and
+ * sorts each window by shard, stably, so that the records of one key stay
+ * in log order; tasks then replay disjoint ranges of shards at once, each
+ * shard taking its records sized for them, from memory just touched,
+ * whatever the order of the log.  Replaying a record: an ADD of a sound
+ * entry whose key the table does not hold, or a REMOVE of a key it holds.
+ */
+#define	RDT_LOAD_WINDOW	(1ULL << 20)
+#define	RDT_LOAD_TASKS	8
+
+typedef struct rdt_load rdt_load_t;
+
+typedef struct rdt_load_task {
+	rdt_load_t *lt_rl;
+	int lt_k0;			/* shards [lt_k0, lt_k1) */
+	int lt_k1;
+	boolean_t lt_trim;		/* trim them instead */
+	int64_t lt_count;		/* entries added less removed */
+	uint64_t lt_max_birth;
+	uint64_t lt_damaged;
+} rdt_load_task_t;
+
+struct rdt_load {
+	vdev_t *rl_vd;
+	raidz_redirect_table_t *rl_t;
+	rdt_epochs_t rl_ep;
+	uint64_t rl_last_txg;
+	uint64_t rl_damaged;
+	taskq_t *rl_tq;
+	int rl_ntasks;
+	rdt_load_task_t rl_tasks[RDT_LOAD_TASKS];
+	uint64_t rl_end[RDT_SHARDS];	/* where each shard's records end */
+	raidz_redirect_rec_t *rl_buf;	/* a window, in log order */
+	raidz_redirect_rec_t *rl_part;	/* the same, by shard */
+	uint64_t *rl_index;		/* each one's index in the log */
+};
+
+static void
+rdt_load_replay(rdt_load_task_t *lt, raidz_redirect_shard_t *sh,
+    const raidz_redirect_rec_t *rec, uint64_t index)
+{
+	rdt_load_t *rl = lt->lt_rl;
+	vdev_t *vd = rl->rl_vd;
+	raidz_redirect_ent_t ent;
+	uint64_t type = raidz_redirect_rec_read(rec, &ent);
+	raidz_redirect_slot_t *s;
+	const char *why;
+
+	if (type == RAIDZ_REDIRECT_REC_ADD) {
+		why = vdev_raidz_redirect_damage(vd, &ent, rl->rl_last_txg,
+		    &rl->rl_ep);
+		if (why == NULL && (rec->rr_sizes >> 63) != 0)
+			why = "it sets bits no field holds";
+		if (why == NULL && !spike_redirect_load_lax &&
+		    rdt_shard_find(sh, ent.rde_offset, ent.rde_birth) != NULL)
+			why = "its key is there twice";
+		if (why == NULL) {
+			raidz_redirect_slot_t slot;
+
+			rdt_ent_to_slot(&ent, &slot);
+			rdt_shard_reserve(sh, 1);
+			rdt_shard_put(sh, &slot);
+			sh->rrs_max_new_birth = MAX(sh->rrs_max_new_birth,
+			    ent.rde_new_birth);
+			lt->lt_max_birth = MAX(lt->lt_max_birth, ent.rde_birth);
+			lt->lt_count++;
+			return;
+		}
+	} else if (type == RAIDZ_REDIRECT_REC_REMOVE) {
+		s = rdt_shard_find(sh, ent.rde_offset, ent.rde_birth);
+		if (s != NULL) {
+			rdt_shard_del(sh, s);
+			lt->lt_count--;
+			return;
+		}
+		why = "it removes a key the table does not hold";
+	} else if (spike_redirect_load_lax) {
+		return;
+	} else {
+		why = "its type is unknown";
+	}
+	vdev_raidz_redirect_warn(vd, &ent, index, why);
+	lt->lt_damaged++;
+}
+
+static void
+rdt_load_task(void *arg)
+{
+	rdt_load_task_t *lt = arg;
+	rdt_load_t *rl = lt->lt_rl;
+
+	for (int k = lt->lt_k0; k < lt->lt_k1; k++) {
+		raidz_redirect_shard_t *sh = &rl->rl_t->rdt_shards[k];
+		uint64_t j = k == 0 ? 0 : rl->rl_end[k - 1];
+
+		if (lt->lt_trim) {
+			/* Down to 80% used where the growth left fewer. */
+			if (sh->rrs_count != 0 && (uint64_t)sh->rrs_count * 4 <
+			    (uint64_t)sh->rrs_cap * 3) {
+				rdt_shard_resize(sh, MAX(RDT_MIN_CAP,
+				    (uint64_t)sh->rrs_count * 5 / 4 + 1));
+			}
+			continue;
+		}
+		if (j == rl->rl_end[k])
+			continue;
+		rdt_shard_reserve(sh, rl->rl_end[k] - j);
+		for (; j < rl->rl_end[k]; j++) {
+			rdt_load_replay(lt, sh, &rl->rl_part[j],
+			    rl->rl_index[j]);
+		}
+	}
+}
+
+/* Run the tasks over shard ranges of about n records each, and wait. */
+static void
+rdt_load_run(rdt_load_t *rl, uint64_t n, boolean_t trim)
+{
+	raidz_redirect_table_t *t = rl->rl_t;
+	uint64_t per = n / rl->rl_ntasks + 1;
+	int k = 0;
+
+	for (int i = 0; i < rl->rl_ntasks; i++) {
+		rdt_load_task_t *lt = &rl->rl_tasks[i];
+
+		lt->lt_rl = rl;
+		lt->lt_trim = trim;
+		lt->lt_count = 0;
+		lt->lt_max_birth = 0;
+		lt->lt_damaged = 0;
+		lt->lt_k0 = k;
+		if (trim) {
+			k = (i + 1) * RDT_SHARDS / rl->rl_ntasks;
+		} else {
+			while (k < RDT_SHARDS && (i + 1 == rl->rl_ntasks ||
+			    rl->rl_end[k] < per * (i + 1)))
+				k++;
+		}
+		lt->lt_k1 = k;
+		VERIFY3U(taskq_dispatch(rl->rl_tq, rdt_load_task, lt,
+		    TQ_SLEEP), !=, TASKQID_INVALID);
+	}
+	taskq_wait(rl->rl_tq);
+	for (int i = 0; i < rl->rl_ntasks; i++) {
+		rdt_load_task_t *lt = &rl->rl_tasks[i];
+
+		t->rdt_count += lt->lt_count;
+		t->rdt_max_birth = MAX(t->rdt_max_birth, lt->lt_max_birth);
+		rl->rl_damaged += lt->lt_damaged;
+	}
+}
+
+/* Replay records [first, first + n) of the log, read into rl_buf. */
+static void
+rdt_load_window(rdt_load_t *rl, uint64_t first, uint64_t n)
+{
+	raidz_redirect_table_t *t = rl->rl_t;
+	uint64_t *c = rl->rl_end;
+
+	memset(c, 0, sizeof (rl->rl_end));
+	for (uint64_t i = 0; i < n; i++)
+		c[(rl->rl_buf[i].rr_offset >> t->rdt_ms_shift) &
+		    (RDT_SHARDS - 1)]++;
+	for (uint64_t k = 0, sum = 0; k < RDT_SHARDS; k++) {
+		uint64_t m = c[k];
+
+		c[k] = sum;
+		sum += m;
+	}
+	for (uint64_t i = 0; i < n; i++) {
+		uint64_t k = (rl->rl_buf[i].rr_offset >> t->rdt_ms_shift) &
+		    (RDT_SHARDS - 1);
+		uint64_t j = c[k]++;
+
+		rl->rl_part[j] = rl->rl_buf[i];
+		rl->rl_index[j] = first + i;
+	}
+	rdt_load_run(rl, n, B_FALSE);
 }
 
 /*
  * SPIKE: read the vdev's table, if it has one, into memory.  Called from
  * vdev_raidz_load(): no non-MOS block has been read yet, and MOS blocks are
- * never moved, so every redirected read finds its entry.
+ * never moved, so every redirected read finds its entry.  A tryimport reads
+ * only MOS blocks: it skips the load.
  *
- * Each entry is checked against what the move writes.  A damaged one fails
- * a read-write import: ignored, its block would be freed whole at its old
- * extent, part of which may now be another block's, and read and repaired
- * there; used, it would send the same I/O and frees elsewhere.  Failing
- * every import, or dropping the table, would make every moved block
- * unreadable instead.  A read-only import allocates, frees and repairs
- * nothing: it loads the sound entries and leaves the damaged ones out, so
- * that their blocks are read at their old extents, where their checksums
- * tell whether the bytes are still theirs, and zdb can report them.
+ * Each record is checked against what the move and the free write.  A
+ * damaged one fails a read-write import: ignored, its block would be freed
+ * whole at its old extent, part of which may now be another block's, and
+ * read and repaired there; used, it would send the same I/O and frees
+ * elsewhere.  Failing every import, or dropping the table, would make
+ * every moved block unreadable instead.  A read-only import allocates,
+ * frees and repairs nothing: it loads the sound records and leaves the
+ * damaged ones out, so that their blocks are read at their old extents,
+ * where their checksums tell whether the bytes are still theirs, and zdb
+ * can report them.
  */
 static int
 vdev_raidz_redirect_load(vdev_t *vd)
 {
 	vdev_raidz_t *vdrz = vd->vdev_tsd;
+	raidz_redirect_table_t *t = vdrz->vd_rdt;
 	spa_t *spa = vd->vdev_spa;
 	objset_t *mos = spa->spa_meta_objset;
-	zap_cursor_t zc;
-	zap_attribute_t *za;
 	uint64_t damaged = 0;
 	uint64_t records = 0;
-	uint64_t obj;
+	uint64_t log = 0;
+	uint64_t bps = 0;
+	uint64_t hdr[2] = { 0, 0 };
 	hrtime_t start = gethrtime();
+	hrtime_t read_ns = 0;
+	rdt_load_t *rl;
+	uint64_t window;
+	dmu_object_info_t doi;
+	dmu_buf_t *db;
 	int err;
 
-	vdev_raidz_redirect_destroy(vdrz);
+	rdt_write_enter(t);
+	rdt_clear(t);
+	rdt_write_exit(t);
 	vdrz->vd_redirect_obj = 0;
+	vdrz->vd_redirect_log = 0;
 	vdrz->vd_redirect_damaged = 0;
 	spike_table_stats.sts_load_calls++;
 	spike_table_stats.sts_load_entries = 0;
 	spike_table_stats.sts_load_records = 0;
 	spike_table_stats.sts_load_ns = 0;
+	spike_table_stats.sts_load_read_ns = 0;
 	/* SPIKE: test-only, the table of a pool that has none. */
 	if (vd->vdev_top_zap == 0 || spike_redirect_load_skip)
 		return (0);
-	err = zap_lookup(mos, vd->vdev_top_zap, VDEV_TOP_ZAP_RAIDZ_REDIRECTS,
-	    sizeof (obj), 1, &obj);
+	/* SPIKE: a table of an earlier spike's format is not read. */
+	if (zap_contains(mos, vd->vdev_top_zap,
+	    VDEV_TOP_ZAP_RAIDZ_REDIRECTS_OLD) == 0) {
+		spa_load_failed(spa, "raidz vdev %llu: redirect table of an "
+		    "earlier format", (u_longlong_t)vd->vdev_id);
+		return (SET_ERROR(ENOTSUP));
+	}
+	err = zap_lookup(mos, vd->vdev_top_zap, VDEV_TOP_ZAP_RAIDZ_REDIRECT_BPS,
+	    sizeof (bps), 1, &bps);
+	if (err != 0 && err != ENOENT)
+		return (err);
+	err = zap_lookup(mos, vd->vdev_top_zap, VDEV_TOP_ZAP_RAIDZ_REDIRECT_LOG,
+	    sizeof (log), 1, &log);
 	if (err == ENOENT)
 		return (0);
 	if (err != 0)
 		return (err);
-
-	za = zap_attribute_alloc();
-	for (zap_cursor_init(&zc, mos, obj);
-	    (err = zap_cursor_retrieve(&zc, za)) == 0;
-	    zap_cursor_advance(&zc)) {
-		uint64_t key[2];
-		uint64_t val[RAIDZ_REDIRECT_VALUES];
-		raidz_redirect_ent_t ent = { 0 };
-		const char *why = NULL;
-
-		records++;
-		memcpy(key, za->za_name, sizeof (key));
-		ent.rde_offset = key[0];
-		ent.rde_birth = key[1];
-		/*
-		 * The stored block pointer is only read by a scan, which
-		 * checks it before use (vdev_raidz_redirect_scan_next()).
-		 */
-		if (za->za_integer_length != sizeof (uint64_t) ||
-		    za->za_num_integers != RAIDZ_REDIRECT_VALUES) {
-			why = "its value is not 25 uint64s";
-		} else if ((err = zap_lookup_uint64(mos, obj, key, 2,
-		    sizeof (uint64_t), RAIDZ_REDIRECT_VALUES, val)) != 0) {
-			/* The cursor found it: only its key can be wrong. */
-			if (err != ENOENT)
-				break;
-			err = 0;
-			why = "its key is not two uint64s";
-		} else {
-			ent.rde_new_offset = val[0];
-			ent.rde_new_birth = val[1];
-			ent.rde_new_asize = val[2];
-			ent.rde_old_reserved = val[3];
-			ent.rde_old_asize = val[4];
-			why = vdev_raidz_redirect_damage(vd, &ent,
-			    spa_last_synced_txg(spa));
-			if (why == NULL &&
-			    vdev_raidz_redirect_get(vd, key[0], key[1], NULL))
-				why = "its key is there twice";
-		}
-		if (why != NULL) {
-			vdev_raidz_redirect_warn(vd, &ent, why);
-			damaged++;
-			continue;
-		}
-		vdev_raidz_redirect_insert(vd, &ent);
+	if (spa->spa_load_state == SPA_LOAD_TRYIMPORT) {
+		vdrz->vd_redirect_obj = bps;
+		vdrz->vd_redirect_log = log;
+		return (0);
 	}
-	zap_cursor_fini(&zc);
-	zap_attribute_free(za);
-	if (err == ENOENT)
-		err = 0;
+
+	/* The log's header: its record count, and how many are sorted. */
+	if ((err = dmu_object_info(mos, log, &doi)) != 0)
+		return (err);
+	if ((err = dmu_bonus_hold(mos, log, FTAG, &db)) != 0)
+		return (err);
+	if (db->db_size >= sizeof (hdr))
+		memcpy(hdr, db->db_data, sizeof (hdr));
+	dmu_buf_rele(db, FTAG);
+	if (db->db_size < sizeof (hdr) || hdr[1] > hdr[0] ||
+	    hdr[0] > doi.doi_max_offset / sizeof (raidz_redirect_rec_t)) {
+		cmn_err(CE_WARN, "%s: raidz vdev %llu: the redirect log %llu "
+		    "says it holds %llu records (%llu sorted) in %llu bytes",
+		    spa_name(spa), (u_longlong_t)vd->vdev_id,
+		    (u_longlong_t)log, (u_longlong_t)hdr[0],
+		    (u_longlong_t)hdr[1], (u_longlong_t)doi.doi_max_offset);
+		damaged++;
+		hdr[0] = hdr[1] = 0;
+	}
+
+	rl = kmem_zalloc(sizeof (*rl), KM_SLEEP);
+	rl->rl_vd = vd;
+	rl->rl_t = t;
+	rl->rl_last_txg = spa_last_synced_txg(spa);
+	rl->rl_damaged = damaged;
+	rl->rl_ntasks = MAX(1, MIN(RDT_LOAD_TASKS, boot_ncpus));
+	rl->rl_tq = taskq_create("raidz_redirect_load", rl->rl_ntasks,
+	    defclsyspri, rl->rl_ntasks, rl->rl_ntasks, TASKQ_PREPOPULATE);
+	rdt_epochs_get(vdrz, &rl->rl_ep);
+	window = MIN(RDT_LOAD_WINDOW, MAX(hdr[0], 1));
+	rl->rl_buf = vmem_alloc(window * sizeof (raidz_redirect_rec_t),
+	    KM_SLEEP);
+	rl->rl_part = vmem_alloc(window * sizeof (raidz_redirect_rec_t),
+	    KM_SLEEP);
+	rl->rl_index = vmem_alloc(window * sizeof (uint64_t), KM_SLEEP);
+	dmu_prefetch(mos, log, 0, 0, hdr[0] * sizeof (raidz_redirect_rec_t),
+	    ZIO_PRIORITY_SYNC_READ);
+	rdt_write_enter(t);
+	t->rdt_ms_shift = vd->vdev_ms_shift;
+	rdt_write_exit(t);
+	/*
+	 * No writer section spans a read: the reads' own lookups would wait
+	 * for it.  A MOS block, which is never moved, needs no entry.
+	 */
+	for (uint64_t r = 0; r < hdr[0] && err == 0; ) {
+		uint64_t n = MIN(window, hdr[0] - r);
+		hrtime_t t0 = gethrtime();
+
+		err = dmu_read(mos, log, r * sizeof (raidz_redirect_rec_t),
+		    n * sizeof (raidz_redirect_rec_t), rl->rl_buf,
+		    DMU_READ_PREFETCH);
+		read_ns += gethrtime() - t0;
+		if (err == 0) {
+			rdt_write_enter(t);
+			rdt_load_window(rl, r, n);
+			rdt_write_exit(t);
+		}
+		r += n;
+		records += n;
+	}
+	if (err == 0) {
+		rdt_write_enter(t);
+		rdt_load_run(rl, 0, B_TRUE);
+		rdt_write_exit(t);
+	}
+	taskq_destroy(rl->rl_tq);
+	damaged = rl->rl_damaged;
+	vmem_free(rl->rl_buf, window * sizeof (raidz_redirect_rec_t));
+	vmem_free(rl->rl_part, window * sizeof (raidz_redirect_rec_t));
+	vmem_free(rl->rl_index, window * sizeof (uint64_t));
+	rdt_epochs_free(&rl->rl_ep);
+	kmem_free(rl, sizeof (*rl));
+
 	if (err == 0 && damaged != 0 && spa_writeable(spa)) {
 		spa_load_failed(spa, "raidz vdev %llu: %llu damaged redirect "
-		    "entries in object %llu: import read-only",
+		    "records in log %llu: import read-only",
 		    (u_longlong_t)vd->vdev_id, (u_longlong_t)damaged,
-		    (u_longlong_t)obj);
+		    (u_longlong_t)log);
 		err = SET_ERROR(EROFS);
 	}
 	if (err != 0) {
-		vdev_dbgmsg(vd, "vdev_raidz_load: rejecting redirect table "
-		    "%llu [error=%d]", (u_longlong_t)obj, err);
-		vdev_raidz_redirect_destroy(vdrz);
+		vdev_dbgmsg(vd, "vdev_raidz_load: rejecting redirect log "
+		    "%llu [error=%d]", (u_longlong_t)log, err);
+		rdt_write_enter(t);
+		rdt_clear(t);
+		rdt_write_exit(t);
 		return (err);
 	}
-	vdrz->vd_redirect_obj = obj;
+	vdrz->vd_redirect_obj = bps;
+	vdrz->vd_redirect_log = log;
 	vdrz->vd_redirect_damaged = damaged;
+	t->rdt_log_records = hdr[0];
+	t->rdt_log_sorted = hdr[1];
 	if (damaged != 0) {
 		cmn_err(CE_WARN, "%s: raidz vdev %llu: this read-only import "
-		    "ignores %llu damaged redirect entries; their blocks are "
+		    "ignores %llu damaged redirect records; their blocks are "
 		    "read at their old extents", spa_name(spa),
 		    (u_longlong_t)vd->vdev_id, (u_longlong_t)damaged);
 	}
-	vdev_dbgmsg(vd, "vdev_raidz_load: %llu redirects from object %llu, "
-	    "%llu damaged", (u_longlong_t)avl_numnodes(&vdrz->vd_redirects),
-	    (u_longlong_t)obj, (u_longlong_t)damaged);
-	spike_table_stats.sts_load_entries = avl_numnodes(&vdrz->vd_redirects);
+	vdev_dbgmsg(vd, "vdev_raidz_load: %llu redirects from %llu records "
+	    "of log %llu, %llu damaged", (u_longlong_t)t->rdt_count,
+	    (u_longlong_t)records, (u_longlong_t)log, (u_longlong_t)damaged);
+	spike_table_stats.sts_load_entries = t->rdt_count;
 	spike_table_stats.sts_load_records = records;
 	spike_table_stats.sts_load_ns = gethrtime() - start;
+	spike_table_stats.sts_load_read_ns = read_ns;
 	spike_table_stats.sts_load_total_ns += spike_table_stats.sts_load_ns;
 	return (0);
 }
 
+/* SPIKE: set the log's header, {records, how many of the first sorted}. */
+static void
+rdt_log_header(objset_t *mos, uint64_t log, uint64_t records,
+    uint64_t sorted, dmu_tx_t *tx)
+{
+	dmu_buf_t *db;
+	uint64_t hdr[2] = { records, sorted };
+
+	VERIFY0(dmu_bonus_hold(mos, log, FTAG, &db));
+	dmu_buf_will_dirty(db, tx);
+	memcpy(db->db_data, hdr, sizeof (hdr));
+	dmu_buf_rele(db, FTAG);
+}
+
+static uint64_t
+rdt_log_create(objset_t *mos, dmu_tx_t *tx)
+{
+	return (dmu_object_alloc(mos, DMU_OTN_UINT64_METADATA,
+	    SPA_OLD_MAXBLOCKSIZE, DMU_OTN_UINT64_METADATA,
+	    2 * sizeof (uint64_t), tx));
+}
+
+/* SPIKE: append a record to the vdev's log, creating it on first use. */
+static void
+rdt_log_append(vdev_t *vd, uint64_t type, const raidz_redirect_ent_t *e,
+    dmu_tx_t *tx)
+{
+	vdev_raidz_t *vdrz = vd->vdev_tsd;
+	raidz_redirect_table_t *t = vdrz->vd_rdt;
+	objset_t *mos = vd->vdev_spa->spa_meta_objset;
+	raidz_redirect_rec_t rec;
+
+	ASSERT(dmu_tx_is_syncing(tx));
+	VERIFY3U(vd->vdev_top_zap, !=, 0);
+	if (vdrz->vd_redirect_log == 0) {
+		vdrz->vd_redirect_log = rdt_log_create(mos, tx);
+		VERIFY0(zap_add(mos, vd->vdev_top_zap,
+		    VDEV_TOP_ZAP_RAIDZ_REDIRECT_LOG, sizeof (uint64_t), 1,
+		    &vdrz->vd_redirect_log, tx));
+		t->rdt_log_records = t->rdt_log_sorted = 0;
+	}
+	raidz_redirect_rec_make(&rec, type, e);
+	dmu_write(mos, vdrz->vd_redirect_log, t->rdt_log_records *
+	    sizeof (rec), sizeof (rec), &rec, tx, DMU_READ_NO_PREFETCH);
+	t->rdt_log_records++;
+	rdt_log_header(mos, vdrz->vd_redirect_log, t->rdt_log_records,
+	    t->rdt_log_sorted, tx);
+	/* After an ADD, vdev_sync() may condense the log. */
+	if (type == RAIDZ_REDIRECT_REC_ADD)
+		vdev_dirty(vd, 0, NULL, dmu_tx_get_txg(tx));
+}
+
 /*
- * Add an entry to the vdev's table, creating the table on first use, with
+ * SPIKE: rewrite the log in key order, one ADD record per live entry, in a
+ * new object that replaces it in this txg.  Tombstones are left out: the
+ * REMOVE records of the ones freed in this txg are in the old log, which
+ * goes with them, and the others' keys are already gone.  Syncing context:
+ * no other writer runs, and the slots are read without the reader count.
+ */
+static void
+rdt_log_condense(vdev_t *vd, dmu_tx_t *tx)
+{
+	vdev_raidz_t *vdrz = vd->vdev_tsd;
+	raidz_redirect_table_t *t = vdrz->vd_rdt;
+	objset_t *mos = vd->vdev_spa->spa_meta_objset;
+	uint64_t old = vdrz->vd_redirect_log;
+	uint64_t was = t->rdt_log_records;
+	uint64_t obj = rdt_log_create(mos, tx);
+	uint64_t nms = (vd->vdev_asize >> t->rdt_ms_shift) + 1;
+	uint64_t chunk = RDT_LOAD_WINDOW / 32;
+	raidz_redirect_rec_t *buf = vmem_alloc(chunk * sizeof (*buf),
+	    KM_SLEEP);
+	raidz_redirect_slot_t *ms_slots = NULL;
+	uint64_t ms_size = 0;
+	uint64_t n = 0;
+	uint64_t nbuf = 0;
+	hrtime_t start = gethrtime();
+
+	for (uint64_t ms = 0; ms < nms; ms++) {
+		const raidz_redirect_shard_t *sh =
+		    &t->rdt_shards[ms & (RDT_SHARDS - 1)];
+		uint64_t m = 0;
+
+		if (sh->rrs_count == 0)
+			continue;
+		if (ms_size < sh->rrs_count) {
+			if (ms_slots != NULL) {
+				vmem_free(ms_slots,
+				    ms_size * sizeof (*ms_slots));
+			}
+			ms_size = sh->rrs_count;
+			ms_slots = vmem_alloc(ms_size * sizeof (*ms_slots),
+			    KM_SLEEP);
+		}
+		for (uint32_t j = 0; j < sh->rrs_cap; j++) {
+			const raidz_redirect_slot_t *s = &sh->rrs_slots[j];
+
+			/* SPIKE: test-only, a condense that keeps them. */
+			if (s->rs_birth != 0 &&
+			    (!(s->rs_old_reserved & RS_TOMB) ||
+			    spike_redirect_condense_tombs) &&
+			    (s->rs_offset >> t->rdt_ms_shift) == ms)
+				ms_slots[m++] = *s;
+		}
+		/* Offset and birth lead a slot: sort by them. */
+		qsort(ms_slots, m, sizeof (*ms_slots), rdt_pair_compare);
+		for (uint64_t i = 0; i < m; i++) {
+			raidz_redirect_ent_t e;
+
+			rdt_slot_to_ent(&ms_slots[i], &e);
+			raidz_redirect_rec_make(&buf[nbuf++],
+			    RAIDZ_REDIRECT_REC_ADD, &e);
+			if (nbuf == chunk) {
+				dmu_write(mos, obj, n * sizeof (*buf),
+				    nbuf * sizeof (*buf), buf, tx,
+				    DMU_READ_NO_PREFETCH);
+				n += nbuf;
+				nbuf = 0;
+			}
+		}
+	}
+	if (nbuf != 0)
+		dmu_write(mos, obj, n * sizeof (*buf), nbuf * sizeof (*buf),
+		    buf, tx, DMU_READ_NO_PREFETCH);
+	n += nbuf;
+	if (ms_slots != NULL)
+		vmem_free(ms_slots, ms_size * sizeof (*ms_slots));
+	vmem_free(buf, chunk * sizeof (*buf));
+	rdt_log_header(mos, obj, n, n, tx);
+	VERIFY0(zap_update(mos, vd->vdev_top_zap,
+	    VDEV_TOP_ZAP_RAIDZ_REDIRECT_LOG, sizeof (uint64_t), 1, &obj, tx));
+	VERIFY0(dmu_object_free(mos, old, tx));
+	vdrz->vd_redirect_log = obj;
+	t->rdt_log_records = t->rdt_log_sorted = n;
+	spike_table_stats.sts_condense_calls++;
+	spike_table_stats.sts_condense_txg = dmu_tx_get_txg(tx);
+	spike_table_stats.sts_condense_records = n;
+	spike_table_stats.sts_condense_ns = gethrtime() - start;
+	zfs_dbgmsg("spike: %s: raidz vdev %llu: redirect log %llu of %llu "
+	    "records condensed into %llu of %llu", spa_name(vd->vdev_spa),
+	    (u_longlong_t)vd->vdev_id, (u_longlong_t)old, (u_longlong_t)was,
+	    (u_longlong_t)obj, (u_longlong_t)n);
+}
+
+/*
+ * Add an entry to the vdev's table: its log record and, if bp is not NULL,
  * the block pointer the move found live and the bookmark that named it.
  */
 static void
@@ -3005,33 +3907,32 @@ vdev_raidz_redirect_persist(vdev_t *vd, const raidz_redirect_ent_t *ent,
 {
 	vdev_raidz_t *vdrz = vd->vdev_tsd;
 	objset_t *mos = vd->vdev_spa->spa_meta_objset;
-	uint64_t key[2] = { ent->rde_offset, ent->rde_birth };
-	uint64_t val[RAIDZ_REDIRECT_VALUES] = { ent->rde_new_offset,
-	    ent->rde_new_birth, ent->rde_new_asize, ent->rde_old_reserved,
-	    ent->rde_old_asize };
-	uint64_t *zbv = &val[RAIDZ_REDIRECT_ENT_VALUES +
-	    RAIDZ_REDIRECT_BP_VALUES];
 
-	_Static_assert(sizeof (blkptr_t) % sizeof (uint64_t) == 0,
-	    "a block pointer is stored as uint64s");
-	memcpy(&val[RAIDZ_REDIRECT_ENT_VALUES], bp, sizeof (blkptr_t));
-	zbv[0] = zb->zb_objset;
-	zbv[1] = zb->zb_object;
-	zbv[2] = (uint64_t)zb->zb_level;
-	zbv[3] = zb->zb_blkid;
-	ASSERT(dmu_tx_is_syncing(tx));
-	VERIFY3U(vd->vdev_top_zap, !=, 0);
-	if (vdrz->vd_redirect_obj == 0) {
-		vdrz->vd_redirect_obj = zap_create_flags(mos, 0,
-		    ZAP_FLAG_HASH64 | ZAP_FLAG_UINT64_KEY, DMU_OTN_ZAP_METADATA,
-		    SPA_MINBLOCKSHIFT + 4, SPA_MINBLOCKSHIFT + 4, DMU_OT_NONE,
-		    0, tx);
-		VERIFY0(zap_add(mos, vd->vdev_top_zap,
-		    VDEV_TOP_ZAP_RAIDZ_REDIRECTS, sizeof (uint64_t), 1,
-		    &vdrz->vd_redirect_obj, tx));
+	rdt_log_append(vd, RAIDZ_REDIRECT_REC_ADD, ent, tx);
+	if (bp != NULL) {
+		uint64_t key[2] = { ent->rde_offset, ent->rde_birth };
+		uint64_t val[RAIDZ_REDIRECT_BPS_VALUES];
+		uint64_t *zbv = &val[RAIDZ_REDIRECT_BP_VALUES];
+
+		_Static_assert(sizeof (blkptr_t) % sizeof (uint64_t) == 0,
+		    "a block pointer is stored as uint64s");
+		memcpy(val, bp, sizeof (blkptr_t));
+		zbv[0] = zb->zb_objset;
+		zbv[1] = zb->zb_object;
+		zbv[2] = (uint64_t)zb->zb_level;
+		zbv[3] = zb->zb_blkid;
+		if (vdrz->vd_redirect_obj == 0) {
+			vdrz->vd_redirect_obj = zap_create_flags(mos, 0,
+			    ZAP_FLAG_HASH64 | ZAP_FLAG_UINT64_KEY,
+			    DMU_OTN_ZAP_METADATA, SPA_MINBLOCKSHIFT + 4,
+			    SPA_MINBLOCKSHIFT + 4, DMU_OT_NONE, 0, tx);
+			VERIFY0(zap_add(mos, vd->vdev_top_zap,
+			    VDEV_TOP_ZAP_RAIDZ_REDIRECT_BPS, sizeof (uint64_t),
+			    1, &vdrz->vd_redirect_obj, tx));
+		}
+		VERIFY0(zap_update_uint64(mos, vdrz->vd_redirect_obj, key, 2,
+		    sizeof (uint64_t), RAIDZ_REDIRECT_BPS_VALUES, val, tx));
 	}
-	VERIFY0(zap_add_uint64(mos, vdrz->vd_redirect_obj, key, 2,
-	    sizeof (uint64_t), RAIDZ_REDIRECT_VALUES, val, tx));
 	vdev_raidz_redirect_insert(vd, ent);
 }
 
@@ -3054,39 +3955,49 @@ vdev_raidz_redirect_remove(vdev_t *vd, uint64_t offset, uint64_t birth,
 {
 	spa_t *spa;
 	uint64_t txg;
-	vdev_raidz_t *vdrz;
-	raidz_redirect_node_t search;
-	raidz_redirect_node_t *rdn;
+	raidz_redirect_table_t *t;
+	raidz_redirect_tomb_t *rrt;
+	raidz_redirect_slot_t *s;
 
 	/* Most frees match nothing: look as a reader first. */
 	if (!vdev_raidz_redirect_get_live(vd, offset, birth, NULL))
 		return (B_FALSE);
 	spa = vd->vdev_spa;
 	txg = spa_syncing_txg(spa);
-	vdrz = vd->vdev_tsd;
-	search.rdn_ent.rde_offset = offset;
-	search.rdn_ent.rde_birth = birth;
-	rw_enter(&vdrz->vd_redirect_lock, RW_WRITER);
-	rdn = avl_find(&vdrz->vd_redirects, &search, NULL);
-	if (rdn != NULL && rdn->rdn_tomb)
-		rdn = NULL;
-	if (rdn != NULL) {
-		rdn->rdn_tomb = B_TRUE;
-		vdrz->vd_redirect_ntombs++;
-		rdn->rdn_free_txg = txg;
-		rdn->rdn_free_pass = spa_sync_pass(spa);
-		list_insert_tail(&vdrz->vd_redirect_pending, rdn);
-		*ent = rdn->rdn_ent;
+	t = ((vdev_raidz_t *)vd->vdev_tsd)->vd_rdt;
+	rrt = kmem_zalloc(sizeof (*rrt), KM_SLEEP);
+	rdt_write_enter(t);
+	s = rdt_shard_find(rdt_shard(t, offset), offset, birth);
+	if (s != NULL && (s->rs_old_reserved & RS_TOMB))
+		s = NULL;
+	if (s != NULL) {
+		s->rs_old_reserved |= RS_TOMB;
+		t->rdt_ntombs++;
+		rdt_slot_to_ent(s, ent);
 	}
-	rw_exit(&vdrz->vd_redirect_lock);
-	if (rdn == NULL)
+	rdt_write_exit(t);
+	if (s == NULL) {
+		kmem_free(rrt, sizeof (*rrt));
 		return (B_FALSE);
+	}
+	rrt->rrt_offset = offset;
+	rrt->rrt_birth = birth;
+	rrt->rrt_free_txg = txg;
+	rrt->rrt_free_pass = spa_sync_pass(spa);
+	mutex_enter(&t->rdt_tomb_lock);
+	list_insert_tail(&t->rdt_pending, rrt);
+	mutex_exit(&t->rdt_tomb_lock);
 
 	vdev_dirty(vd, 0, NULL, txg);
 	/* SPIKE: a test may arm the crash points for this txg. */
 	if (spike_crash_arm_free) {
 		spike_crash_arm_free = 0;
 		spike_crash_txg = txg;
+	}
+	/* SPIKE: and the condense of the log. */
+	if (spike_redirect_condense == 2) {
+		spike_redirect_condense = 0;
+		spike_redirect_condense_txg = txg;
 	}
 	return (B_TRUE);
 }
@@ -3106,10 +4017,12 @@ spike_redirect_stat(uint64_t txg)
 
 /*
  * SPIKE: called by vdev_sync() in every sync pass.  Removes from the table
- * the keys of the moved blocks freed since the last call, so that the table
- * and the metaslab frees commit under the same uberblock.  A free never
- * allocates, and the table is in the MOS, whose blocks are never moved, so
- * these removals free nothing that comes back here: spa_sync() converges.
+ * on disk the keys of the moved blocks freed since the last call, so that
+ * the table and the metaslab frees commit under the same uberblock, and in
+ * pass 1 condenses the log when it holds too many records that are not its
+ * entries in key order.  A free never allocates, and the table is in the
+ * MOS, whose blocks are never moved, so these writes free nothing that
+ * comes back here: spa_sync() converges.
  */
 void
 vdev_raidz_redirect_sync(vdev_t *vd, dmu_tx_t *tx)
@@ -3119,46 +4032,74 @@ vdev_raidz_redirect_sync(vdev_t *vd, dmu_tx_t *tx)
 	uint64_t txg = dmu_tx_get_txg(tx);
 	uint64_t pass = MIN(MAX(spa_sync_pass(spa), 1), SPIKE_REDIRECT_PASSES);
 	vdev_raidz_t *vdrz;
-	raidz_redirect_node_t *rdn;
+	raidz_redirect_table_t *t;
+	raidz_redirect_tomb_t *rrt;
+	uint64_t live;
 	list_t todo;
 
 	if (vd->vdev_ops != &vdev_raidz_ops)
 		return;
 	vdrz = vd->vdev_tsd;
-	list_create(&todo, sizeof (raidz_redirect_node_t),
-	    offsetof(raidz_redirect_node_t, rdn_pending));
-	rw_enter(&vdrz->vd_redirect_lock, RW_WRITER);
-	list_move_tail(&todo, &vdrz->vd_redirect_pending);
-	rw_exit(&vdrz->vd_redirect_lock);
-	if (list_is_empty(&todo)) {
-		list_destroy(&todo);
-		return;
-	}
+	t = vdrz->vd_rdt;
+	list_create(&todo, sizeof (raidz_redirect_tomb_t),
+	    offsetof(raidz_redirect_tomb_t, rrt_link));
+	mutex_enter(&t->rdt_tomb_lock);
+	list_move_tail(&todo, &t->rdt_pending);
+	mutex_exit(&t->rdt_tomb_lock);
 
-	/* zap_remove() may read the MOS: no lock held here. */
-	while ((rdn = list_remove_head(&todo)) != NULL) {
-		uint64_t key[2] = { rdn->rdn_ent.rde_offset,
-		    rdn->rdn_ent.rde_birth };
+	while ((rrt = list_remove_head(&todo)) != NULL) {
+		raidz_redirect_ent_t e = { .rde_offset = rrt->rrt_offset,
+		    .rde_birth = rrt->rrt_birth };
+		uint64_t key[2] = { rrt->rrt_offset, rrt->rrt_birth };
+		int err = ENOENT;
 
 		/* SPIKE: test-only, remove the key one txg late. */
-		if (spike_redirect_late_remove && rdn->rdn_free_txg == txg) {
-			rw_enter(&vdrz->vd_redirect_lock, RW_WRITER);
-			list_insert_tail(&vdrz->vd_redirect_pending, rdn);
-			rw_exit(&vdrz->vd_redirect_lock);
+		if (spike_redirect_late_remove && rrt->rrt_free_txg == txg) {
+			mutex_enter(&t->rdt_tomb_lock);
+			list_insert_tail(&t->rdt_pending, rrt);
+			mutex_exit(&t->rdt_tomb_lock);
 			vdev_dirty(vd, 0, NULL, txg + 1);
 			continue;
 		}
-		VERIFY(spike_redirect_late_remove || rdn->rdn_free_txg == txg);
-		VERIFY0(zap_remove_uint64(mos, vdrz->vd_redirect_obj, key, 2,
-		    tx));
-		spike_redirect_stat(rdn->rdn_free_txg)->rst_freed[MIN(MAX(
-		    rdn->rdn_free_pass, 1), SPIKE_REDIRECT_PASSES) - 1]++;
+		VERIFY(spike_redirect_late_remove || rrt->rrt_free_txg == txg);
+		rdt_log_append(vd, RAIDZ_REDIRECT_REC_REMOVE, &e, tx);
+		if (vdrz->vd_redirect_obj != 0) {
+			err = zap_remove_uint64(mos, vdrz->vd_redirect_obj,
+			    key, 2, tx);
+		}
+		if (err != 0) {
+			zfs_dbgmsg("spike: %s: redirect {%llx, %llu} had no "
+			    "stored block pointer to remove (%d)",
+			    spa_name(spa), (u_longlong_t)key[0],
+			    (u_longlong_t)key[1], err);
+		}
+		spike_redirect_stat(rrt->rrt_free_txg)->rst_freed[MIN(MAX(
+		    rrt->rrt_free_pass, 1), SPIKE_REDIRECT_PASSES) - 1]++;
 		spike_redirect_stat(txg)->rst_removed[pass - 1]++;
-		rw_enter(&vdrz->vd_redirect_lock, RW_WRITER);
-		list_insert_tail(&vdrz->vd_redirect_tombs, rdn);
-		rw_exit(&vdrz->vd_redirect_lock);
+		mutex_enter(&t->rdt_tomb_lock);
+		list_insert_tail(&t->rdt_tombs, rrt);
+		mutex_exit(&t->rdt_tomb_lock);
 	}
 	list_destroy(&todo);
+
+	/*
+	 * SPIKE: the condense rewrites the whole log in this txg, which then
+	 * syncs for longer; not during an import, which waits for its txgs.
+	 * A real implementation would condense in steps over many txgs.
+	 */
+	live = t->rdt_count - t->rdt_ntombs;
+	if (spa_sync_pass(spa) == 1 && vdrz->vd_redirect_log != 0 &&
+	    spa->spa_load_state == SPA_LOAD_NONE &&
+	    (spike_redirect_condense == 1 ||
+	    spike_redirect_condense_txg == txg ||
+	    (spike_redirect_condense == 0 &&
+	    (t->rdt_log_records > 2 * live + RDT_CONDENSE_MIN ||
+	    t->rdt_log_records - t->rdt_log_sorted >
+	    MAX(t->rdt_log_sorted, RDT_CONDENSE_MIN))))) {
+		if (spike_redirect_condense == 1)
+			spike_redirect_condense = 0;
+		rdt_log_condense(vd, tx);
+	}
 	spike_crash_check(spa, txg, SPIKE_CRASH_TABLE_DIRTY);
 }
 
@@ -3175,31 +4116,52 @@ vdev_raidz_redirect_expire(vdev_t *vd, uint64_t txg)
 {
 	spa_t *spa = vd->vdev_spa;
 	metaslab_class_t *mc = spa_normal_class(spa);
-	vdev_raidz_t *vdrz;
-	raidz_redirect_node_t *rdn, *next;
+	raidz_redirect_table_t *t;
+	raidz_redirect_tomb_t *rrt, *next;
 	boolean_t defer;
 	uint64_t left;
+	list_t done;
 
 	if (vd->vdev_ops != &vdev_raidz_ops)
 		return;
-	vdrz = vd->vdev_tsd;
+	t = ((vdev_raidz_t *)vd->vdev_tsd)->vd_rdt;
 	/* SPIKE: mirrors defer_allowed in metaslab_sync_done(). */
 	defer = metaslab_class_get_space(mc) - metaslab_class_get_alloc(mc) >
 	    spa_get_slop_space(spa) && !vd->vdev_removing &&
 	    !vd->vdev_rz_expanding;
-	rw_enter(&vdrz->vd_redirect_lock, RW_WRITER);
-	for (rdn = list_head(&vdrz->vd_redirect_tombs); rdn != NULL;
-	    rdn = next) {
-		next = list_next(&vdrz->vd_redirect_tombs, rdn);
-		if (defer && rdn->rdn_free_txg + TXG_DEFER_SIZE > txg)
+	list_create(&done, sizeof (raidz_redirect_tomb_t),
+	    offsetof(raidz_redirect_tomb_t, rrt_link));
+	mutex_enter(&t->rdt_tomb_lock);
+	for (rrt = list_head(&t->rdt_tombs); rrt != NULL; rrt = next) {
+		next = list_next(&t->rdt_tombs, rrt);
+		if (defer && rrt->rrt_free_txg + TXG_DEFER_SIZE > txg)
 			continue;
-		list_remove(&vdrz->vd_redirect_tombs, rdn);
-		avl_remove(&vdrz->vd_redirects, rdn);
-		vdrz->vd_redirect_ntombs--;
-		kmem_free(rdn, sizeof (*rdn));
+		list_remove(&t->rdt_tombs, rrt);
+		list_insert_tail(&done, rrt);
 	}
-	left = vdrz->vd_redirect_ntombs;
-	rw_exit(&vdrz->vd_redirect_lock);
+	mutex_exit(&t->rdt_tomb_lock);
+	if (!list_is_empty(&done)) {
+		rdt_write_enter(t);
+		while ((rrt = list_remove_head(&done)) != NULL) {
+			raidz_redirect_shard_t *sh =
+			    rdt_shard(t, rrt->rrt_offset);
+			raidz_redirect_slot_t *s = rdt_shard_find(sh,
+			    rrt->rrt_offset, rrt->rrt_birth);
+
+			if (s != NULL && (s->rs_old_reserved & RS_TOMB)) {
+				rdt_shard_del(sh, s);
+				t->rdt_count--;
+				t->rdt_ntombs--;
+				if ((rrt->rrt_offset >> t->rdt_ms_shift) ==
+				    t->rdt_walk_ms)
+					t->rdt_walk_ms = UINT64_MAX;
+			}
+			kmem_free(rrt, sizeof (*rrt));
+		}
+		rdt_write_exit(t);
+	}
+	list_destroy(&done);
+	left = t->rdt_ntombs;
 	/* Keep this vdev synced until its last tombstone is dropped. */
 	if (left != 0)
 		vdev_dirty(vd, 0, NULL, txg + 1);
@@ -6878,8 +7840,6 @@ spike_crash_check(spa_t *spa, uint64_t txg, int point)
 /*
  * SPIKE, not for merge: test-only, the scale measurements (vdev_raidz.h).
  */
-spike_table_stat_t spike_table_stats;
-int spike_redirect_load_skip = 0;
 
 typedef struct raidz_redirect_synth_arg {
 	uint64_t rsa_vdev;
@@ -6948,8 +7908,11 @@ vdev_raidz_redirect_synth_sync(void *arg, dmu_tx_t *tx)
 	vdev_t *vd = spa->spa_root_vdev->vdev_child[rsa->rsa_vdev];
 	uint64_t txg = dmu_tx_get_txg(tx);
 
+	rdt_epochs_t ep;
+
 	rsa->rsa_done = 0;
 	rsa->rsa_txg = txg;
+	rdt_epochs_get(vd->vdev_tsd, &ep);
 	for (uint64_t i = 0; i < rsa->rsa_n; i++) {
 		raidz_redirect_ent_t *e = &rsa->rsa_ents[i];
 		raidz_redirect_ent_t ent;
@@ -6963,19 +7926,21 @@ vdev_raidz_redirect_synth_sync(void *arg, dmu_tx_t *tx)
 			continue;
 		}
 		e->rde_new_birth = txg;
-		if (vdev_raidz_redirect_damage(vd, e, txg) != NULL ||
+		if (vdev_raidz_redirect_damage(vd, e, txg, &ep) != NULL ||
 		    vdev_raidz_redirect_get(vd, e->rde_offset, e->rde_birth,
 		    NULL))
 			continue;
-		/* This format keeps the block pointer with the entry. */
-		if (rsa->rsa_op != SPIKE_SYNTH_ADD_MEM) {
+		if (rsa->rsa_op == SPIKE_SYNTH_ADD) {
 			vdev_raidz_redirect_synth_bp(vd, e, i, &bp, &zb);
 			vdev_raidz_redirect_persist(vd, e, &bp, &zb, tx);
+		} else if (rsa->rsa_op == SPIKE_SYNTH_ADD_HOT) {
+			vdev_raidz_redirect_persist(vd, e, NULL, NULL, tx);
 		} else {
 			vdev_raidz_redirect_insert(vd, e);
 		}
 		rsa->rsa_done++;
 	}
+	rdt_epochs_free(&ep);
 }
 
 int
@@ -7003,11 +7968,12 @@ vdev_raidz_redirect_unload(spa_t *spa, uint64_t vdev)
 	spa_config_enter(spa, SCL_VDEV, FTAG, RW_READER);
 	vd = vdev_lookup_top(spa, vdev);
 	if (vd != NULL && vd->vdev_ops == &vdev_raidz_ops) {
-		vdev_raidz_t *vdrz = vd->vdev_tsd;
+		raidz_redirect_table_t *t =
+		    ((vdev_raidz_t *)vd->vdev_tsd)->vd_rdt;
 
-		rw_enter(&vdrz->vd_redirect_lock, RW_WRITER);
-		vdev_raidz_redirect_destroy(vdrz);
-		rw_exit(&vdrz->vd_redirect_lock);
+		rdt_write_enter(t);
+		rdt_clear(t);
+		rdt_write_exit(t);
 	}
 	spa_config_exit(spa, SCL_VDEV, FTAG);
 }
@@ -7698,14 +8664,7 @@ vdev_raidz_init(spa_t *spa, nvlist_t *nv, void **tsd)
 	mutex_init(&vdrz->vd_expand_lock, NULL, MUTEX_DEFAULT, NULL);
 	avl_create(&vdrz->vd_expand_txgs, vdev_raidz_reflow_compare,
 	    sizeof (reflow_node_t), offsetof(reflow_node_t, re_link));
-	avl_create(&vdrz->vd_redirects, vdev_raidz_redirect_compare,
-	    sizeof (raidz_redirect_node_t),
-	    offsetof(raidz_redirect_node_t, rdn_link));
-	list_create(&vdrz->vd_redirect_pending, sizeof (raidz_redirect_node_t),
-	    offsetof(raidz_redirect_node_t, rdn_pending));
-	list_create(&vdrz->vd_redirect_tombs, sizeof (raidz_redirect_node_t),
-	    offsetof(raidz_redirect_node_t, rdn_pending));
-	rw_init(&vdrz->vd_redirect_lock, NULL, RW_DEFAULT, NULL);
+	vdrz->vd_rdt = rdt_alloc();
 
 	vdrz->vd_physical_width = children;
 	vdrz->vd_nparity = nparity;
@@ -7802,11 +8761,7 @@ vdev_raidz_fini(vdev_t *vd)
 		kmem_free(re, sizeof (*re));
 	avl_destroy(&vdrz->vd_expand_txgs);
 	mutex_destroy(&vdrz->vd_expand_lock);
-	vdev_raidz_redirect_destroy(vdrz);
-	avl_destroy(&vdrz->vd_redirects);
-	list_destroy(&vdrz->vd_redirect_pending);
-	list_destroy(&vdrz->vd_redirect_tombs);
-	rw_destroy(&vdrz->vd_redirect_lock);
+	rdt_free(vdrz->vd_rdt);
 	if (vdrz->vd_parity_epochs != NULL) {
 		kmem_free(vdrz->vd_parity_epochs,
 		    vdrz->vd_parity_epoch_count * 3 * sizeof (uint64_t));
