@@ -57,6 +57,9 @@
 #   must be allocated.  Writing 4160 MiB (260 tiles) is enough even if the
 #   allocator fills one tile at a time, and fits in the 4544 MiB of the pool.
 #   The test needs about 4.3 GiB of space in $TEST_BASE_DIR.
+# - The files get a directory of their own: zdb -e and zpool import -d
+#   would also find the files of earlier tests that a pool of the same
+#   name was exported from.
 #
 
 verify_runnable "global"
@@ -64,13 +67,14 @@ verify_runnable "global"
 typeset -i TILE_SIZE=16777216
 typeset -i WRITE_MB=4160
 ORIG_TILE_SIZE=$(get_tunable ANYRAID_MIN_TILE_SIZE)
+VDEV_DIR=$TEST_BASE_DIR/anyraid_tile_map_wide_offsets
 TILEMAP=$TEST_BASE_DIR/anyraid_tile_map.out
 
 function cleanup
 {
 	poolexists $TESTPOOL && destroy_pool $TESTPOOL
 	set_tunable64 ANYRAID_MIN_TILE_SIZE $ORIG_TILE_SIZE
-	rm -f $TEST_BASE_DIR/vdev_file.{0,1} $TILEMAP
+	rm -rf $VDEV_DIR $TILEMAP
 }
 
 log_onexit cleanup
@@ -78,9 +82,11 @@ log_onexit cleanup
 log_assert "Tile slots above 255 survive an export and import"
 
 log_must set_tunable64 ANYRAID_MIN_TILE_SIZE $TILE_SIZE
-log_must truncate -s 4800M $TEST_BASE_DIR/vdev_file.0
-log_must truncate -s 300M $TEST_BASE_DIR/vdev_file.1
-log_must create_pool $TESTPOOL anymirror0 $TEST_BASE_DIR/vdev_file.{0,1}
+log_must rm -rf $VDEV_DIR
+log_must mkdir $VDEV_DIR
+log_must truncate -s 4800M $VDEV_DIR/vdev_file.0
+log_must truncate -s 300M $VDEV_DIR/vdev_file.1
+log_must create_pool $TESTPOOL anymirror0 $VDEV_DIR/vdev_file.{0,1}
 
 log_must file_write -o create -f /$TESTPOOL/f1 -b 1048576 -c $WRITE_MB -d R
 sum=$(xxh128digest /$TESTPOOL/f1)
@@ -93,7 +99,7 @@ log_must zpool export $TESTPOOL
 # same map.  The lines that matter look like:
 #	tile           256   offset  0100   disk       00
 #
-log_must eval "zdb -e -p $TEST_BASE_DIR --anyraid-map $TESTPOOL > $TILEMAP"
+log_must eval "zdb -e -p $VDEV_DIR --anyraid-map $TESTPOOL > $TILEMAP"
 set -- $(awk '
     $1 == "tile" && $3 == "offset" {
 	n++
@@ -111,7 +117,7 @@ log_note "tile map: $1 tiles, $2 with a slot above 255, $3 slots used twice"
 (( $2 > 0 )) || log_fail "no slot above 255 in the tile map"
 (( $3 == 0 )) || log_fail "$3 slots are used by two tiles of the same disk"
 
-log_must zpool import -d $TEST_BASE_DIR $TESTPOOL
+log_must zpool import -d $VDEV_DIR $TESTPOOL
 newsum=$(xxh128digest /$TESTPOOL/f1)
 [[ $sum == "$newsum" ]] || log_fail "checksum of /$TESTPOOL/f1 changed"
 
