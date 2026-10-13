@@ -543,6 +543,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/anyraid/anyraid_special_vdev_001_pos.ksh \
 	functional/anyraid/anyraid_special_vdev_002_pos.ksh \
 	functional/anyraid/anyraid_tile_layout.ksh \
+	functional/anyraid/anyraid_tile_map_wide_offsets.ksh \
 	functional/anyraid/anyraid_write_verify_001_pos.ksh \
 	functional/anyraid/anyraid_write_verify_002_pos.ksh \
 	functional/anyraid/anyraid_write_verify_003_pos.ksh \
