@@ -324,7 +324,7 @@ store_table_check(void *arg, dmu_tx_t *tx)
 		return (0);
 	return (vdev_raidz_parity_epochs_set_check_tx(
 	    spa->spa_root_vdev->vdev_child[0], ta->ta_table, ta->ta_entries,
-	    tx));
+	    tx, NULL));
 }
 
 static void
