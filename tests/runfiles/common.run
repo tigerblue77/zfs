@@ -80,7 +80,8 @@ tests = [ 'anyraid_clean_mirror_001_pos', 'anyraid_clean_mirror_002_pos',
     'anyraid_encryption_001_pos', 'anyraid_snapshot_001_pos',
     'anyraid_send_recv_001_pos', 'anyraid_scrub_001_pos',
     'anyraid_properties_001_pos', 'anyraid_gang_blocks_001_pos',
-    'anyraid_tile_map_wide_offsets', 'anyraid_initialize_tile_end']
+    'anyraid_tile_map_wide_offsets', 'anyraid_initialize_tile_end',
+    'anyraid_tile_map_crash_import']
 tags = ['functional', 'anyraid']
 
 [tests/functional/append]

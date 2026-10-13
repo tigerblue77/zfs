@@ -11042,9 +11042,10 @@ spa_sync_rewrite_vdev_config(spa_t *spa, dmu_tx_t *tx)
 		spa_config_enter(spa, SCL_STATE, FTAG, RW_READER);
 
 		if (list_is_empty(&spa->spa_config_dirty_list)) {
-			vdev_t *svd[SPA_SYNC_MIN_VDEVS] = { NULL };
-			int svdcount = 0;
 			int children = rvd->vdev_children;
+			vdev_t **svd = kmem_zalloc(children * sizeof (vdev_t *),
+			    KM_SLEEP);
+			int svdcount = 0;
 			int c0 = random_in_range(children);
 
 			for (int c = 0; c < children; c++) {
@@ -11064,7 +11065,25 @@ spa_sync_rewrite_vdev_config(spa_t *spa, dmu_tx_t *tx)
 				if (svdcount == SPA_SYNC_MIN_VDEVS)
 					break;
 			}
+
+			/*
+			 * The tile map of an AnyRAID vdev is written with its
+			 * labels, and an import only accepts a map written in
+			 * the txg of the uberblock it loads.
+			 */
+			for (int c = 0; c < children; c++) {
+				vdev_t *vd = rvd->vdev_child[c];
+				int s = 0;
+
+				if (!vdev_is_anyraid(vd))
+					continue;
+				while (s < svdcount && svd[s] != vd)
+					s++;
+				if (s == svdcount)
+					svd[svdcount++] = vd;
+			}
 			error = vdev_config_sync(svd, svdcount, txg, status);
+			kmem_free(svd, children * sizeof (vdev_t *));
 		} else {
 			error = vdev_config_sync(rvd->vdev_child,
 			    rvd->vdev_children, txg, status);
