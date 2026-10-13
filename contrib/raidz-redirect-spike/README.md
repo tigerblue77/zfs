@@ -101,7 +101,7 @@ labels written, no uberblock) or POST_UB (after
 `spa_sync_rewrite_vdev_config()`).
 
     crash_probe <dir> <ashift> move <TABLE_DIRTY|MS_SYNCED|PRE_UB|POST_UB> <P1|P2> [split]
-    crash_probe <dir> <ashift> guard <mos|zil|stale|checkpoint>
+    crash_probe <dir> <ashift> guard <mos|zil|stale|checkpoint|wrongzb>
 
     mkdir /tmp/crp && cd /tmp/crp && ulimit -c 0 &&
         ZDB=$OLDPWD/.libs/zdb LD_PRELOAD=/tmp/devzfs_shim.so \
@@ -193,6 +193,66 @@ P3 keeps nothing, so a legitimate free of a moved block finds the whole old
 extent free; with `nocheck` (`spike_redirect_check_enable = 0`) or on the
 previous code, `metaslab_check_free()` aborts (`segment already in tree`).
 
+## Step 5, fixes: resilvering moved blocks, stale block pointers
+
+A resilver takes its window from the DTLs and prunes every block pointer
+born before it, and `vdev_raidz_need_resilver()` tested the DTL at the old
+birth and the columns of the old extent.  A block moved while a child was
+offline was never visited: the resilver finished, cleared the child's DTL,
+and left the child's column of N stale, so the block had lost a level of
+parity without a trace.  A replace, whose window covers every txg, still
+skipped a small block whose old columns missed the new child while N's
+held it.  Now `dsl_scan_setup_sync()` lowers the window's min txg below
+the old birth of every moved block whose new extent was written in the
+window (`vdev_raidz_redirect_scan_min_txg()`), and
+`vdev_raidz_need_resilver()` tests a moved block at N, with the DTL at its
+new birth.  This traverses more of the pool than the window: a real
+implementation would walk the table by new birth instead, which needs
+enough of each block pointer in the table to verify the rebuild.  The
+test-only `spike_resilver_redirects` holds one bit for each half (1 widens
+the window, 2 tests N).
+
+    crash_probe <dir> <ashift> resilver <P1|P2> <offline|offlinescrub|control|replace> [nofix|nowiden|nocols]
+
+The setup is the free modes' plus small-Z, one sector of data.  `offline`
+moves every block while child 2 is offline, brings it back and waits for
+the resilver; `offlinescrub` then also scrubs; `control` keeps every child
+online; `replace` replaces, with a new file, a child that holds a column of
+small-Z's N and none of its old extent.  The target's column on that child
+must not be all zero, and once two other columns of every N are inverted,
+every object must read back, which parity 2 allows only if the resilver
+rebuilt the child's column.
+
+The move's only proof that a block was alive was that its old extent was
+allocated, which an extent freed and reused by other blocks also is: the
+move then freed the tail of a live block (P2) or leaked N for good (P1).
+The move now resolves the block's bookmark in syncing context, as the error
+scrub does (`dbuf_dnode_findbp()`), and requires the block pointer found
+there to be the one it was given, or a gang block whose tree holds it, each
+header read where it lies and checked against its own checksum; otherwise
+it skips the block with ESTALE.  A bookmark must name where the block
+lives: the snapshot, for a block that only a snapshot holds.  A bookmark
+that names no block of an object is refused.  The test-only
+`spike_redirect_move_live = 0` turns the check off.
+
+    crash_probe <dir> <ashift> stalebp <P1|P2> [same] [nolive]
+
+`stalebp` frees an object E, refills its old extent with live objects,
+best fit, and moves E's saved block pointer.  Under `same` the refill holds
+E's content, so that E's stale block pointer still verifies against what
+lies at its offset: a check of the content alone would accept it.  `guard
+wrongzb` moves live blocks, gang children among them, named by another
+object's bookmark or at level -1.
+
+On the previous step's libzpool, `offline` and `replace` fail under P1 and
+P2 at ashift 12 and 9 while `control` and `offlinescrub` pass, `stalebp`
+under P2 leaves a claim error on the block that took E's place and under P1
+leaks N, and `wrongzb` moves everything.  With the fixes they all pass, and
+each switch brings back its failure: `nofix` and `nocols` fail `offline`
+and `replace`, `nowiden` fails `offline` only (a replace's window already
+covers every txg), and `nolive` fails `stalebp`.
+
 Not covered: a checkpoint-aware move or free (the flags are computed, never
-exercised), a frozen pool, resilver and DTL handling beyond the children's
-own DTL checks, kernel builds, and scale.
+exercised), a frozen pool, the table walk that should replace the widened
+window and its cost on a large pool, a mirror beside the raidz vdev,
+kernel builds, and scale.

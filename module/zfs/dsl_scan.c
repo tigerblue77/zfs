@@ -1019,6 +1019,13 @@ dsl_scan_setup_sync(void *arg, dmu_tx_t *tx)
 			spa_event_notify(spa, NULL, NULL, ESC_ZFS_SCRUB_START);
 		}
 
+		/*
+		 * SPIKE: a resilver or txg-ranged scrub must also reach the
+		 * moved blocks whose new extent was written in its window.
+		 */
+		scn->scn_phys.scn_min_txg = vdev_raidz_redirect_scan_min_txg(
+		    spa, scn->scn_phys.scn_min_txg, scn->scn_phys.scn_max_txg);
+
 		spa->spa_scrub_started = B_TRUE;
 		/*
 		 * If this is an incremental scrub, limit the DDT scrub phase

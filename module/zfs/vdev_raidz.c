@@ -39,6 +39,9 @@
 #include <sys/dsl_synctask.h>
 #include <sys/dsl_pool.h>
 #include <sys/dmu_objset.h>
+#include <sys/dsl_dataset.h>
+#include <sys/dnode.h>
+#include <sys/dbuf.h>
 
 #ifdef ZFS_DEBUG
 #include <sys/vdev.h>	/* For vdev_xlate() in vdev_raidz_io_verify() */
@@ -2495,6 +2498,53 @@ vdev_raidz_redirect_count(spa_t *spa, uint64_t vdev)
 	return (n);
 }
 
+/*
+ * SPIKE: the min txg a scan whose window is (min_txg, max_txg) needs to
+ * reach the moved blocks whose new extent was written in that window.
+ * Their block pointers keep the old birth, so the traversal would prune
+ * them.  The other blocks this adds are traversed for nothing: raidz's
+ * need_resilver skips them by their DTLs, a mirror only reads them.  A real
+ * implementation would rather walk the table by new birth, with enough of
+ * each block pointer in it to verify what it rebuilds.  Called in syncing
+ * context.
+ */
+uint64_t
+vdev_raidz_redirect_scan_min_txg(spa_t *spa, uint64_t min_txg,
+    uint64_t max_txg)
+{
+	vdev_t *rvd = spa->spa_root_vdev;
+	uint64_t min = min_txg;
+
+	if (!(spike_resilver_redirects & SPIKE_RESILVER_WIDEN) || min == 0)
+		return (min_txg);
+	for (uint64_t c = 0; c < rvd->vdev_children; c++) {
+		vdev_t *vd = rvd->vdev_child[c];
+		vdev_raidz_t *vdrz;
+		raidz_redirect_node_t *rdn;
+
+		if (vd->vdev_ops != &vdev_raidz_ops)
+			continue;
+		vdrz = vd->vdev_tsd;
+		rw_enter(&vdrz->vd_redirect_lock, RW_READER);
+		for (rdn = avl_first(&vdrz->vd_redirects); rdn != NULL;
+		    rdn = AVL_NEXT(&vdrz->vd_redirects, rdn)) {
+			const raidz_redirect_ent_t *e = &rdn->rdn_ent;
+
+			if (e->rde_new_birth > min_txg &&
+			    e->rde_new_birth < max_txg && e->rde_birth <= min)
+				min = e->rde_birth - 1;
+		}
+		rw_exit(&vdrz->vd_redirect_lock);
+	}
+	if (min != min_txg) {
+		zfs_dbgmsg("spike: scan of %s widened from (%llu, %llu) to "
+		    "(%llu, %llu) for moved blocks", spa_name(spa),
+		    (u_longlong_t)min_txg, (u_longlong_t)max_txg,
+		    (u_longlong_t)min, (u_longlong_t)max_txg);
+	}
+	return (min);
+}
+
 static void
 vdev_raidz_redirect_insert(vdev_t *vd, const raidz_redirect_ent_t *ent)
 {
@@ -4702,12 +4752,25 @@ vdev_raidz_need_resilver(vdev_t *vd, const dva_t *dva, size_t psize,
 	if (vdrz->vn_vre.vre_state == DSS_SCANNING)
 		return (B_TRUE);
 
+	/*
+	 * SPIKE: a moved block is resilvered at its new extent, which was
+	 * written in another txg, with another layout and on other columns
+	 * than its old one.
+	 */
+	uint64_t offset = DVA_GET_OFFSET(dva);
+	raidz_redirect_ent_t rde;
+	if ((spike_resilver_redirects & SPIKE_RESILVER_NEW_EXTENT) &&
+	    vdev_raidz_redirect_get(vd, offset, phys_birth, &rde)) {
+		offset = rde.rde_new_offset;
+		phys_birth = rde.rde_new_birth;
+	}
+
 	uint64_t dcols = vd->vdev_children;
 	uint64_t nparity =
 	    vdev_raidz_layout_for_alloc(vdrz, phys_birth).vrl_nparity;
 	uint64_t ashift = vd->vdev_top->vdev_ashift;
 	/* The starting RAIDZ (parent) vdev sector of the block. */
-	uint64_t b = DVA_GET_OFFSET(dva) >> ashift;
+	uint64_t b = offset >> ashift;
 	/* The zio's size in units of the vdev's minimum sector size. */
 	uint64_t s = ((psize - 1) >> ashift) + 1;
 	/* The first column for this stripe. */
@@ -6321,6 +6384,15 @@ int spike_crash_arm_free = 0;
 spike_redirect_stat_t spike_redirect_stats[SPIKE_REDIRECT_TXGS];
 
 /*
+ * SPIKE, not for merge: test-only switches of the fixes that keep moved
+ * blocks in reach of a resilver (SPIKE_RESILVER_* bits), and that make the
+ * move check that a block is still alive; 0 shows what happens without.
+ */
+int spike_resilver_redirects = SPIKE_RESILVER_WIDEN |
+    SPIKE_RESILVER_NEW_EXTENT;
+int spike_redirect_move_live = 1;
+
+/*
  * SPIKE, not for merge: test-only crash points.  A test sets
  * spike_crash_point, and spike_crash_txg or lets the move arm it with its own
  * txg; the process then exits with status 99 at that point of that txg.
@@ -6392,6 +6464,115 @@ vdev_raidz_extent_allocated(vdev_t *vd, uint64_t offset, uint64_t size)
 	}
 	mutex_exit(&msp->ms_lock);
 	return (ok);
+}
+
+/*
+ * SPIKE: B_TRUE if gbp, a live gang block, has bp in its gang tree.  Each
+ * header is read where it lies now (through its redirect, if it moved) and
+ * checked against its own embedded checksum before its block pointers are
+ * believed.
+ */
+static boolean_t
+vdev_raidz_redirect_in_gang(spa_t *spa, const blkptr_t *gbp,
+    const blkptr_t *bp, int depth)
+{
+	uint64_t gsize = SPA_OLD_GANGBLOCKSIZE;
+	boolean_t found = B_FALSE;
+	blkptr_t rbp;
+	abd_t *abd;
+
+	/* A bound, so that no header chain can recurse without end. */
+	if (!BP_IS_GANG(gbp) || depth >= 8)
+		return (B_FALSE);
+	if (spa_feature_is_active(spa, SPA_FEATURE_DYNAMIC_GANG_HEADER)) {
+		gsize = UINT64_MAX;
+		for (int d = 0; d < BP_GET_NDVAS(gbp); d++) {
+			gsize = MIN(gsize, vdev_gang_header_psize(
+			    vdev_lookup_top(spa,
+			    DVA_GET_VDEV(&gbp->blk_dva[d]))));
+		}
+	}
+
+	/* The header's bytes, as stored, from its first DVA. */
+	rbp = *gbp;
+	for (int d = 1; d < SPA_DVAS_PER_BP; d++)
+		memset(&rbp.blk_dva[d], 0, sizeof (dva_t));
+	DVA_SET_GANG(&rbp.blk_dva[0], 0);
+	BP_SET_LSIZE(&rbp, gsize);
+	BP_SET_PSIZE(&rbp, gsize);
+	BP_SET_COMPRESS(&rbp, ZIO_COMPRESS_OFF);
+	BP_SET_CHECKSUM(&rbp, ZIO_CHECKSUM_OFF);
+	BP_SET_DEDUP(&rbp, 0);
+	BP_SET_CRYPT(&rbp, 0);
+	ZIO_SET_CHECKSUM(&rbp.blk_cksum, 0, 0, 0, 0);
+	abd = abd_alloc_linear(gsize, B_TRUE);
+	if (zio_wait(zio_read(NULL, spa, &rbp, abd, gsize, NULL, NULL,
+	    ZIO_PRIORITY_SYNC_READ, ZIO_FLAG_CANFAIL | ZIO_FLAG_SPECULATIVE,
+	    NULL)) == 0 && zio_checksum_error_impl(spa, gbp,
+	    ZIO_CHECKSUM_GANG_HEADER, abd, gsize, 0, NULL) == 0) {
+		zio_gbh_phys_t *gbh = abd_to_buf(abd);
+
+		if (BP_SHOULD_BYTESWAP(gbp))
+			byteswap_uint64_array(gbh, gsize);
+		for (int g = 0; !found && g < gbh_nblkptrs(gsize); g++) {
+			const blkptr_t *cbp = gbh_bp(gbh, g);
+
+			found = BP_EQUAL(cbp, bp) ||
+			    vdev_raidz_redirect_in_gang(spa, cbp, bp,
+			    depth + 1);
+		}
+	}
+	abd_free(abd);
+	return (found);
+}
+
+/*
+ * SPIKE: B_TRUE if bp is still referenced from where zb says it lives: the
+ * block that zb names in dataset zb_objset (a head, a snapshot or a clone)
+ * is bp, or is a gang block whose tree holds bp.  A sync task runs after
+ * the datasets of its txg have synced, so a block freed in this txg or
+ * earlier is no longer found there, and a free in a later txg converts the
+ * moved block.  That the old extent is allocated proves nothing: it may
+ * have been freed and given to other blocks since the caller found bp.  A
+ * bookmark that names no block of an object (an objset's root block, a
+ * bonus buffer) is refused.  A real mover would find its blocks by
+ * traversal instead.
+ */
+static boolean_t
+vdev_raidz_redirect_live(spa_t *spa, const zbookmark_phys_t *zb,
+    const blkptr_t *bp)
+{
+	dsl_dataset_t *ds;
+	objset_t *os;
+	dnode_t *dn;
+	blkptr_t cur;
+	int err;
+
+	if (dsl_dataset_hold_obj(spa_get_dsl(spa), zb->zb_objset, FTAG,
+	    &ds) != 0)
+		return (B_FALSE);
+	err = dmu_objset_from_ds(ds, &os);
+	if (err == 0)
+		err = dnode_hold(os, zb->zb_object, FTAG, &dn);
+	if (err == 0) {
+		rw_enter(&dn->dn_struct_rwlock, RW_READER);
+		/* dbuf_findbp() asserts what it is not asked for. */
+		if (zb->zb_level < 0 || zb->zb_level >=
+		    MAX(dn->dn_phys->dn_nlevels, 1) ||
+		    zb->zb_blkid == DMU_BONUS_BLKID) {
+			err = SET_ERROR(ENOENT);
+		} else {
+			err = dbuf_dnode_findbp(dn, zb->zb_level, zb->zb_blkid,
+			    &cur, NULL, NULL);
+		}
+		rw_exit(&dn->dn_struct_rwlock);
+		dnode_rele(dn, FTAG);
+	}
+	dsl_dataset_rele(ds, FTAG);
+	if (err != 0 || BP_IS_HOLE(&cur) || BP_IS_EMBEDDED(&cur))
+		return (B_FALSE);
+	return (BP_EQUAL(&cur, bp) ||
+	    vdev_raidz_redirect_in_gang(spa, &cur, bp, 0));
 }
 
 static int
@@ -6470,6 +6651,11 @@ vdev_raidz_redirect_move_sync(void *arg, dmu_tx_t *tx)
 		/* A free earlier in this txg may have beaten us. */
 		if (!vdev_raidz_extent_allocated(vd, offset, asize)) {
 			rdm->rdm_error = SET_ERROR(ENOENT);
+			continue;
+		}
+		if (spike_redirect_move_live &&
+		    !vdev_raidz_redirect_live(spa, rdm->rdm_zb, bp)) {
+			rdm->rdm_error = SET_ERROR(ESTALE);
 			continue;
 		}
 
@@ -6566,8 +6752,9 @@ vdev_raidz_redirect_table_sync(void *arg, dmu_tx_t *tx)
  * extent N allocated in T, adds the entry to the table, and frees what
  * <keep> does not keep of the old extent: everything lands in T, so a crash
  * leaves either all of it or none.  A block whose old extent is no longer
- * wholly allocated is skipped with rdm_error ENOENT.  With <arm>, the crash
- * point set in spike_crash_point fires in T.
+ * wholly allocated is skipped with rdm_error ENOENT, and one that its
+ * bookmark no longer references with ESTALE.  With <arm>, the crash point
+ * set in spike_crash_point fires in T.
  */
 int
 vdev_raidz_redirect_move(spa_t *spa, uint64_t vdev,

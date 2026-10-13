@@ -230,7 +230,8 @@ struct zbookmark_phys;
 /* One block to move, for vdev_raidz_redirect_move() (test-only). */
 typedef struct raidz_redirect_move {
 	const struct blkptr *rdm_bp;	/* never changed; DVA 0 moves */
-	const struct zbookmark_phys *rdm_zb;	/* where rdm_bp lives */
+	/* Where rdm_bp lives; for a gang child, where its gang block does. */
+	const struct zbookmark_phys *rdm_zb;
 	uint64_t rdm_psize;		/* bytes at the DVA */
 	abd_t *rdm_data;		/* those bytes, as stored */
 	uint64_t rdm_place;		/* if not 0, claim N there */
@@ -253,12 +254,20 @@ extern boolean_t vdev_raidz_redirect_claim(vdev_t *, uint64_t, uint64_t,
 extern boolean_t vdev_raidz_redirect_remove(vdev_t *, uint64_t, uint64_t,
     raidz_redirect_ent_t *);
 extern void vdev_raidz_redirect_sync(vdev_t *, dmu_tx_t *);
+extern uint64_t vdev_raidz_redirect_scan_min_txg(spa_t *, uint64_t,
+    uint64_t);
 extern uint64_t spike_redirect_claim_delta;
 extern int spike_redirect_claim_enable;
 extern int spike_redirect_split_txg;
 extern int spike_redirect_check_enable;
 extern int spike_redirect_late_remove;
 extern int spike_crash_arm_free;
+
+/* SPIKE: test-only, what spike_resilver_redirects turns on. */
+#define	SPIKE_RESILVER_WIDEN		1	/* scan window to old births */
+#define	SPIKE_RESILVER_NEW_EXTENT	2	/* need_resilver at N, t2 */
+extern int spike_resilver_redirects;
+extern int spike_redirect_move_live;
 
 /*
  * SPIKE: test-only, what the frees of moved blocks did in a recent txg: how

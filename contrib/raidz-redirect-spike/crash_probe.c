@@ -6,11 +6,14 @@
  * moved block release what it holds, in one txg with its redirect (part B)?
  *
  *   crash_probe <dir> <ashift> move <point> <P1|P2> [split]
- *   crash_probe <dir> <ashift> guard <mos|zil|stale|checkpoint>
+ *   crash_probe <dir> <ashift> guard <mos|zil|stale|checkpoint|wrongzb>
  *   crash_probe <dir> <ashift> free <plain|dedup|clone|gang|snap> <P1|P2>
  *   crash_probe <dir> <ashift> free plain P3 [nocheck]
  *   crash_probe <dir> <ashift> fcrash <point> <P1|P2> [late]
  *   crash_probe <dir> <ashift> converge <P1|P2> [nolog]
+ *   crash_probe <dir> <ashift> resilver <P1|P2>
+ *       <offline|offlinescrub|control|replace> [nofix|nowiden|nocols]
+ *   crash_probe <dir> <ashift> stalebp <P1|P2> [same] [nolive]
  *
  * The parent never initializes libzpool; every phase runs in a forked child.
  * Phase 0 creates a five-wide raidz1 pool of files in <dir>, writes a plain,
@@ -46,6 +49,9 @@
  * a block named by a ZIL bookmark (the bookmark only; no ZIL block is
  * made) and a pool with a checkpoint, and skips, without freeing anything,
  * a block whose old extent was freed before the move (under P2).
+ * 'wrongzb' moves gang-G's children with plain-A's bookmark, and plain-A's
+ * block with gang-G's and at level -1: the move must refuse each one
+ * (ESTALE).
  *
  * free: phase 0 writes, at parity 1, a block that only snapshot s1 holds, a
  * control, then a plain object, a clone pair (one block, one BRT reference),
@@ -76,6 +82,29 @@
  * test-only spike_redirect_stats, the frees and table removals of each sync
  * pass: every key must leave the table in the txg of its free.
  *
+ * resilver: phase 0 is the free modes' plus small-Z, one sector of data,
+ * whose new extent has one column more than its old one.  'offline' takes
+ * child 2 offline, moves every block (the new extents miss its column, and
+ * its DTL holds the move's txg), brings it back and waits for the resilver
+ * to finish; 'offlinescrub' then also scrubs; 'control' keeps the child
+ * online.  'replace' moves with every child online, then replaces with a
+ * new file a child that holds a column of small-Z's new extent and none of
+ * its old one, and waits for the resilver and the detach.  The child must
+ * hold a non-zero column of the target's new extent (plain-A, or small-Z
+ * for replace); two other columns of that extent are then damaged and the
+ * target must still read back, which parity 2 allows only if the resilver
+ * rebuilt the child's column.  zdb runs after the resilver.  'nofix',
+ * 'nowiden' and 'nocols' clear both or one of the bits of the test-only
+ * spike_resilver_redirects.
+ *
+ * stalebp: phase 0 writes an object E at parity 1, frees it, refills its
+ * old extent (one allocator, best fit) with live objects, with E's content
+ * under 'same', and adds the parity-2 epoch.  The move of E's saved block
+ * pointer must be refused, leave nothing allocated and E's old extent
+ * whole; small writes then try to reuse anything it freed, every live object
+ * must read back after an export and import, and zdb must find no leak and
+ * no claim error.  'nolive' clears the test-only spike_redirect_move_live.
+ *
  * Prints one PASS or FAIL line per check and exits 1 if any check failed.
  */
 
@@ -99,6 +128,7 @@
 #include <sys/dsl_destroy.h>
 #include <sys/dsl_pool.h>
 #include <sys/dsl_prop.h>
+#include <sys/dsl_scan.h>
 #include <sys/dsl_synctask.h>
 #include <sys/metaslab.h>
 #include <sys/metaslab_impl.h>
@@ -125,7 +155,7 @@
 #define	BLKSZ		(128ULL << 10)
 #define	PATH_BUF	512
 #define	MAXMOVES	64
-#define	MAXOBJS		48
+#define	MAXOBJS		96
 #define	POLL_TXGS	40
 
 extern uint64_t metaslab_force_ganging;
@@ -146,6 +176,9 @@ extern int spike_redirect_late_remove __attribute__((weak));
 extern int spike_redirect_check_enable __attribute__((weak));
 extern spike_redirect_stat_t spike_redirect_stats[SPIKE_REDIRECT_TXGS]
     __attribute__((weak));
+/* Weak: the resilver and liveness fixes, absent from the previous step's. */
+extern int spike_resilver_redirects __attribute__((weak));
+extern int spike_redirect_move_live __attribute__((weak));
 /* Weak: the previous step's in-memory table, absent from this one. */
 extern int vdev_raidz_redirect_add(uint64_t, uint64_t, uint64_t, uint64_t,
     uint64_t, uint64_t) __attribute__((weak));
@@ -169,6 +202,7 @@ typedef struct fobj {
 	boolean_t	fo_snap;	/* lives only in the snapshot */
 	boolean_t	fo_moved;
 	boolean_t	fo_gone;	/* freed by the test */
+	uint64_t	fo_size;	/* its one block's size, 0 for BLKSZ */
 } fobj_t;
 
 /* What the phases share: the parent maps it before forking any of them. */
@@ -185,6 +219,11 @@ typedef struct shared {
 	fobj_t			sh_fobj[MAXOBJS];
 	blkptr_t		sh_snap_bp;	/* the snapshot-only block */
 	uint64_t		sh_free_txg;	/* txg of the armed free */
+	boolean_t		sh_small;	/* setup adds small-Z */
+	int			sh_watch;	/* resilver: child watched */
+	int			sh_replaced;	/* resilver: replaced + 1 */
+	blkptr_t		sh_stale_bp;	/* stalebp: E's freed bp */
+	zbookmark_phys_t	sh_stale_zb;
 } shared_t;
 
 static shared_t *sh;
@@ -321,23 +360,30 @@ export_pool(spa_t *spa)
 	VERIFY0(spa_export(POOL, NULL, B_FALSE, B_FALSE));
 }
 
+/* A new object of one block of <size> bytes of pattern <seed>. */
 static uint64_t
-put_object(objset_t *os, uint64_t seed)
+put_object_size(objset_t *os, uint64_t seed, uint64_t size)
 {
-	uint64_t *buf = malloc(BLKSZ);
+	uint64_t *buf = malloc(size);
 	dmu_tx_t *tx;
 	uint64_t obj;
 
-	fill_pattern(buf, BLKSZ, seed);
+	fill_pattern(buf, size, seed);
 	tx = dmu_tx_create(os);
-	dmu_tx_hold_write(tx, DMU_NEW_OBJECT, 0, BLKSZ);
+	dmu_tx_hold_write(tx, DMU_NEW_OBJECT, 0, size);
 	VERIFY0(dmu_tx_assign(tx, DMU_TX_WAIT));
-	obj = dmu_object_alloc(os, DMU_OT_PLAIN_FILE_CONTENTS, BLKSZ,
+	obj = dmu_object_alloc(os, DMU_OT_PLAIN_FILE_CONTENTS, size,
 	    DMU_OT_NONE, 0, tx);
-	dmu_write(os, obj, 0, BLKSZ, buf, tx, DMU_READ_NO_PREFETCH);
+	dmu_write(os, obj, 0, size, buf, tx, DMU_READ_NO_PREFETCH);
 	dmu_tx_commit(tx);
 	free(buf);
 	return (obj);
+}
+
+static uint64_t
+put_object(objset_t *os, uint64_t seed)
+{
+	return (put_object_size(os, seed, BLKSZ));
 }
 
 static blkptr_t
@@ -1036,6 +1082,30 @@ guard_fn(void *arg)
 		    BP_GET_PSIZE(&bp));
 	} else if (strcmp(which, "checkpoint") == 0) {
 		add_object_moves(spa, os, OA);
+	} else if (strcmp(which, "wrongzb") == 0) {
+		/* Live blocks, each named by the other object's bookmark. */
+		zbookmark_phys_t zba, zbg;
+
+		add_object_moves(spa, os, OG);
+		add_object_moves(spa, os, OA);
+		SET_BOOKMARK(&zba, dmu_objset_id(os), sh->sh_obj[OA], 0, 0);
+		SET_BOOKMARK(&zbg, dmu_objset_id(os), sh->sh_obj[OG], 0, 0);
+		/* Drop gang-G's header: its children follow, then plain-A. */
+		for (int i = 1; i < sh->sh_nmoves; i++) {
+			(void) memcpy(sh->sh_name[i - 1], sh->sh_name[i],
+			    sizeof (sh->sh_name[i]));
+			sh->sh_bp[i - 1] = sh->sh_bp[i];
+			sh->sh_rdm[i - 1] = sh->sh_rdm[i];
+			sh->sh_rdm[i - 1].rdm_bp = &sh->sh_bp[i - 1];
+			sh->sh_rdm[i - 1].rdm_zb = &sh->sh_zb[i - 1];
+			sh->sh_zb[i - 1] = (i == sh->sh_nmoves - 1) ? zbg :
+			    zba;
+		}
+		sh->sh_nmoves--;
+		/* And plain-A named at a level no object block has. */
+		SET_BOOKMARK(&zba, dmu_objset_id(os), sh->sh_obj[OA], -1, 0);
+		add_move(spa, "plain-A at level -1", &sh->sh_bp[sh->sh_nmoves -
+		    1], &zba, sh->sh_rdm[sh->sh_nmoves - 1].rdm_psize);
 	} else {
 		blkptr_t bp = object_bp(os, sh->sh_obj_e);
 		zbookmark_phys_t zb;
@@ -1053,10 +1123,24 @@ guard_fn(void *arg)
 
 	err = do_move(spa, P2, B_FALSE);
 	txg_wait_synced(spa_get_dsl(spa), 0);
-	(void) printf("INFO move of %s: returned %d, block error %d, N=%llx\n",
-	    sh->sh_name[0], err, sh->sh_rdm[0].rdm_error,
-	    (u_longlong_t)sh->sh_rdm[0].rdm_ent.rde_new_offset);
-	if (strcmp(which, "stale") == 0) {
+	for (int i = 0; i < sh->sh_nmoves; i++) {
+		(void) printf("INFO move of %s: returned %d, block error %d, "
+		    "N=%llx\n", sh->sh_name[i], err, sh->sh_rdm[i].rdm_error,
+		    (u_longlong_t)sh->sh_rdm[i].rdm_ent.rde_new_offset);
+	}
+	if (strcmp(which, "wrongzb") == 0) {
+		int refused = 0;
+
+		for (int i = 0; i < sh->sh_nmoves; i++) {
+			if (sh->sh_rdm[i].rdm_error == ESTALE &&
+			    sh->sh_rdm[i].rdm_ent.rde_new_asize == 0)
+				refused++;
+		}
+		check(err == 0 && refused == sh->sh_nmoves, "the move refuses "
+		    "every live block named by another object's bookmark, "
+		    "gang children included (%d of %d with ESTALE)", refused,
+		    sh->sh_nmoves);
+	} else if (strcmp(which, "stale") == 0) {
 		check(err == 0 && sh->sh_rdm[0].rdm_error == ENOENT &&
 		    sh->sh_rdm[0].rdm_ent.rde_new_asize == 0,
 		    "the move skips a block whose extent was freed (error %d, "
@@ -1252,6 +1336,15 @@ child_setup_free(void)
 	txg_wait_synced(spa_get_dsl(spa), 0);
 	metaslab_force_ganging = SPA_MAXBLOCKSIZE + 1;
 	metaslab_force_ganging_pct = 3;
+	if (sh->sh_small) {
+		/* One sector of data: 2 columns at parity 1, 3 at parity 2. */
+		int z = add_fobj("small-Z", 17, B_TRUE);
+
+		sh->sh_fobj[z].fo_size = 1ULL << ashift;
+		sh->sh_fobj[z].fo_obj = put_object_size(os, 17,
+		    sh->sh_fobj[z].fo_size);
+		txg_wait_synced(spa_get_dsl(spa), 0);
+	}
 	print_fobjs(os);
 	{
 		blkptr_t b1 = object_bp(os, sh->sh_fobj[d1].fo_obj);
@@ -1342,9 +1435,30 @@ child_setup_converge(void)
 	return (0);
 }
 
-/* Name the blocks of a free-mode object, a gang header's children too. */
+/*
+ * The objset id of snapshot s1, where its snapshot-only block lives, or 0
+ * if there is none.  Not with a pool hold: this takes one.
+ */
+static uint64_t
+snap_objset_id(void)
+{
+	objset_t *sos;
+	uint64_t id;
+
+	if (dmu_objset_hold(SNAP, FTAG, &sos) != 0)
+		return (0);
+	id = dmu_objset_id(sos);
+	dmu_objset_rele(sos, FTAG);
+	return (id);
+}
+
+/*
+ * Name the blocks of a free-mode object, a gang header's children too,
+ * with the bookmark of where each lives: s1, objset <snapid>, for the
+ * snapshot-only block.
+ */
 static void
-add_fobj_moves(spa_t *spa, objset_t *os, int f)
+add_fobj_moves(spa_t *spa, objset_t *os, int f, uint64_t snapid)
 {
 	fobj_t *fo = &sh->sh_fobj[f];
 	blkptr_t bp = fobj_bp(os, f);
@@ -1352,7 +1466,9 @@ add_fobj_moves(spa_t *spa, objset_t *os, int f)
 	char name[32];
 	int first = sh->sh_nmoves;
 
-	SET_BOOKMARK(&zb, dmu_objset_id(os), fo->fo_obj, 0, 0);
+	VERIFY(!fo->fo_snap || snapid != 0);
+	SET_BOOKMARK(&zb, fo->fo_snap ? snapid : dmu_objset_id(os),
+	    fo->fo_obj, 0, 0);
 	if (!BP_IS_GANG(&bp)) {
 		add_move(spa, fo->fo_name, &bp, &zb, BP_GET_PSIZE(&bp));
 	} else {
@@ -1394,6 +1510,7 @@ print_move(int i)
 static void
 move_fobjs(spa_t *spa, policy_t policy)
 {
+	uint64_t snapid = snap_objset_id();
 	objset_t *os;
 	int err;
 
@@ -1401,7 +1518,7 @@ move_fobjs(spa_t *spa, policy_t policy)
 	sh->sh_nmoves = 0;
 	for (int f = 0; f < sh->sh_nfobj; f++) {
 		if (sh->sh_fobj[f].fo_moved)
-			add_fobj_moves(spa, os, f);
+			add_fobj_moves(spa, os, f, snapid);
 	}
 	dmu_objset_rele(os, FTAG);
 	/* dsl_sync_task() returns once the move's txg has synced. */
@@ -1471,15 +1588,16 @@ static int
 read_fobj(int f, boolean_t *match)
 {
 	fobj_t *fo = &sh->sh_fobj[f];
+	uint64_t size = fo->fo_size != 0 ? fo->fo_size : BLKSZ;
 	objset_t *os;
-	uint64_t *buf = malloc(BLKSZ), *want = malloc(BLKSZ);
+	uint64_t *buf = malloc(size), *want = malloc(size);
 	int err;
 
 	VERIFY0(dmu_objset_hold(fo->fo_snap ? SNAP : POOL, FTAG, &os));
-	fill_pattern(want, BLKSZ, fo->fo_seed);
-	memset(buf, 0, BLKSZ);
-	err = dmu_read(os, fo->fo_obj, 0, BLKSZ, buf, DMU_READ_NO_PREFETCH);
-	*match = (err == 0 && memcmp(buf, want, BLKSZ) == 0);
+	fill_pattern(want, size, fo->fo_seed);
+	memset(buf, 0, size);
+	err = dmu_read(os, fo->fo_obj, 0, size, buf, DMU_READ_NO_PREFETCH);
+	*match = (err == 0 && memcmp(buf, want, size) == 0);
 	dmu_objset_rele(os, FTAG);
 	free(buf);
 	free(want);
@@ -2241,6 +2359,629 @@ run_converge(policy_t policy, boolean_t nolog)
 	return (0);
 }
 
+/*
+ * The resilver mode.
+ */
+#define	RS_CHILD	2
+#define	RS_TXGS		400
+
+typedef struct rs_args {
+	policy_t	ra_policy;
+	const char	*ra_how;	/* offline, control, replace... */
+	int		ra_fix;		/* spike_resilver_redirects, or -1 */
+} rs_args_t;
+
+/* A child's file: the replacement, once the test replaced that child. */
+static void
+child_file(char *buf, size_t len, int child)
+{
+	if (sh->sh_replaced == child + 1)
+		(void) snprintf(buf, len, "%s/n%d", dir, child);
+	else
+		leaf_path(buf, len, child);
+}
+
+static int
+find_move(const char *name)
+{
+	for (int i = 0; i < sh->sh_nmoves; i++) {
+		if (strcmp(sh->sh_name[i], name) == 0)
+			return (i);
+	}
+	VERIFY(B_FALSE);
+	return (-1);
+}
+
+/* The one-row raidz map of <psize> bytes at <offset> with <nparity>. */
+static raidz_map_t *
+rs_map(zio_t *zio, uint64_t offset, uint64_t psize, uint64_t nparity)
+{
+	raidz_map_t *rm;
+
+	memset(zio, 0, sizeof (*zio));
+	zio->io_size = P2ROUNDUP_TYPED(psize, 1ULL << ashift, uint64_t);
+	zio->io_offset = offset;
+	zio->io_type = ZIO_TYPE_READ;
+	zio->io_abd = abd_alloc_for_io(zio->io_size, B_FALSE);
+	rm = vdev_raidz_map_alloc(zio, ashift, WIDTH, nparity);
+	VERIFY3S(rm->rm_nrows, ==, 1);
+	return (rm);
+}
+
+static void
+rs_map_free(zio_t *zio, raidz_map_t *rm)
+{
+	vdev_raidz_map_free(rm);
+	abd_free(zio->io_abd);
+}
+
+/* Read or write a column where its child's file holds it. */
+static void
+rs_col_io(const raidz_col_t *rc, void *buf, boolean_t write)
+{
+	char path[PATH_BUF];
+	ssize_t n;
+	int fd;
+
+	child_file(path, sizeof (path), rc->rc_devidx);
+	fd = open(path, write ? O_RDWR : O_RDONLY);
+	VERIFY3S(fd, !=, -1);
+	if (write) {
+		n = pwrite(fd, buf, rc->rc_size,
+		    rc->rc_offset + VDEV_LABEL_START_SIZE);
+	} else {
+		n = pread(fd, buf, rc->rc_size,
+		    rc->rc_offset + VDEV_LABEL_START_SIZE);
+	}
+	VERIFY3S(n, ==, rc->rc_size);
+	(void) close(fd);
+}
+
+static boolean_t
+rs_col_zero(const raidz_col_t *rc)
+{
+	uint8_t *buf = malloc(rc->rc_size);
+	boolean_t zero = B_TRUE;
+
+	rs_col_io(rc, buf, B_FALSE);
+	for (uint64_t b = 0; b < rc->rc_size && zero; b++)
+		zero = (buf[b] == 0);
+	free(buf);
+	return (zero);
+}
+
+/*
+ * A child that holds a column of move i's new extent (parity 2) and none
+ * of its old extent (parity 1), or -1.
+ */
+static int
+rs_new_only_child(int i)
+{
+	zio_t zo, zn;
+	raidz_map_t *ro = rs_map(&zo, DVA_GET_OFFSET(&sh->sh_bp[i].blk_dva[0]),
+	    sh->sh_rdm[i].rdm_psize, 1);
+	raidz_map_t *rn = rs_map(&zn, sh->sh_rdm[i].rdm_ent.rde_new_offset,
+	    sh->sh_rdm[i].rdm_psize, 2);
+	boolean_t old[WIDTH] = { B_FALSE };
+	int child = -1;
+
+	for (int c = 0; c < ro->rm_row[0]->rr_cols; c++) {
+		if (ro->rm_row[0]->rr_col[c].rc_size != 0)
+			old[ro->rm_row[0]->rr_col[c].rc_devidx] = B_TRUE;
+	}
+	for (int c = 0; c < rn->rm_row[0]->rr_cols && child == -1; c++) {
+		const raidz_col_t *rc = &rn->rm_row[0]->rr_col[c];
+
+		if (rc->rc_size != 0 && !old[rc->rc_devidx])
+			child = rc->rc_devidx;
+	}
+	(void) printf("INFO %s: old extent on %d children, new extent on "
+	    "%d\n", sh->sh_name[i], (int)ro->rm_row[0]->rr_cols,
+	    (int)rn->rm_row[0]->rr_cols);
+	rs_map_free(&zo, ro);
+	rs_map_free(&zn, rn);
+	return (child);
+}
+
+static boolean_t
+rs_offline_done(spa_t *spa)
+{
+	return (vdev_dtl_empty(spa->spa_root_vdev->vdev_child[0]->
+	    vdev_child[sh->sh_watch], DTL_MISSING));
+}
+
+/* The replacement is the child, the old one gone, and its DTL empty. */
+static boolean_t
+rs_replace_done(spa_t *spa)
+{
+	char path[PATH_BUF];
+	vdev_t *cvd;
+	boolean_t done;
+
+	(void) snprintf(path, sizeof (path), "%s/n%d", dir, sh->sh_watch);
+	spa_config_enter(spa, SCL_VDEV, FTAG, RW_READER);
+	cvd = spa->spa_root_vdev->vdev_child[0]->vdev_child[sh->sh_watch];
+	done = cvd->vdev_ops->vdev_op_leaf && cvd->vdev_path != NULL &&
+	    strcmp(cvd->vdev_path, path) == 0 &&
+	    vdev_dtl_empty(cvd, DTL_MISSING);
+	spa_config_exit(spa, SCL_VDEV, FTAG);
+	return (done);
+}
+
+/* Wait, at most RS_TXGS txgs, for no resilver to be left and done(). */
+static void
+rs_wait(spa_t *spa, boolean_t (*done)(spa_t *), pool_scan_stat_t *ps)
+{
+	dsl_pool_t *dp = spa_get_dsl(spa);
+	int n;
+
+	for (n = 0; n < RS_TXGS; n++) {
+		txg_wait_synced(dp, 0);
+		if (n > 3 && !dsl_scan_resilvering(dp) &&
+		    !dsl_scan_resilver_scheduled(dp) && done(spa))
+			break;
+		if (n % 8 == 7)
+			dirty_txg(spa);
+	}
+	VERIFY0(spa_scan_get_stats(spa, ps));
+	(void) printf("INFO after %d txgs: scan func %llu state %llu min txg "
+	    "%llu max txg %llu examined %llu issued %llu errors %llu\n", n,
+	    (u_longlong_t)ps->pss_func, (u_longlong_t)ps->pss_state,
+	    (u_longlong_t)spa_get_dsl(spa)->dp_scan->scn_phys.scn_min_txg,
+	    (u_longlong_t)spa_get_dsl(spa)->dp_scan->scn_phys.scn_max_txg,
+	    (u_longlong_t)ps->pss_examined, (u_longlong_t)ps->pss_issued,
+	    (u_longlong_t)ps->pss_errors);
+}
+
+/* Replace child r with a new file of the same size. */
+static int
+rs_replace(spa_t *spa, int r)
+{
+	char path[PATH_BUF];
+	nvlist_t *file, *root;
+	uint64_t guid;
+	int fd, err;
+
+	(void) snprintf(path, sizeof (path), "%s/n%d", dir, r);
+	fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0666);
+	VERIFY3S(fd, !=, -1);
+	VERIFY0(ftruncate(fd, FILE_SIZE));
+	(void) close(fd);
+	file = fnvlist_alloc();
+	fnvlist_add_string(file, ZPOOL_CONFIG_TYPE, VDEV_TYPE_FILE);
+	fnvlist_add_string(file, ZPOOL_CONFIG_PATH, path);
+	fnvlist_add_uint64(file, ZPOOL_CONFIG_ASHIFT, ashift);
+	root = fnvlist_alloc();
+	fnvlist_add_string(root, ZPOOL_CONFIG_TYPE, VDEV_TYPE_ROOT);
+	fnvlist_add_nvlist_array(root, ZPOOL_CONFIG_CHILDREN,
+	    (const nvlist_t * const *)&file, 1);
+	spa_config_enter(spa, SCL_VDEV, FTAG, RW_READER);
+	guid = spa->spa_root_vdev->vdev_child[0]->vdev_child[r]->vdev_guid;
+	spa_config_exit(spa, SCL_VDEV, FTAG);
+	err = spa_vdev_attach(spa, guid, root, B_TRUE, B_FALSE);
+	fnvlist_free(root);
+	fnvlist_free(file);
+	return (err);
+}
+
+static void
+rs_set_fix(int fix)
+{
+	if (fix < 0)
+		return;
+	if (&spike_resilver_redirects == NULL) {
+		(void) printf("INFO this libzpool has no "
+		    "spike_resilver_redirects\n");
+		return;
+	}
+	spike_resilver_redirects = fix;
+	(void) printf("INFO spike_resilver_redirects=%d\n", fix);
+}
+
+/* Phase 1: offline or not, move, then resilver, scrub or replace. */
+static int
+child_rs_move(void *arg)
+{
+	rs_args_t *ra = arg;
+	boolean_t offline = (strncmp(ra->ra_how, "offline", 7) == 0);
+	boolean_t replace = (strcmp(ra->ra_how, "replace") == 0);
+	pool_scan_stat_t ps;
+	vdev_t *tvd;
+	spa_t *spa;
+	int r = -1;
+
+	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+	rs_set_fix(ra->ra_fix);
+	spa = import_pool();
+	tvd = spa->spa_root_vdev->vdev_child[0];
+	sh->sh_watch = RS_CHILD;
+	if (offline) {
+		VERIFY0(vdev_offline(spa, tvd->vdev_child[RS_CHILD]->vdev_guid,
+		    0));
+		(void) printf("INFO child %d offline (state %d)\n", RS_CHILD,
+		    (int)tvd->vdev_child[RS_CHILD]->vdev_state);
+	}
+	move_fobjs(spa, ra->ra_policy);
+	for (int k = 0; k < 3; k++) {
+		dirty_txg(spa);
+		txg_wait_synced(spa_get_dsl(spa), 0);
+	}
+	if (offline) {
+		vdev_t *cvd = tvd->vdev_child[RS_CHILD];
+		uint64_t t2 = sh->sh_rdm[0].rdm_ent.rde_new_birth;
+		vdev_state_t ns;
+
+		(void) printf("INFO child %d DTL_MISSING holds the move's txg "
+		    "%llu: %d\n", RS_CHILD, (u_longlong_t)t2,
+		    vdev_dtl_contains(cvd, DTL_MISSING, t2, 1));
+		VERIFY0(vdev_online(spa, cvd->vdev_guid, 0, &ns));
+		(void) printf("INFO child %d online (state %d)\n", RS_CHILD,
+		    (int)ns);
+		rs_wait(spa, rs_offline_done, &ps);
+		check(ps.pss_func == POOL_SCAN_RESILVER &&
+		    ps.pss_state == DSS_FINISHED && ps.pss_errors == 0 &&
+		    rs_offline_done(spa), "the resilver of child %d finished "
+		    "with no error and cleared its DTL", RS_CHILD);
+		if (strcmp(ra->ra_how, "offlinescrub") == 0) {
+			VERIFY0(spa_scan(spa, POOL_SCAN_SCRUB, 0));
+			while (dsl_scan_scrubbing(spa_get_dsl(spa)))
+				txg_wait_synced(spa_get_dsl(spa), 0);
+			VERIFY0(spa_scan_get_stats(spa, &ps));
+			(void) printf("INFO scrub after the resilver: state "
+			    "%llu examined %llu errors %llu\n",
+			    (u_longlong_t)ps.pss_state,
+			    (u_longlong_t)ps.pss_examined,
+			    (u_longlong_t)ps.pss_errors);
+		}
+	} else if (replace) {
+		int err;
+
+		r = rs_new_only_child(find_move("small-Z"));
+		check(r != -1, "a child holds a column of small-Z's new extent "
+		    "and none of its old one (child %d)", r);
+		if (r == -1) {
+			export_pool(spa);
+			kernel_fini();
+			return (1);
+		}
+		sh->sh_watch = r;
+		err = rs_replace(spa, r);
+		check(err == 0, "child %d is being replaced (%d)", r, err);
+		rs_wait(spa, rs_replace_done, &ps);
+		check(ps.pss_func == POOL_SCAN_RESILVER &&
+		    ps.pss_state == DSS_FINISHED && ps.pss_errors == 0 &&
+		    rs_replace_done(spa), "the replacement of child %d "
+		    "finished with no error and the old file was detached", r);
+	}
+	export_pool(spa);
+	kernel_fini();
+	if (r != -1) {
+		char path[PATH_BUF];
+
+		/* The detached file still has labels: keep it from import. */
+		leaf_path(path, sizeof (path), r);
+		VERIFY0(unlink(path));
+		sh->sh_replaced = r + 1;
+	}
+	return (failures == 0 ? 0 : 1);
+}
+
+/*
+ * Phase 2: look at each new extent's column on the watched child, then
+ * damage two other columns of every new extent.
+ */
+static int
+child_rs_damage(void *arg)
+{
+	const char *target = arg;
+	int t = find_move(target);
+	int zeros = -1;
+
+	kernel_init(SPA_MODE_READ);
+	for (int i = 0; i < sh->sh_nmoves; i++) {
+		zio_t zio;
+		raidz_map_t *rm = rs_map(&zio,
+		    sh->sh_rdm[i].rdm_ent.rde_new_offset,
+		    sh->sh_rdm[i].rdm_psize, 2);
+		raidz_row_t *rr = rm->rm_row[0];
+		int done = 0;
+
+		for (int c = 0; c < rr->rr_cols; c++) {
+			const raidz_col_t *rc = &rr->rr_col[c];
+			boolean_t zero;
+
+			if (rc->rc_devidx != sh->sh_watch || rc->rc_size == 0)
+				continue;
+			zero = rs_col_zero(rc);
+			(void) printf("INFO %s: new extent column %d (%s) on "
+			    "child %d, %llu bytes, all zero %d\n",
+			    sh->sh_name[i], c, c < rr->rr_firstdatacol ?
+			    "parity" : "data", sh->sh_watch,
+			    (u_longlong_t)rc->rc_size, zero);
+			if (i == t)
+				zeros = zero;
+		}
+		/* Data columns first, then parity. */
+		for (int pass = 0; pass < 2; pass++) {
+			for (int c = 0; c < rr->rr_cols && done < 2; c++) {
+				const raidz_col_t *rc = &rr->rr_col[c];
+				uint8_t *buf;
+
+				if (rc->rc_devidx == sh->sh_watch ||
+				    rc->rc_size == 0 ||
+				    (c >= rr->rr_firstdatacol) != (pass == 0))
+					continue;
+				buf = malloc(rc->rc_size);
+				rs_col_io(rc, buf, B_FALSE);
+				for (uint64_t b = 0; b < rc->rc_size; b++)
+					buf[b] = ~buf[b];
+				rs_col_io(rc, buf, B_TRUE);
+				free(buf);
+				done++;
+			}
+		}
+		VERIFY3S(done, ==, 2);
+		rs_map_free(&zio, rm);
+	}
+	check(zeros == 0, "%s's new extent has a column on child %d that is "
+	    "not all zero (all zero %d)", target, sh->sh_watch, zeros);
+	(void) printf("INFO damaged two columns, not on child %d, of each of "
+	    "the %d new extents\n", sh->sh_watch, sh->sh_nmoves);
+	kernel_fini();
+	return (failures == 0 ? 0 : 1);
+}
+
+/* Phase 3: every object must read back, its new extent damaged. */
+static int
+child_rs_read(void *arg)
+{
+	const char *target = arg;
+	boolean_t match;
+	spa_t *spa;
+	int err;
+
+	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+	spa = import_pool();
+	err = read_fobj(find_fobj(target), &match);
+	check(err == 0 && match, "%s reads back with two damaged columns of "
+	    "its parity-2 new extent (err=%d match=%d)", target, err, match);
+	check_others_read();
+	export_pool(spa);
+	kernel_fini();
+	return (failures == 0 ? 0 : 1);
+}
+
+static int
+run_resilver(policy_t policy, const char *how, int fix)
+{
+	rs_args_t ra = { policy, how, fix };
+	const char *target = strcmp(how, "replace") == 0 ? "small-Z" :
+	    "plain-A";
+	int st;
+
+	(void) printf("INFO resilver %s, policy %s, ashift %llu%s\n", how,
+	    policy_names[policy], (u_longlong_t)ashift,
+	    fix == 0 ? ", nofix" : fix == 1 ? ", nocols" :
+	    fix == 2 ? ", nowiden" : "");
+	sh->sh_small = B_TRUE;
+	VERIFY0(phase("0 setup", setup_free_fn, NULL));
+	st = phase("1 move and resilver", child_rs_move, &ra);
+	check(st == 0, "the move and resilver phase passes (status %d)", st);
+	run_zdb();
+	st = phase("2 damage", child_rs_damage, (void *)target);
+	check(st == 0, "the damage phase passes (status %d)", st);
+	st = phase("3 read", child_rs_read, (void *)target);
+	check(st == 0, "the read phase passes (status %d)", st);
+	return (0);
+}
+
+/*
+ * The stalebp mode.
+ */
+#define	STALE_FILL	64
+
+typedef struct stale_args {
+	policy_t	sa_policy;
+	boolean_t	sa_same;
+	boolean_t	sa_nolive;
+} stale_args_t;
+
+static void
+probe_tunable(const char *s)
+{
+	VERIFY0(handle_tunable_option(s, B_TRUE));
+}
+
+/*
+ * Phase 0: E at parity 1, freed; its old extent refilled, best fit, by
+ * live objects (with E's content under 'same'); then the parity-2 epoch.
+ */
+static int
+child_setup_stale(void *arg)
+{
+	const stale_args_t *sa = arg;
+	objset_t *os;
+	spa_t *spa;
+	uint64_t e, o, a;
+	dmu_tx_t *tx;
+	int nfill = 0;
+
+	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+	probe_tunable("spa_num_allocators=1");
+	create_pool();
+	VERIFY0(spa_open(POOL, &spa, FTAG));
+	sh->sh_nfobj = 0;
+	VERIFY0(dmu_objset_own(POOL, DMU_OST_ANY, B_FALSE, B_TRUE, FTAG, &os));
+	sh->sh_fobj[add_fobj("control-C", 14, B_FALSE)].fo_obj =
+	    put_object(os, 14);
+	e = put_object(os, 99);
+	sh->sh_fobj[add_fobj("after-E", 15, B_FALSE)].fo_obj =
+	    put_object(os, 15);
+	txg_wait_synced(spa_get_dsl(spa), 0);
+	sh->sh_stale_bp = object_bp(os, e);
+	SET_BOOKMARK(&sh->sh_stale_zb, dmu_objset_id(os), e, 0, 0);
+	o = DVA_GET_OFFSET(&sh->sh_stale_bp.blk_dva[0]);
+	a = DVA_GET_ASIZE(&sh->sh_stale_bp.blk_dva[0]);
+	(void) printf("INFO E: object %llu O=%llx asize %llu birth %llu\n",
+	    (u_longlong_t)e, (u_longlong_t)o, (u_longlong_t)a,
+	    (u_longlong_t)BP_GET_PHYSICAL_BIRTH(&sh->sh_stale_bp));
+	tx = dmu_tx_create(os);
+	dmu_tx_hold_free(tx, e, 0, DMU_OBJECT_END);
+	VERIFY0(dmu_tx_assign(tx, DMU_TX_WAIT));
+	VERIFY0(dmu_object_free(os, e, tx));
+	dmu_tx_commit(tx);
+	for (int k = 0; k < 4; k++)
+		txg_wait_synced(spa_get_dsl(spa), 0);
+	probe_tunable("metaslab_df_free_pct=100");
+	while (nfill < STALE_FILL && live_allocated(spa, o, a) != a) {
+		uint64_t seed = sa->sa_same ? 99 : 500 + nfill;
+		char name[24];
+		int f;
+
+		(void) snprintf(name, sizeof (name), "fill-%d", nfill);
+		f = add_fobj(name, seed, B_FALSE);
+		sh->sh_fobj[f].fo_obj = put_object(os, seed);
+		nfill++;
+		txg_wait_synced(spa_get_dsl(spa), 0);
+	}
+	probe_tunable("metaslab_df_free_pct=4");
+	(void) printf("INFO wrote %d fill objects; E's old extent live %llu "
+	    "of %llu\n", nfill, (u_longlong_t)live_allocated(spa, o, a),
+	    (u_longlong_t)a);
+	for (int f = 0; f < sh->sh_nfobj; f++) {
+		blkptr_t b = object_bp(os, sh->sh_fobj[f].fo_obj);
+		uint64_t bo = DVA_GET_OFFSET(&b.blk_dva[0]);
+		uint64_t ba = DVA_GET_ASIZE(&b.blk_dva[0]);
+
+		if (bo < o + a && o < bo + ba) {
+			(void) printf("INFO live %s (object %llu, seed %llu) "
+			    "at [%llx,+%llu) birth %llu overlaps E's old "
+			    "extent\n", sh->sh_fobj[f].fo_name,
+			    (u_longlong_t)sh->sh_fobj[f].fo_obj,
+			    (u_longlong_t)sh->sh_fobj[f].fo_seed,
+			    (u_longlong_t)bo, (u_longlong_t)ba,
+			    (u_longlong_t)BP_GET_PHYSICAL_BIRTH(&b));
+		}
+	}
+	dmu_objset_disown(os, B_TRUE, FTAG);
+	add_parity2_epoch(spa);
+	export_pool(spa);
+	kernel_fini();
+	return (0);
+}
+
+static int
+setup_stale_fn(void *arg)
+{
+	return (child_setup_stale(arg));
+}
+
+/* Phase 1: move E's stale bp, then try to reuse what that freed. */
+static int
+child_stalebp(void *arg)
+{
+	const stale_args_t *sa = arg;
+	blkptr_t ebp = sh->sh_stale_bp;
+	uint64_t o = DVA_GET_OFFSET(&ebp.blk_dva[0]);
+	uint64_t a = DVA_GET_ASIZE(&ebp.blk_dva[0]);
+	uint64_t tsz = ashift == 12 ? 90112 : 97280;
+	objset_t *os;
+	spa_t *spa;
+	abd_t *abd;
+	int err;
+
+	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+	probe_tunable("spa_num_allocators=1");
+	if (sa->sa_nolive) {
+		VERIFY3P(&spike_redirect_move_live, !=, NULL);
+		spike_redirect_move_live = 0;
+		(void) printf("INFO spike_redirect_move_live=0\n");
+	}
+	spa = import_pool();
+	(void) printf("INFO before the move: E's old extent live %llu of "
+	    "%llu\n", (u_longlong_t)live_allocated(spa, o, a),
+	    (u_longlong_t)a);
+	if (live_allocated(spa, o, a) != a) {
+		(void) printf("SKIP the old extent is not wholly reused\n");
+		export_pool(spa);
+		kernel_fini();
+		return (2);
+	}
+	abd = abd_alloc_linear(BP_GET_PSIZE(&ebp), B_FALSE);
+	err = zio_wait(zio_read(NULL, spa, &ebp, abd, BP_GET_PSIZE(&ebp),
+	    NULL, NULL, ZIO_PRIORITY_SYNC_READ, ZIO_FLAG_CANFAIL |
+	    ZIO_FLAG_SPECULATIVE | ZIO_FLAG_RAW, NULL));
+	abd_free(abd);
+	(void) printf("INFO E's freed bp %s against what its old extent "
+	    "holds now (read error %d)\n", err == 0 ? "verifies" :
+	    "does not verify", err);
+	sh->sh_nmoves = 0;
+	add_move(spa, "stale-E", &ebp, &sh->sh_stale_zb, BP_GET_PSIZE(&ebp));
+	err = do_move(spa, sa->sa_policy, B_FALSE);
+	print_move(0);
+	check((err != 0 || sh->sh_rdm[0].rdm_error != 0) &&
+	    sh->sh_rdm[0].rdm_ent.rde_new_asize == 0, "the move refuses E's "
+	    "stale bp, whose old extent live objects now hold (returned %d, "
+	    "block error %d)", err, sh->sh_rdm[0].rdm_error);
+	if (vdev_raidz_redirect_count != NULL) {
+		check(vdev_raidz_redirect_count(spa, 0) == 0,
+		    "no redirect was added (%llu)",
+		    (u_longlong_t)vdev_raidz_redirect_count(spa, 0));
+	}
+	for (int k = 0; k < 4; k++)
+		txg_wait_synced(spa_get_dsl(spa), 0);
+	check(live_allocated(spa, o, a) == a, "E's old extent is still wholly "
+	    "allocated after the move (%llu of %llu)",
+	    (u_longlong_t)live_allocated(spa, o, a), (u_longlong_t)a);
+
+	/* Blocks sized to what P2 would free of E's old extent (raidz2). */
+	probe_tunable("metaslab_df_free_pct=100");
+	VERIFY0(dmu_objset_own(POOL, DMU_OST_ANY, B_FALSE, B_TRUE, FTAG, &os));
+	for (int k = 0; k < 64 && live_allocated(spa, o, a) != a; k++) {
+		uint64_t obj = put_object_size(os, 900 + k, tsz);
+		blkptr_t b;
+
+		txg_wait_synced(spa_get_dsl(spa), 0);
+		b = object_bp(os, obj);
+		if (DVA_GET_OFFSET(&b.blk_dva[0]) < o + a &&
+		    o < DVA_GET_OFFSET(&b.blk_dva[0]) +
+		    DVA_GET_ASIZE(&b.blk_dva[0])) {
+			(void) printf("INFO new object %llu at [%llx,+%llu) "
+			    "lands in E's old extent, on top of a live "
+			    "block\n", (u_longlong_t)obj,
+			    (u_longlong_t)DVA_GET_OFFSET(&b.blk_dva[0]),
+			    (u_longlong_t)DVA_GET_ASIZE(&b.blk_dva[0]));
+		}
+	}
+	dmu_objset_disown(os, B_TRUE, FTAG);
+	probe_tunable("metaslab_df_free_pct=4");
+	export_pool(spa);
+	spa = import_pool();
+	check_others_read();
+	export_pool(spa);
+	kernel_fini();
+	return (failures == 0 ? 0 : 1);
+}
+
+static int
+run_stalebp(policy_t policy, boolean_t same, boolean_t nolive)
+{
+	stale_args_t sa = { policy, same, nolive };
+	int st;
+
+	(void) printf("INFO stalebp, policy %s, ashift %llu%s%s\n",
+	    policy_names[policy], (u_longlong_t)ashift,
+	    same ? ", refilled with E's content" : "",
+	    nolive ? ", nolive" : "");
+	VERIFY0(phase("0 setup", setup_stale_fn, &sa));
+	st = phase("1 stale move", child_stalebp, &sa);
+	if (st == 2)
+		return (2);
+	check(st == 0, "the stale-bp phase passes (status %d)", st);
+	run_zdb();
+	return (0);
+}
+
 static int
 parse_point(const char *s)
 {
@@ -2269,13 +3010,17 @@ usage(void)
 	(void) fprintf(stderr, "usage: crash_probe <dir> <ashift> move "
 	    "<TABLE_DIRTY|MS_SYNCED|PRE_UB|POST_UB> <P1|P2> [split]\n"
 	    "       crash_probe <dir> <ashift> guard "
-	    "<mos|zil|stale|checkpoint>\n"
+	    "<mos|zil|stale|checkpoint|wrongzb>\n"
 	    "       crash_probe <dir> <ashift> free "
 	    "<plain|dedup|clone|gang|snap> <P1|P2> | free plain P3 "
 	    "[nocheck]\n"
 	    "       crash_probe <dir> <ashift> fcrash "
 	    "<TABLE_DIRTY|MS_SYNCED|PRE_UB|POST_UB> <P1|P2> [late]\n"
-	    "       crash_probe <dir> <ashift> converge <P1|P2> [nolog]\n");
+	    "       crash_probe <dir> <ashift> converge <P1|P2> [nolog]\n"
+	    "       crash_probe <dir> <ashift> resilver <P1|P2> "
+	    "<offline|offlinescrub|control|replace> [nofix|nowiden|nocols]\n"
+	    "       crash_probe <dir> <ashift> stalebp <P1|P2> [same] "
+	    "[nolive]\n");
 	return (2);
 }
 
@@ -2307,7 +3052,8 @@ main(int argc, char **argv)
 	} else if (strcmp(mode, "guard") == 0 && argc == 5 &&
 	    (strcmp(argv[4], "mos") == 0 || strcmp(argv[4], "zil") == 0 ||
 	    strcmp(argv[4], "stale") == 0 ||
-	    strcmp(argv[4], "checkpoint") == 0)) {
+	    strcmp(argv[4], "checkpoint") == 0 ||
+	    strcmp(argv[4], "wrongzb") == 0)) {
 		st = run_guard(argv[4]);
 	} else if (strcmp(mode, "free") == 0 && argc >= 6 &&
 	    (strcmp(argv[4], "plain") == 0 || strcmp(argv[4], "dedup") == 0 ||
@@ -2331,6 +3077,40 @@ main(int argc, char **argv)
 		    (argc == 6 && strcmp(argv[5], "nolog") != 0))
 			return (usage());
 		st = run_converge(policy, argc == 6);
+	} else if (strcmp(mode, "resilver") == 0 && argc >= 6) {
+		const char *how = argv[5];
+		int fix = -1;
+
+		policy = parse_policy(argv[4], B_FALSE);
+		if (policy == -1 || (strcmp(how, "offline") != 0 &&
+		    strcmp(how, "offlinescrub") != 0 &&
+		    strcmp(how, "control") != 0 &&
+		    strcmp(how, "replace") != 0))
+			return (usage());
+		if (opt != NULL && strcmp(opt, "nofix") == 0)
+			fix = 0;
+		else if (opt != NULL && strcmp(opt, "nocols") == 0)
+			fix = 1;
+		else if (opt != NULL && strcmp(opt, "nowiden") == 0)
+			fix = 2;
+		else if (opt != NULL)
+			return (usage());
+		st = run_resilver(policy, how, fix);
+	} else if (strcmp(mode, "stalebp") == 0) {
+		boolean_t same = B_FALSE, nolive = B_FALSE;
+
+		policy = parse_policy(argv[4], B_FALSE);
+		if (policy == -1)
+			return (usage());
+		for (int i = 5; i < argc; i++) {
+			if (strcmp(argv[i], "same") == 0)
+				same = B_TRUE;
+			else if (strcmp(argv[i], "nolive") == 0)
+				nolive = B_TRUE;
+			else
+				return (usage());
+		}
+		st = run_stalebp(policy, same, nolive);
 	} else {
 		return (usage());
 	}
