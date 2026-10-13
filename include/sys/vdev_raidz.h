@@ -169,11 +169,14 @@ typedef struct vdev_raidz {
 	 * SPIKE, not for merge: blocks moved to a new extent, as
 	 * raidz_redirect_node_t's keyed by {old offset, physical birth}, and
 	 * the MOS ZAP that holds them (0 until the first move).  The lock
-	 * protects the tree; the I/O path takes it as a reader.
+	 * protects the tree and the list; the I/O path takes it as a reader.
+	 * The list holds the entries of moved blocks freed in the syncing
+	 * txg, whose keys vdev_sync() removes from the ZAP.
 	 */
 	avl_tree_t vd_redirects;
 	krwlock_t vd_redirect_lock;
 	uint64_t vd_redirect_obj;
+	list_t vd_redirect_pending;
 } vdev_raidz_t;
 
 extern int vdev_raidz_attach_check(vdev_t *);
@@ -247,9 +250,31 @@ extern uint64_t vdev_raidz_redirect_count(spa_t *, uint64_t);
 extern uint64_t vdev_raidz_redirect_hits(void);
 extern boolean_t vdev_raidz_redirect_claim(vdev_t *, uint64_t, uint64_t,
     uint64_t, uint64_t, int *);
+extern boolean_t vdev_raidz_redirect_remove(vdev_t *, uint64_t, uint64_t,
+    raidz_redirect_ent_t *);
+extern void vdev_raidz_redirect_sync(vdev_t *, dmu_tx_t *);
 extern uint64_t spike_redirect_claim_delta;
 extern int spike_redirect_claim_enable;
 extern int spike_redirect_split_txg;
+extern int spike_redirect_check_enable;
+extern int spike_redirect_late_remove;
+extern int spike_crash_arm_free;
+
+/*
+ * SPIKE: test-only, what the frees of moved blocks did in a recent txg: how
+ * many were freed and how many keys left the table in each sync pass (the
+ * last slot takes every later pass), and how many passes spa_sync() took.
+ * Indexed by txg % SPIKE_REDIRECT_TXGS; written by the sync thread only.
+ */
+#define	SPIKE_REDIRECT_PASSES	8
+#define	SPIKE_REDIRECT_TXGS	32
+typedef struct spike_redirect_stat {
+	uint64_t rst_txg;
+	uint64_t rst_passes;
+	uint64_t rst_freed[SPIKE_REDIRECT_PASSES];
+	uint64_t rst_removed[SPIKE_REDIRECT_PASSES];
+} spike_redirect_stat_t;
+extern spike_redirect_stat_t spike_redirect_stats[SPIKE_REDIRECT_TXGS];
 
 /* SPIKE: test-only crash points; spike_crash_check() calls _exit(99). */
 #define	SPIKE_CRASH_NONE	0

@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * Spike step 5, part A (throwaway, not part of any tree): is the move of
- * old-epoch raidz blocks atomic across a crash, does a fresh process find the
- * redirects, and does zdb account for moved blocks?
+ * Spike step 5 (throwaway, not part of any tree): is the move of old-epoch
+ * raidz blocks atomic across a crash, does a fresh process find the
+ * redirects, does zdb account for moved blocks (part A), and does freeing a
+ * moved block release what it holds, in one txg with its redirect (part B)?
  *
  *   crash_probe <dir> <ashift> move <point> <P1|P2> [split]
  *   crash_probe <dir> <ashift> guard <mos|zil|stale|checkpoint>
+ *   crash_probe <dir> <ashift> free <plain|dedup|clone|gang|snap> <P1|P2>
+ *   crash_probe <dir> <ashift> free plain P3 [nocheck]
+ *   crash_probe <dir> <ashift> fcrash <point> <P1|P2> [late]
+ *   crash_probe <dir> <ashift> converge <P1|P2> [nolog]
  *
  * The parent never initializes libzpool; every phase runs in a forked child.
  * Phase 0 creates a five-wide raidz1 pool of files in <dir>, writes a plain,
@@ -42,6 +47,35 @@
  * made) and a pool with a checkpoint, and skips, without freeing anything,
  * a block whose old extent was freed before the move (under P2).
  *
+ * free: phase 0 writes, at parity 1, a block that only snapshot s1 holds, a
+ * control, then a plain object, a clone pair (one block, one BRT reference),
+ * a dedup pair (one block, refcount 2) and a gang object, and adds the
+ * parity-2 epoch.  Phase 1 moves every block but the control's.  Phase 2
+ * frees one case: plain-A; dedup-D1 then dedup-D2; clone-K then clone-K2;
+ * gang-G; or destroys s1.  The first free of a pair must change nothing.
+ * After the free that converts, its txg and TXG_DEFER_SIZE more, then again
+ * after an export and import: each freed moved DVA's entry is gone from
+ * memory and from the table, [O, O + kept) and N are in ms_allocatable, the
+ * bytes those extents held are all released, vs_alloc agrees with the
+ * metaslab trees, and every other object reads back; zdb must find no leak.
+ * P3 (keep nothing) moves and frees in the same child, while the whole old
+ * extent is free: metaslab_check_free() must check N instead of it, and
+ * 'nocheck' clears spike_redirect_check_enable to show it otherwise.
+ *
+ * fcrash: after phases 0 and 1, child A frees plain-A with the crash point
+ * armed for the txg of the free (spike_crash_arm_free) and must exit 99;
+ * child B, a read-only import, finds plain-A, its entry, [O, O + kept) and
+ * N as before the free at the first three points, and all of them gone at
+ * POST_UB; then zdb.  'late' sets spike_redirect_late_remove, which removes
+ * the table entry a txg after the frees.  Without the free of moved blocks
+ * in libzpool, POST_UB is emulated by exiting once the free's txg synced.
+ *
+ * converge: frees, in one tx, many moved plain, dedup and gang objects next
+ * to a kept clone pair (so that their frees can go through the free list
+ * and the DDT), with or without the log space map, and prints, from the
+ * test-only spike_redirect_stats, the frees and table removals of each sync
+ * pass: every key must leave the table in the txg of its free.
+ *
  * Prints one PASS or FAIL line per check and exits 1 if any check failed.
  */
 
@@ -60,6 +94,9 @@
 #include <sys/dmu.h>
 #include <sys/dmu_tx.h>
 #include <sys/dmu_objset.h>
+#include <sys/dnode.h>
+#include <sys/brt.h>
+#include <sys/dsl_destroy.h>
 #include <sys/dsl_pool.h>
 #include <sys/dsl_prop.h>
 #include <sys/dsl_synctask.h>
@@ -82,11 +119,14 @@
 #include <libzpool.h>
 
 #define	POOL		"crp"
+#define	SNAP		"crp@s1"
 #define	WIDTH		5
 #define	FILE_SIZE	(256ULL << 20)
 #define	BLKSZ		(128ULL << 10)
 #define	PATH_BUF	512
-#define	MAXMOVES	16
+#define	MAXMOVES	64
+#define	MAXOBJS		48
+#define	POLL_TXGS	40
 
 extern uint64_t metaslab_force_ganging;
 extern uint_t metaslab_force_ganging_pct;
@@ -100,12 +140,18 @@ extern uint64_t vdev_raidz_redirect_count(spa_t *, uint64_t)
     __attribute__((weak));
 extern int spike_crash_point __attribute__((weak));
 extern int spike_redirect_split_txg __attribute__((weak));
+/* Weak: the free of moved blocks, absent from the previous step's. */
+extern int spike_crash_arm_free __attribute__((weak));
+extern int spike_redirect_late_remove __attribute__((weak));
+extern int spike_redirect_check_enable __attribute__((weak));
+extern spike_redirect_stat_t spike_redirect_stats[SPIKE_REDIRECT_TXGS]
+    __attribute__((weak));
 /* Weak: the previous step's in-memory table, absent from this one. */
 extern int vdev_raidz_redirect_add(uint64_t, uint64_t, uint64_t, uint64_t,
     uint64_t, uint64_t) __attribute__((weak));
 
-typedef enum policy { P1, P2 } policy_t;
-static const char *const policy_names[] = { "P1", "P2" };
+typedef enum policy { P1, P2, P3 } policy_t;
+static const char *const policy_names[] = { "P1", "P2", "P3" };
 static const char *const point_names[] = { "NONE", "TABLE_DIRTY",
 	"MS_SYNCED", "PRE_UB", "POST_UB" };
 
@@ -113,6 +159,17 @@ enum { OA, OD, OG, OC, NOBJ };
 static const char *const obj_names[] = { "plain-A", "dedup-D", "gang-G",
 	"control-C" };
 static const uint64_t obj_seeds[] = { 1, 2, 3, 4 };
+
+/* An object of the free and converge modes. */
+typedef struct fobj {
+	char		fo_name[24];
+	uint64_t	fo_seed;
+	uint64_t	fo_obj;
+	int		fo_shares;	/* fobj whose block it shares, or -1 */
+	boolean_t	fo_snap;	/* lives only in the snapshot */
+	boolean_t	fo_moved;
+	boolean_t	fo_gone;	/* freed by the test */
+} fobj_t;
 
 /* What the phases share: the parent maps it before forking any of them. */
 typedef struct shared {
@@ -123,6 +180,11 @@ typedef struct shared {
 	blkptr_t		sh_bp[MAXMOVES];
 	zbookmark_phys_t	sh_zb[MAXMOVES];
 	raidz_redirect_move_t	sh_rdm[MAXMOVES];	/* the kernel fills */
+	int			sh_owner[MAXMOVES];	/* fobj, or -1 */
+	int			sh_nfobj;
+	fobj_t			sh_fobj[MAXOBJS];
+	blkptr_t		sh_snap_bp;	/* the snapshot-only block */
+	uint64_t		sh_free_txg;	/* txg of the armed free */
 } shared_t;
 
 static shared_t *sh;
@@ -163,6 +225,20 @@ fill_pattern(uint64_t *buf, size_t size, uint64_t seed)
 	}
 }
 
+/* Features create_pool() leaves disabled: converge's variants. */
+static const char *skip_features[2];
+
+static boolean_t
+feature_skipped(const char *name)
+{
+	for (int i = 0; i < 2; i++) {
+		if (skip_features[i] != NULL &&
+		    strcmp(skip_features[i], name) == 0)
+			return (B_TRUE);
+	}
+	return (B_FALSE);
+}
+
 static void
 create_pool(void)
 {
@@ -197,7 +273,8 @@ create_pool(void)
 	for (int i = 0; i < SPA_FEATURES; i++) {
 		char buf[256];
 
-		if (!spa_feature_table[i].fi_zfs_mod_supported)
+		if (!spa_feature_table[i].fi_zfs_mod_supported ||
+		    feature_skipped(spa_feature_table[i].fi_uname))
 			continue;
 		(void) snprintf(buf, sizeof (buf), "feature@%s",
 		    spa_feature_table[i].fi_uname);
@@ -536,6 +613,7 @@ do_move(spa_t *spa, policy_t policy, boolean_t arm)
 	if (vdev_raidz_redirect_move != NULL) {
 		return (vdev_raidz_redirect_move(spa, 0, sh->sh_rdm,
 		    sh->sh_nmoves, policy == P2 ? RAIDZ_REDIRECT_KEEP_FIRST :
+		    policy == P3 ? RAIDZ_REDIRECT_KEEP_NONE :
 		    RAIDZ_REDIRECT_KEEP_ALL, arm));
 	}
 	legacy_policy = policy;
@@ -1013,6 +1091,1156 @@ run_guard(const char *which)
 	return (0);
 }
 
+/*
+ * The free, fcrash and converge modes: freeing moved blocks.
+ */
+
+static int
+add_fobj(const char *name, uint64_t seed, boolean_t move)
+{
+	int i = sh->sh_nfobj++;
+	fobj_t *fo = &sh->sh_fobj[i];
+
+	VERIFY3S(i, <, MAXOBJS);
+	memset(fo, 0, sizeof (*fo));
+	(void) strlcpy(fo->fo_name, name, sizeof (fo->fo_name));
+	fo->fo_seed = seed;
+	fo->fo_shares = -1;
+	fo->fo_moved = move;
+	return (i);
+}
+
+static int
+find_fobj(const char *name)
+{
+	for (int i = 0; i < sh->sh_nfobj; i++) {
+		if (strcmp(sh->sh_fobj[i].fo_name, name) == 0)
+			return (i);
+	}
+	VERIFY(B_FALSE);
+	return (-1);
+}
+
+/* An object holding a clone of src's only block, made with the BRT. */
+static uint64_t
+clone_object(spa_t *spa, objset_t *os, uint64_t src)
+{
+	blkptr_t bps[1];
+	size_t nbps = 1;
+	dnode_t *dn;
+	dmu_tx_t *tx;
+	uint64_t obj;
+
+	tx = dmu_tx_create(os);
+	dmu_tx_hold_bonus(tx, DMU_NEW_OBJECT);
+	VERIFY0(dmu_tx_assign(tx, DMU_TX_WAIT));
+	obj = dmu_object_alloc(os, DMU_OT_PLAIN_FILE_CONTENTS, BLKSZ,
+	    DMU_OT_NONE, 0, tx);
+	dmu_tx_commit(tx);
+	txg_wait_synced(spa_get_dsl(spa), 0);
+
+	VERIFY0(dmu_read_l0_bps(os, src, 0, BLKSZ, bps, &nbps));
+	VERIFY3U(nbps, ==, 1);
+	VERIFY0(dnode_hold(os, obj, FTAG, &dn));
+	tx = dmu_tx_create(os);
+	dmu_tx_hold_clone_by_dnode(tx, dn, 0, BLKSZ, BLKSZ);
+	VERIFY0(dmu_tx_assign(tx, DMU_TX_WAIT));
+	VERIFY0(dmu_brt_clone(os, obj, 0, BLKSZ, tx, bps, nbps));
+	dmu_tx_commit(tx);
+	dnode_rele(dn, FTAG);
+	txg_wait_synced(spa_get_dsl(spa), 0);
+	return (obj);
+}
+
+static blkptr_t
+fobj_bp(objset_t *os, int f)
+{
+	return (sh->sh_fobj[f].fo_snap ? sh->sh_snap_bp :
+	    object_bp(os, sh->sh_fobj[f].fo_obj));
+}
+
+static void
+print_fobjs(objset_t *os)
+{
+	for (int i = 0; i < sh->sh_nfobj; i++) {
+		blkptr_t bp = fobj_bp(os, i);
+
+		(void) printf("INFO state: %s object %llu seed %llu "
+		    "offset=%llx birth=%llu asize=%llu%s%s%s%s\n",
+		    sh->sh_fobj[i].fo_name,
+		    (u_longlong_t)sh->sh_fobj[i].fo_obj,
+		    (u_longlong_t)sh->sh_fobj[i].fo_seed,
+		    (u_longlong_t)DVA_GET_OFFSET(&bp.blk_dva[0]),
+		    (u_longlong_t)BP_GET_PHYSICAL_BIRTH(&bp),
+		    (u_longlong_t)DVA_GET_ASIZE(&bp.blk_dva[0]),
+		    BP_GET_DEDUP(&bp) ? " dedup" : "",
+		    BP_IS_GANG(&bp) ? " gang" : "",
+		    sh->sh_fobj[i].fo_snap ? " snapshot-only" : "",
+		    sh->sh_fobj[i].fo_moved ? " to-move" : "");
+	}
+}
+
+static void
+set_dedup(uint64_t checksum)
+{
+	VERIFY0(dsl_prop_set_int(POOL, "dedup", ZPROP_SRC_LOCAL, checksum));
+}
+
+/*
+ * Phase 0 of the free modes: a plain object, a dedup pair (one block, two
+ * references), a clone pair (one block, one BRT reference), a gang object, a
+ * block that only snapshot s1 holds, and a control; then the parity-2 epoch.
+ */
+static int
+child_setup_free(void)
+{
+	objset_t *os;
+	spa_t *spa;
+	int a, k, k2, s, d1, d2, g;
+
+	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+	create_pool();
+	VERIFY0(spa_open(POOL, &spa, FTAG));
+	sh->sh_nfobj = 0;
+
+	/*
+	 * S lives on in snapshot s1 only.  Everything the test frees in the
+	 * head is written after s1, which would otherwise hold it too.
+	 */
+	VERIFY0(dmu_objset_own(POOL, DMU_OST_ANY, B_FALSE, B_TRUE, FTAG, &os));
+	s = add_fobj("snap-S", 16, B_TRUE);
+	sh->sh_fobj[s].fo_obj = put_object(os, 16);
+	sh->sh_fobj[add_fobj("control-C", 14, B_FALSE)].fo_obj =
+	    put_object(os, 14);
+	txg_wait_synced(spa_get_dsl(spa), 0);
+	sh->sh_snap_bp = object_bp(os, sh->sh_fobj[s].fo_obj);
+	dmu_objset_disown(os, B_TRUE, FTAG);
+	VERIFY0(dmu_objset_snapshot_one(POOL, "s1"));
+	VERIFY0(dmu_objset_own(POOL, DMU_OST_ANY, B_FALSE, B_TRUE, FTAG, &os));
+	VERIFY0(dmu_free_long_object(os, sh->sh_fobj[s].fo_obj));
+	sh->sh_fobj[s].fo_snap = B_TRUE;
+	txg_wait_synced(spa_get_dsl(spa), 0);
+
+	a = add_fobj("plain-A", 11, B_TRUE);
+	sh->sh_fobj[a].fo_obj = put_object(os, 11);
+	k = add_fobj("clone-K", 15, B_TRUE);
+	sh->sh_fobj[k].fo_obj = put_object(os, 15);
+	txg_wait_synced(spa_get_dsl(spa), 0);
+	k2 = add_fobj("clone-K2", 15, B_FALSE);
+	sh->sh_fobj[k2].fo_obj = clone_object(spa, os, sh->sh_fobj[k].fo_obj);
+	sh->sh_fobj[k2].fo_shares = k;
+	dmu_objset_disown(os, B_TRUE, FTAG);
+
+	set_dedup(ZIO_CHECKSUM_SHA256);
+	VERIFY0(dmu_objset_own(POOL, DMU_OST_ANY, B_FALSE, B_TRUE, FTAG, &os));
+	d1 = add_fobj("dedup-D1", 12, B_TRUE);
+	sh->sh_fobj[d1].fo_obj = put_object(os, 12);
+	txg_wait_synced(spa_get_dsl(spa), 0);
+	d2 = add_fobj("dedup-D2", 12, B_FALSE);
+	sh->sh_fobj[d2].fo_obj = put_object(os, 12);
+	sh->sh_fobj[d2].fo_shares = d1;
+	txg_wait_synced(spa_get_dsl(spa), 0);
+	dmu_objset_disown(os, B_TRUE, FTAG);
+	set_dedup(ZIO_CHECKSUM_OFF);
+
+	/* Gang the 128K block, not its children. */
+	metaslab_force_ganging = 100 << 10;
+	metaslab_force_ganging_pct = 100;
+	VERIFY0(dmu_objset_own(POOL, DMU_OST_ANY, B_FALSE, B_TRUE, FTAG, &os));
+	g = add_fobj("gang-G", 13, B_TRUE);
+	sh->sh_fobj[g].fo_obj = put_object(os, 13);
+	txg_wait_synced(spa_get_dsl(spa), 0);
+	metaslab_force_ganging = SPA_MAXBLOCKSIZE + 1;
+	metaslab_force_ganging_pct = 3;
+	print_fobjs(os);
+	{
+		blkptr_t b1 = object_bp(os, sh->sh_fobj[d1].fo_obj);
+		blkptr_t b2 = object_bp(os, sh->sh_fobj[d2].fo_obj);
+		blkptr_t bk = object_bp(os, sh->sh_fobj[k].fo_obj);
+
+		VERIFY(DVA_EQUAL(&b1.blk_dva[0], &b2.blk_dva[0]));
+		VERIFY3U(BP_GET_PHYSICAL_BIRTH(&b1), ==,
+		    BP_GET_PHYSICAL_BIRTH(&b2));
+		(void) printf("INFO dedup pair shares one DVA; BRT refcount of "
+		    "clone-K's block: %llu\n",
+		    (u_longlong_t)brt_entry_get_refcount(spa, &bk));
+	}
+	dmu_objset_disown(os, B_TRUE, FTAG);
+
+	add_parity2_epoch(spa);
+	export_pool(spa);
+	kernel_fini();
+	return (0);
+}
+
+#define	CONV_PLAIN	24
+#define	CONV_DEDUP	8
+#define	CONV_GANG	2
+
+/*
+ * Phase 0 of converge: many plain, dedup and gang objects to free in one
+ * txg, a clone pair that is kept (it makes brt_maybe_exists() true for the
+ * blocks around it, which sends their frees through the free list) and a
+ * control.
+ */
+static int
+child_setup_converge(void)
+{
+	objset_t *os;
+	spa_t *spa;
+	char name[24];
+	int k;
+
+	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+	create_pool();
+	VERIFY0(spa_open(POOL, &spa, FTAG));
+	sh->sh_nfobj = 0;
+
+	VERIFY0(dmu_objset_own(POOL, DMU_OST_ANY, B_FALSE, B_TRUE, FTAG, &os));
+	k = add_fobj("clone-K", 400, B_FALSE);
+	sh->sh_fobj[k].fo_obj = put_object(os, 400);
+	for (int i = 0; i < CONV_PLAIN; i++) {
+		(void) snprintf(name, sizeof (name), "plain-%d", i);
+		sh->sh_fobj[add_fobj(name, 100 + i, B_TRUE)].fo_obj =
+		    put_object(os, 100 + i);
+	}
+	sh->sh_fobj[add_fobj("control-C", 401, B_FALSE)].fo_obj =
+	    put_object(os, 401);
+	txg_wait_synced(spa_get_dsl(spa), 0);
+	sh->sh_fobj[add_fobj("clone-K2", 400, B_FALSE)].fo_obj =
+	    clone_object(spa, os, sh->sh_fobj[k].fo_obj);
+	dmu_objset_disown(os, B_TRUE, FTAG);
+
+	set_dedup(ZIO_CHECKSUM_SHA256);
+	VERIFY0(dmu_objset_own(POOL, DMU_OST_ANY, B_FALSE, B_TRUE, FTAG, &os));
+	for (int i = 0; i < CONV_DEDUP; i++) {
+		(void) snprintf(name, sizeof (name), "dedup-%d", i);
+		sh->sh_fobj[add_fobj(name, 200 + i, B_TRUE)].fo_obj =
+		    put_object(os, 200 + i);
+	}
+	txg_wait_synced(spa_get_dsl(spa), 0);
+	dmu_objset_disown(os, B_TRUE, FTAG);
+	set_dedup(ZIO_CHECKSUM_OFF);
+
+	metaslab_force_ganging = 100 << 10;
+	metaslab_force_ganging_pct = 100;
+	VERIFY0(dmu_objset_own(POOL, DMU_OST_ANY, B_FALSE, B_TRUE, FTAG, &os));
+	for (int i = 0; i < CONV_GANG; i++) {
+		(void) snprintf(name, sizeof (name), "gang-%d", i);
+		sh->sh_fobj[add_fobj(name, 300 + i, B_TRUE)].fo_obj =
+		    put_object(os, 300 + i);
+	}
+	txg_wait_synced(spa_get_dsl(spa), 0);
+	metaslab_force_ganging = SPA_MAXBLOCKSIZE + 1;
+	metaslab_force_ganging_pct = 3;
+	print_fobjs(os);
+	dmu_objset_disown(os, B_TRUE, FTAG);
+
+	add_parity2_epoch(spa);
+	export_pool(spa);
+	kernel_fini();
+	return (0);
+}
+
+/* Name the blocks of a free-mode object, a gang header's children too. */
+static void
+add_fobj_moves(spa_t *spa, objset_t *os, int f)
+{
+	fobj_t *fo = &sh->sh_fobj[f];
+	blkptr_t bp = fobj_bp(os, f);
+	zbookmark_phys_t zb;
+	char name[32];
+	int first = sh->sh_nmoves;
+
+	SET_BOOKMARK(&zb, dmu_objset_id(os), fo->fo_obj, 0, 0);
+	if (!BP_IS_GANG(&bp)) {
+		add_move(spa, fo->fo_name, &bp, &zb, BP_GET_PSIZE(&bp));
+	} else {
+		add_move(spa, fo->fo_name, &bp, &zb, gang_header_psize(spa));
+		zio_gbh_phys_t *gbh = abd_to_buf(sh->sh_rdm[sh->sh_nmoves -
+		    1].rdm_data);
+		(void) snprintf(name, sizeof (name), "%s child", fo->fo_name);
+		for (int k = 0; k < gbh_nblkptrs(gang_header_psize(spa));
+		    k++) {
+			blkptr_t *cbp = gbh_bp(gbh, k);
+
+			if (BP_IS_HOLE(cbp))
+				continue;
+			VERIFY(!BP_IS_GANG(cbp));
+			add_move(spa, name, cbp, &zb, BP_GET_PSIZE(cbp));
+		}
+	}
+	for (int i = first; i < sh->sh_nmoves; i++)
+		sh->sh_owner[i] = f;
+}
+
+static void
+print_move(int i)
+{
+	const raidz_redirect_move_t *rdm = &sh->sh_rdm[i];
+	const raidz_redirect_ent_t *e = &rdm->rdm_ent;
+
+	(void) printf("INFO move %d %s: O=%llx t1=%llu asize %llu kept %llu "
+	    "-> N=%llx asize %llu t2=%llu (error %d)\n", i, sh->sh_name[i],
+	    (u_longlong_t)DVA_GET_OFFSET(&sh->sh_bp[i].blk_dva[0]),
+	    (u_longlong_t)BP_GET_PHYSICAL_BIRTH(&sh->sh_bp[i]),
+	    (u_longlong_t)rdm->rdm_old_asize,
+	    (u_longlong_t)e->rde_old_reserved,
+	    (u_longlong_t)e->rde_new_offset, (u_longlong_t)e->rde_new_asize,
+	    (u_longlong_t)e->rde_new_birth, rdm->rdm_error);
+}
+
+/* Move every block of the objects marked to move, and sync the move. */
+static void
+move_fobjs(spa_t *spa, policy_t policy)
+{
+	objset_t *os;
+	int err;
+
+	VERIFY0(dmu_objset_hold(POOL, FTAG, &os));
+	sh->sh_nmoves = 0;
+	for (int f = 0; f < sh->sh_nfobj; f++) {
+		if (sh->sh_fobj[f].fo_moved)
+			add_fobj_moves(spa, os, f);
+	}
+	dmu_objset_rele(os, FTAG);
+	/* dsl_sync_task() returns once the move's txg has synced. */
+	err = do_move(spa, policy, B_FALSE);
+	(void) printf("INFO the move synced in txg %llu\n",
+	    (u_longlong_t)spa_last_synced_txg(spa));
+	check(err == 0, "the move of %d blocks under %s returns 0 (%d)",
+	    sh->sh_nmoves, policy_names[policy], err);
+	for (int i = 0; i < sh->sh_nmoves; i++) {
+		print_move(i);
+		check(sh->sh_rdm[i].rdm_error == 0 &&
+		    sh->sh_rdm[i].rdm_ent.rde_new_asize != 0,
+		    "%s moved", sh->sh_name[i]);
+	}
+}
+
+/* The phase after setup: move, let the move's frees settle, export. */
+static int
+child_move_fobjs(void *arg)
+{
+	policy_t policy = *(policy_t *)arg;
+	spa_t *spa;
+
+	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+	spa = import_pool();
+	move_fobjs(spa, policy);
+	txg_wait_synced(spa_get_dsl(spa), spa_last_synced_txg(spa) +
+	    TXG_DEFER_SIZE + 1);
+	export_pool(spa);
+	kernel_fini();
+	return (failures == 0 ? 0 : 1);
+}
+
+/*
+ * Free some objects of the head in one tx; its txg.  A block that may be
+ * cloned goes to the pool's free bpobj, which dsl_scan_sync() leaves alone
+ * for zfs_import_defer_txgs (5, static) txgs after an import: free after
+ * that, so that the blocks are freed in the txg that frees the objects.
+ */
+static uint64_t
+free_fobjs(spa_t *spa, const int *f, int n)
+{
+	objset_t *os;
+	dmu_tx_t *tx;
+	uint64_t txg;
+
+	txg_wait_synced(spa_get_dsl(spa), spa_first_txg(spa) + 5);
+	VERIFY0(dmu_objset_own(POOL, DMU_OST_ANY, B_FALSE, B_TRUE, FTAG, &os));
+	tx = dmu_tx_create(os);
+	for (int i = 0; i < n; i++) {
+		dmu_tx_hold_free(tx, sh->sh_fobj[f[i]].fo_obj, 0,
+		    DMU_OBJECT_END);
+	}
+	VERIFY0(dmu_tx_assign(tx, DMU_TX_WAIT));
+	txg = dmu_tx_get_txg(tx);
+	for (int i = 0; i < n; i++) {
+		VERIFY0(dmu_object_free(os, sh->sh_fobj[f[i]].fo_obj, tx));
+		sh->sh_fobj[f[i]].fo_gone = B_TRUE;
+	}
+	dmu_tx_commit(tx);
+	dmu_objset_disown(os, B_TRUE, FTAG);
+	return (txg);
+}
+
+/* Read a free-mode object, from snapshot s1 if it lives only there. */
+static int
+read_fobj(int f, boolean_t *match)
+{
+	fobj_t *fo = &sh->sh_fobj[f];
+	objset_t *os;
+	uint64_t *buf = malloc(BLKSZ), *want = malloc(BLKSZ);
+	int err;
+
+	VERIFY0(dmu_objset_hold(fo->fo_snap ? SNAP : POOL, FTAG, &os));
+	fill_pattern(want, BLKSZ, fo->fo_seed);
+	memset(buf, 0, BLKSZ);
+	err = dmu_read(os, fo->fo_obj, 0, BLKSZ, buf, DMU_READ_NO_PREFETCH);
+	*match = (err == 0 && memcmp(buf, want, BLKSZ) == 0);
+	dmu_objset_rele(os, FTAG);
+	free(buf);
+	free(want);
+	return (err);
+}
+
+static void
+check_others_read(void)
+{
+	for (int f = 0; f < sh->sh_nfobj; f++) {
+		boolean_t match;
+		int err;
+
+		if (sh->sh_fobj[f].fo_gone)
+			continue;
+		err = read_fobj(f, &match);
+		check(err == 0 && match, "%s reads back bit-exact (err=%d "
+		    "match=%d)", sh->sh_fobj[f].fo_name, err, match);
+	}
+}
+
+/* Bytes of [off, off + len) that rt holds. */
+static uint64_t
+tree_overlap(zfs_range_tree_t *rt, uint64_t off, uint64_t len)
+{
+	uint64_t end = off + len;
+	uint64_t total = 0;
+	uint64_t s;
+	uint64_t l;
+
+	while (off < end && zfs_range_tree_find_in(rt, off, end - off, &s,
+	    &l)) {
+		total += l;
+		off = s + l;
+	}
+	return (total);
+}
+
+static metaslab_t *
+ms_of(spa_t *spa, uint64_t off, uint64_t len)
+{
+	vdev_t *tvd = spa->spa_root_vdev->vdev_child[0];
+
+	VERIFY3U(off >> tvd->vdev_ms_shift, ==,
+	    (off + len - 1) >> tvd->vdev_ms_shift);
+	return (tvd->vdev_ms[off >> tvd->vdev_ms_shift]);
+}
+
+/*
+ * Bytes of [off, off + len) of vdev 0 that a writeable pool holds
+ * allocated: in neither ms_allocatable nor any tree on the way to it.
+ */
+static uint64_t
+live_allocated(spa_t *spa, uint64_t off, uint64_t len)
+{
+	metaslab_t *msp = ms_of(spa, off, len);
+	uint64_t nfree;
+
+	mutex_enter(&msp->ms_lock);
+	VERIFY0(metaslab_load(msp));
+	nfree = tree_overlap(msp->ms_allocatable, off, len) +
+	    tree_overlap(msp->ms_freeing, off, len) +
+	    tree_overlap(msp->ms_freed, off, len) +
+	    tree_overlap(msp->ms_checkpointing, off, len);
+	for (int t = 0; t < TXG_DEFER_SIZE; t++)
+		nfree += tree_overlap(msp->ms_defer[t], off, len);
+	mutex_exit(&msp->ms_lock);
+	return (len - nfree);
+}
+
+static boolean_t
+in_allocatable(spa_t *spa, uint64_t off, uint64_t len)
+{
+	metaslab_t *msp = ms_of(spa, off, len);
+	boolean_t in;
+
+	mutex_enter(&msp->ms_lock);
+	VERIFY0(metaslab_load(msp));
+	in = zfs_range_tree_contains(msp->ms_allocatable, off, len);
+	mutex_exit(&msp->ms_lock);
+	return (in);
+}
+
+/* What the trees of vdev 0 hold allocated, deferred frees included. */
+static uint64_t
+trees_allocated(spa_t *spa)
+{
+	vdev_t *tvd = spa->spa_root_vdev->vdev_child[0];
+	uint64_t total = 0;
+
+	for (uint64_t m = 0; m < tvd->vdev_ms_count; m++) {
+		metaslab_t *msp = tvd->vdev_ms[m];
+
+		mutex_enter(&msp->ms_lock);
+		VERIFY0(metaslab_load(msp));
+		total += msp->ms_size -
+		    zfs_range_tree_space(msp->ms_allocatable);
+		mutex_exit(&msp->ms_lock);
+	}
+	return (total);
+}
+
+static uint64_t
+vs_alloc(spa_t *spa)
+{
+	return (spa->spa_root_vdev->vdev_child[0]->vdev_stat.vs_alloc);
+}
+
+/*
+ * vs_alloc and the trees' count, read with no txg allocating in between
+ * (an import leaves a few txgs of its own work): at most 10 tries.
+ */
+static void
+quiet_alloc(spa_t *spa, uint64_t *vs, uint64_t *trees)
+{
+	for (int i = 0; i < 10; i++) {
+		uint64_t a;
+
+		txg_wait_synced(spa_get_dsl(spa), 0);
+		a = vs_alloc(spa);
+		*trees = trees_allocated(spa);
+		*vs = vs_alloc(spa);
+		if (a == *vs && *vs == *trees)
+			return;
+	}
+}
+
+/* The extents a moved block holds: [O, O + kept) and N. */
+static uint64_t
+held_allocated(spa_t *spa, int i)
+{
+	const raidz_redirect_ent_t *e = &sh->sh_rdm[i].rdm_ent;
+	uint64_t o = DVA_GET_OFFSET(&sh->sh_bp[i].blk_dva[0]);
+	uint64_t n = live_allocated(spa, e->rde_new_offset, e->rde_new_asize);
+
+	if (e->rde_old_reserved != 0)
+		n += live_allocated(spa, o, e->rde_old_reserved);
+	return (n);
+}
+
+static int
+zap_entry(spa_t *spa, int i)
+{
+	vdev_raidz_t *vdrz = spa->spa_root_vdev->vdev_child[0]->vdev_tsd;
+	uint64_t key[2] = { DVA_GET_OFFSET(&sh->sh_bp[i].blk_dva[0]),
+	    BP_GET_PHYSICAL_BIRTH(&sh->sh_bp[i]) };
+	uint64_t val[4];
+
+	if (vdrz->vd_redirect_obj == 0)
+		return (ENOENT);
+	return (zap_lookup_uint64(spa_meta_objset(spa), vdrz->vd_redirect_obj,
+	    key, 2, sizeof (uint64_t), 4, val));
+}
+
+static boolean_t
+mem_entry(spa_t *spa, int i)
+{
+	return (vdev_raidz_redirect_get(spa->spa_root_vdev->vdev_child[0],
+	    DVA_GET_OFFSET(&sh->sh_bp[i].blk_dva[0]),
+	    BP_GET_PHYSICAL_BIRTH(&sh->sh_bp[i]), NULL));
+}
+
+/* Whether move i belongs to an object in the set (by fobj index). */
+static boolean_t
+move_in(int i, const boolean_t *owners)
+{
+	return (sh->sh_owner[i] >= 0 && owners[sh->sh_owner[i]]);
+}
+
+/*
+ * Dirty txg <txg> or a later one with a small write to a scratch object:
+ * spa_sync() skips the deferred frees of a txg that changes nothing.
+ */
+static void
+dirty_txg(spa_t *spa)
+{
+	static uint64_t churn;
+	char buf[512];
+	objset_t *os;
+	dmu_tx_t *tx;
+
+	(void) spa;
+	memset(buf, 0x5a, sizeof (buf));
+	VERIFY0(dmu_objset_own(POOL, DMU_OST_ANY, B_FALSE, B_TRUE, FTAG, &os));
+	tx = dmu_tx_create(os);
+	dmu_tx_hold_write(tx, churn == 0 ? DMU_NEW_OBJECT : churn, 0,
+	    sizeof (buf));
+	VERIFY0(dmu_tx_assign(tx, DMU_TX_WAIT));
+	if (churn == 0) {
+		churn = dmu_object_alloc(os, DMU_OT_PLAIN_FILE_CONTENTS, 0,
+		    DMU_OT_NONE, 0, tx);
+	}
+	dmu_write(os, churn, 0, sizeof (buf), buf, tx, DMU_READ_NO_PREFETCH);
+	dmu_tx_commit(tx);
+	dmu_objset_disown(os, B_TRUE, FTAG);
+}
+
+/*
+ * Wait for the frees of the moves in <owners> to leave memory, from txg
+ * <start> on, at most POLL_TXGS txgs, each one dirtied; the txg of the
+ * last of them as the statistics give it (or the txg the poll saw it in),
+ * 0 if they never did.
+ */
+static uint64_t
+wait_conversions(spa_t *spa, const boolean_t *owners, uint64_t start)
+{
+	dsl_pool_t *dp = spa_get_dsl(spa);
+	uint64_t seen = 0;
+
+	for (uint64_t t = start; t <= start + POLL_TXGS; t++) {
+		boolean_t any = B_FALSE;
+
+		if (t > start)
+			dirty_txg(spa);
+		txg_wait_synced(dp, t);
+		for (int i = 0; i < sh->sh_nmoves; i++) {
+			if (move_in(i, owners) && mem_entry(spa, i))
+				any = B_TRUE;
+		}
+		if (!any) {
+			seen = t;
+			break;
+		}
+	}
+	if (seen == 0) {
+		(void) printf("INFO the redirects never left memory within %d "
+		    "txgs of txg %llu\n", POLL_TXGS, (u_longlong_t)start);
+		return (0);
+	}
+	if (spike_redirect_stats == NULL)
+		return (seen);
+	uint64_t last = 0;
+	for (uint64_t t = start; t <= seen; t++) {
+		spike_redirect_stat_t *rst =
+		    &spike_redirect_stats[t % SPIKE_REDIRECT_TXGS];
+
+		for (int p = 0; rst->rst_txg == t &&
+		    p < SPIKE_REDIRECT_PASSES; p++) {
+			if (rst->rst_freed[p] != 0)
+				last = t;
+		}
+	}
+	(void) printf("INFO the redirects left memory by txg %llu; the last "
+	    "free of a moved block was in txg %llu\n", (u_longlong_t)seen,
+	    (u_longlong_t)last);
+	return (last != 0 ? last : seen);
+}
+
+/* Print what the frees of moved blocks did in txgs [from, to]. */
+static void
+print_stats(uint64_t from, uint64_t to, uint64_t *freed, uint64_t *removed,
+    boolean_t *same_txg)
+{
+	*freed = *removed = 0;
+	*same_txg = B_TRUE;
+	if (spike_redirect_stats == NULL) {
+		(void) printf("INFO this libzpool keeps no statistics of frees "
+		    "of moved blocks\n");
+		return;
+	}
+	for (uint64_t t = from; t <= to; t++) {
+		spike_redirect_stat_t *rst =
+		    &spike_redirect_stats[t % SPIKE_REDIRECT_TXGS];
+		uint64_t f = 0, r = 0;
+		char line[256];
+		int len;
+
+		if (rst->rst_txg != t)
+			continue;
+		len = snprintf(line, sizeof (line), "INFO txg %llu: %llu sync "
+		    "passes; frees by pass", (u_longlong_t)t,
+		    (u_longlong_t)rst->rst_passes);
+		for (int p = 0; p < SPIKE_REDIRECT_PASSES; p++) {
+			len += snprintf(line + len, sizeof (line) - len,
+			    " %llu", (u_longlong_t)rst->rst_freed[p]);
+			f += rst->rst_freed[p];
+		}
+		len += snprintf(line + len, sizeof (line) - len,
+		    "; removals by pass");
+		for (int p = 0; p < SPIKE_REDIRECT_PASSES; p++) {
+			len += snprintf(line + len, sizeof (line) - len,
+			    " %llu", (u_longlong_t)rst->rst_removed[p]);
+			r += rst->rst_removed[p];
+		}
+		(void) printf("%s\n", line);
+		if (f != r)
+			*same_txg = B_FALSE;
+		*freed += f;
+		*removed += r;
+	}
+}
+
+/*
+ * The checks after the frees of the moves in <owners> settled: each entry
+ * gone from memory and from the table, [O, O + kept) and N back in
+ * ms_allocatable, the bytes those extents held all freed, vs_alloc in step
+ * with the trees, and every other object read back.
+ */
+static void
+check_freed(spa_t *spa, const boolean_t *owners, const char *when,
+    uint64_t vs0, uint64_t trees0, uint64_t held0)
+{
+	uint64_t held1 = 0, want = 0;
+	uint64_t vs1, trees1;
+	int remaining = 0;
+
+	for (int i = 0; i < sh->sh_nmoves; i++) {
+		const raidz_redirect_ent_t *e = &sh->sh_rdm[i].rdm_ent;
+		uint64_t o = DVA_GET_OFFSET(&sh->sh_bp[i].blk_dva[0]);
+		int zerr;
+
+		if (!move_in(i, owners)) {
+			remaining++;
+			continue;
+		}
+		zerr = zap_entry(spa, i);
+		check(!mem_entry(spa, i) && zerr == ENOENT, "%s: %s: the "
+		    "entry is gone from memory (%d) and the table (zap %d)",
+		    when, sh->sh_name[i], mem_entry(spa, i), zerr);
+		if (e->rde_old_reserved != 0) {
+			check(in_allocatable(spa, o, e->rde_old_reserved),
+			    "%s: %s: kept [%llx, +%llu) is in ms_allocatable",
+			    when, sh->sh_name[i], (u_longlong_t)o,
+			    (u_longlong_t)e->rde_old_reserved);
+		}
+		check(in_allocatable(spa, e->rde_new_offset, e->rde_new_asize),
+		    "%s: %s: N [%llx, +%llu) is in ms_allocatable", when,
+		    sh->sh_name[i], (u_longlong_t)e->rde_new_offset,
+		    (u_longlong_t)e->rde_new_asize);
+		held1 += held_allocated(spa, i);
+		want += e->rde_old_reserved + e->rde_new_asize;
+	}
+	if (vdev_raidz_redirect_count != NULL) {
+		uint64_t n = vdev_raidz_redirect_count(spa, 0);
+
+		check(n == remaining, "%s: %llu redirects left (expected %d)",
+		    when, (u_longlong_t)n, remaining);
+	}
+	quiet_alloc(spa, &vs1, &trees1);
+	check(held0 - held1 == want, "%s: the moved extents released %llu "
+	    "bytes, old_reserved + new_asize summed over the freed moved DVAs "
+	    "is %llu", when, (u_longlong_t)(held0 - held1),
+	    (u_longlong_t)want);
+	check(vs0 == trees0 && vs1 == trees1, "%s: vs_alloc matches the "
+	    "trees before (%llu, %llu) and after (%llu, %llu)", when,
+	    (u_longlong_t)vs0, (u_longlong_t)trees0, (u_longlong_t)vs1,
+	    (u_longlong_t)trees1);
+	(void) printf("INFO %s: vs_alloc dropped by %lld: %llu in the moved "
+	    "extents, %lld elsewhere (metadata)\n", when,
+	    (longlong_t)(vs0 - vs1), (u_longlong_t)(held0 - held1),
+	    (longlong_t)((vs0 - vs1) - (held0 - held1)));
+}
+
+typedef struct free_args {
+	const char	*fa_case;
+	policy_t	fa_policy;
+	boolean_t	fa_nocheck;	/* spike_redirect_check_enable = 0 */
+} free_args_t;
+
+/*
+ * The free test of one case.  The first free of a dedup or clone pair must
+ * change nothing; the free that drops the last reference converts.  Under
+ * P3 the move happens in this child, right before the free, so that the
+ * old extent is still in a defer tree when the free checks it.
+ */
+static int
+child_free(void *arg)
+{
+	free_args_t *fa = arg;
+	boolean_t owners[MAXOBJS] = { 0 };
+	int first = -1, last;
+	uint64_t vs0, trees0, held0 = 0, start, f_txg;
+	spa_t *spa;
+
+	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+	spa = import_pool();
+	if (fa->fa_policy == P3) {
+		/* Free right after the move: past free_fobjs()'s wait. */
+		txg_wait_synced(spa_get_dsl(spa), spa_first_txg(spa) + 5);
+		move_fobjs(spa, P3);
+	}
+	if (fa->fa_nocheck) {
+		VERIFY3P(&spike_redirect_check_enable, !=, NULL);
+		spike_redirect_check_enable = 0;
+		(void) printf("INFO metaslab_check_free() checks the old "
+		    "extents of moved blocks (spike_redirect_check_enable=0)"
+		    "\n");
+	}
+
+	if (strcmp(fa->fa_case, "plain") == 0) {
+		last = find_fobj("plain-A");
+	} else if (strcmp(fa->fa_case, "dedup") == 0) {
+		first = find_fobj("dedup-D1");
+		last = find_fobj("dedup-D2");
+	} else if (strcmp(fa->fa_case, "clone") == 0) {
+		first = find_fobj("clone-K");
+		last = find_fobj("clone-K2");
+	} else if (strcmp(fa->fa_case, "gang") == 0) {
+		last = find_fobj("gang-G");
+	} else {
+		last = find_fobj("snap-S");
+	}
+	owners[sh->sh_fobj[last].fo_shares >= 0 ?
+	    sh->sh_fobj[last].fo_shares : last] = B_TRUE;
+
+	if (fa->fa_policy != P3) {
+		quiet_alloc(spa, &vs0, &trees0);
+	} else {
+		/* No txg may pass: the old extent is still deferred. */
+		vs0 = vs_alloc(spa);
+		trees0 = trees_allocated(spa);
+	}
+	for (int i = 0; i < sh->sh_nmoves; i++) {
+		if (!move_in(i, owners))
+			continue;
+		check(mem_entry(spa, i) && zap_entry(spa, i) == 0, "before: "
+		    "%s has its entry in memory and in the table",
+		    sh->sh_name[i]);
+		held0 += held_allocated(spa, i);
+		if (fa->fa_policy == P3) {
+			uint64_t o = DVA_GET_OFFSET(&sh->sh_bp[i].blk_dva[0]);
+			uint64_t a = sh->sh_rdm[i].rdm_old_asize;
+
+			check(live_allocated(spa, o, a) == 0, "before: %s: "
+			    "the old extent [%llx, +%llu) is wholly free",
+			    sh->sh_name[i], (u_longlong_t)o, (u_longlong_t)a);
+		}
+	}
+	(void) printf("INFO before: vs_alloc %llu, trees %llu, the moved "
+	    "extents to free hold %llu bytes\n", (u_longlong_t)vs0,
+	    (u_longlong_t)trees0, (u_longlong_t)held0);
+
+	if (first != -1) {
+		uint64_t t = free_fobjs(spa, &first, 1);
+		uint64_t held = 0;
+
+		(void) printf("INFO freed %s in txg %llu\n",
+		    sh->sh_fobj[first].fo_name, (u_longlong_t)t);
+		txg_wait_synced(spa_get_dsl(spa), t + 8);
+		for (int i = 0; i < sh->sh_nmoves; i++) {
+			if (!move_in(i, owners))
+				continue;
+			check(mem_entry(spa, i) && zap_entry(spa, i) == 0,
+			    "after the first free: %s keeps its entry",
+			    sh->sh_name[i]);
+			held += held_allocated(spa, i);
+		}
+		check(held == held0, "after the first free: the moved extents "
+		    "still hold %llu bytes (%llu before)", (u_longlong_t)held,
+		    (u_longlong_t)held0);
+	}
+
+	if (strcmp(fa->fa_case, "snap") == 0) {
+		start = spa_last_synced_txg(spa) + 1;
+		VERIFY0(dsl_destroy_snapshot(SNAP, B_FALSE));
+		sh->sh_fobj[last].fo_gone = B_TRUE;
+		(void) printf("INFO destroyed %s from txg %llu on\n", SNAP,
+		    (u_longlong_t)start);
+	} else {
+		start = free_fobjs(spa, &last, 1);
+		(void) printf("INFO freed %s in txg %llu\n",
+		    sh->sh_fobj[last].fo_name, (u_longlong_t)start);
+	}
+	f_txg = wait_conversions(spa, owners, start);
+	if (f_txg == 0)
+		f_txg = start;
+	txg_wait_synced(spa_get_dsl(spa), f_txg + TXG_DEFER_SIZE);
+	(void) printf("INFO synced txg %llu, TXG_DEFER_SIZE (%d) txgs after "
+	    "%llu\n", (u_longlong_t)(f_txg + TXG_DEFER_SIZE), TXG_DEFER_SIZE,
+	    (u_longlong_t)f_txg);
+	{
+		uint64_t fr, rm;
+		boolean_t same;
+
+		print_stats(start, f_txg, &fr, &rm, &same);
+	}
+	check_freed(spa, owners, "in-process", vs0, trees0, held0);
+
+	export_pool(spa);
+	spa = import_pool();
+	check_freed(spa, owners, "after export and import", vs0, trees0,
+	    held0);
+	check_others_read();
+	export_pool(spa);
+	kernel_fini();
+	return (failures == 0 ? 0 : 1);
+}
+
+/*
+ * Converge: free every moved object in one tx.  Plain blocks are freed in
+ * pass 1; gang and dedup blocks, whose frees go through the free list,
+ * the DDT or (without the log space map) the deferred bpobj of the next
+ * txg, in later passes.  spa_sync() must converge, every key must leave
+ * the table in the txg of its free, and nothing may leak.
+ */
+static int
+child_converge(void *arg)
+{
+	boolean_t owners[MAXOBJS] = { 0 };
+	int f[MAXOBJS], n = 0;
+	uint64_t vs0, trees0, held0 = 0, start, last, fr, rm;
+	boolean_t same;
+	spa_t *spa;
+	objset_t *os;
+
+	(void) arg;
+	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+	spa = import_pool();
+	(void) printf("INFO log space map %s, fast dedup %s\n",
+	    spa_feature_is_active(spa, SPA_FEATURE_LOG_SPACEMAP) ?
+	    "active" : "inactive",
+	    spa_feature_is_enabled(spa, SPA_FEATURE_FAST_DEDUP) ?
+	    "enabled" : "disabled");
+	VERIFY0(dmu_objset_hold(POOL, FTAG, &os));
+	for (int i = 0; i < sh->sh_nfobj; i++) {
+		if (!sh->sh_fobj[i].fo_moved)
+			continue;
+		f[n++] = i;
+		owners[i] = B_TRUE;
+		if (strncmp(sh->sh_fobj[i].fo_name, "dedup-0", 7) == 0) {
+			blkptr_t bp = object_bp(os, sh->sh_fobj[i].fo_obj);
+
+			(void) printf("INFO brt_maybe_exists(%s) = %d\n",
+			    sh->sh_fobj[i].fo_name,
+			    brt_maybe_exists(spa, &bp));
+		}
+	}
+	dmu_objset_rele(os, FTAG);
+	quiet_alloc(spa, &vs0, &trees0);
+	for (int i = 0; i < sh->sh_nmoves; i++)
+		held0 += held_allocated(spa, i);
+
+	start = free_fobjs(spa, f, n);
+	(void) printf("INFO freed %d objects, %d moved blocks, in txg %llu\n",
+	    n, sh->sh_nmoves, (u_longlong_t)start);
+	last = wait_conversions(spa, owners, start);
+	check(last != 0, "every moved block was freed within %d txgs",
+	    POLL_TXGS);
+	if (last == 0)
+		last = start;
+	txg_wait_synced(spa_get_dsl(spa), last + TXG_DEFER_SIZE);
+	print_stats(start, last + 1, &fr, &rm, &same);
+	if (spike_redirect_stats != NULL) {
+		check(fr == sh->sh_nmoves && rm == sh->sh_nmoves, "%llu frees "
+		    "of moved blocks and %llu table removals for %d moved "
+		    "blocks", (u_longlong_t)fr, (u_longlong_t)rm,
+		    sh->sh_nmoves);
+		check(same, "each txg removed from the table exactly the keys "
+		    "of the moved blocks it freed");
+	}
+	check_freed(spa, owners, "in-process", vs0, trees0, held0);
+
+	export_pool(spa);
+	spa = import_pool();
+	check_freed(spa, owners, "after export and import", vs0, trees0,
+	    held0);
+	check_others_read();
+	export_pool(spa);
+	kernel_fini();
+	return (failures == 0 ? 0 : 1);
+}
+
+typedef struct fcrash_args {
+	int		fc_point;
+	boolean_t	fc_late;
+} fcrash_args_t;
+
+/* Child A of fcrash: free plain-A with the crash armed for its txg. */
+static int
+child_fcrash(void *arg)
+{
+	fcrash_args_t *fc = arg;
+	int a = find_fobj("plain-A");
+	uint64_t txg;
+	spa_t *spa;
+
+	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+	spa = import_pool();
+	if (&spike_crash_arm_free != NULL) {
+		spike_crash_point = fc->fc_point;
+		spike_crash_arm_free = 1;
+		if (fc->fc_late)
+			spike_redirect_late_remove = 1;
+	} else if (fc->fc_point != SPIKE_CRASH_POST_UB || fc->fc_late) {
+		(void) printf("SKIP %s cannot be emulated without the free "
+		    "of moved blocks\n", point_names[fc->fc_point]);
+		return (2);
+	}
+	txg = free_fobjs(spa, &a, 1);
+	sh->sh_free_txg = txg;
+	(void) printf("INFO freeing plain-A in txg %llu, crash at %s%s\n",
+	    (u_longlong_t)txg, point_names[fc->fc_point],
+	    fc->fc_late ? ", table updated a txg late" : "");
+	txg_wait_synced(spa_get_dsl(spa), txg);
+	if (&spike_crash_arm_free == NULL) {
+		(void) printf("INFO the free's txg has synced; exiting as a "
+		    "crash after its uberblock would\n");
+		_exit(99);
+	}
+	txg_wait_synced(spa_get_dsl(spa), txg + TXG_DEFER_SIZE + 1);
+	(void) printf("FAIL the free returned without reaching %s\n",
+	    point_names[fc->fc_point]);
+	return (1);
+}
+
+/* Child B of fcrash: a fresh read-only import of the crashed pool. */
+static int
+child_fverify(void *arg)
+{
+	boolean_t committed = *(boolean_t *)arg;
+	int a = find_fobj("plain-A");
+	uint64_t f_txg = sh->sh_free_txg;
+	uint64_t hits;
+	objset_t *os;
+	spa_t *spa;
+	int err, st;
+
+	spa_mode_readable_spacemaps = B_TRUE;
+	kernel_init(SPA_MODE_READ);
+	spa = import_pool();
+	VERIFY(!spa_writeable(spa));
+	(void) printf("INFO read-only import at txg %llu; expecting the "
+	    "state %s the free\n", (u_longlong_t)spa_last_synced_txg(spa),
+	    committed ? "after" : "before");
+	check(committed ? spa_last_synced_txg(spa) >= f_txg :
+	    spa_last_synced_txg(spa) < f_txg, "B the newest uberblock, txg "
+	    "%llu, is %s the free's txg %llu",
+	    (u_longlong_t)spa_last_synced_txg(spa),
+	    committed ? "at or after" : "before", (u_longlong_t)f_txg);
+
+	VERIFY0(dmu_objset_hold(POOL, FTAG, &os));
+	err = dmu_object_info(os, sh->sh_fobj[a].fo_obj, NULL);
+	dmu_objset_rele(os, FTAG);
+	check(committed ? err == ENOENT : err == 0, "B plain-A %s (%d)",
+	    committed ? "is gone" : "still exists", err);
+
+	if (vdev_raidz_redirect_count != NULL) {
+		int nmine = 0;
+		uint64_t n = vdev_raidz_redirect_count(spa, 0);
+
+		for (int i = 0; i < sh->sh_nmoves; i++)
+			nmine += (sh->sh_owner[i] == a);
+		check(n == sh->sh_nmoves - (committed ? nmine : 0), "B %llu "
+		    "redirects loaded (expected %d)", (u_longlong_t)n,
+		    sh->sh_nmoves - (committed ? nmine : 0));
+	}
+	build_free_trees(spa);
+	for (int i = 0; i < sh->sh_nmoves; i++) {
+		const raidz_redirect_ent_t *e = &sh->sh_rdm[i].rdm_ent;
+		uint64_t o = DVA_GET_OFFSET(&sh->sh_bp[i].blk_dva[0]);
+		int want = committed ? 1 : 0;
+
+		if (sh->sh_owner[i] != a)
+			continue;
+		check(mem_entry(spa, i) == !committed, "B %s: entry %s",
+		    sh->sh_name[i], committed ? "gone" : "present");
+		if (e->rde_old_reserved != 0) {
+			st = range_state(spa, o, e->rde_old_reserved);
+			check(st == want, "B %s: kept [%llx, +%llu) %s",
+			    sh->sh_name[i], (u_longlong_t)o,
+			    (u_longlong_t)e->rde_old_reserved, state_name(st));
+		}
+		st = range_state(spa, e->rde_new_offset, e->rde_new_asize);
+		check(st == want, "B %s: N [%llx, +%llu) %s", sh->sh_name[i],
+		    (u_longlong_t)e->rde_new_offset,
+		    (u_longlong_t)e->rde_new_asize, state_name(st));
+	}
+	if (!committed) {
+		boolean_t match;
+
+		hits = vdev_raidz_redirect_hits();
+		err = read_fobj(a, &match);
+		hits = vdev_raidz_redirect_hits() - hits;
+		check(err == 0 && match && hits == 1, "B plain-A reads back "
+		    "bit-exact through its redirect (err=%d match=%d "
+		    "hits=%llu)", err, match, (u_longlong_t)hits);
+	}
+	sh->sh_fobj[a].fo_gone = B_TRUE;
+	check_others_read();
+	spa_close(spa, FTAG);
+	kernel_fini();
+	return (failures == 0 ? 0 : 1);
+}
+
+static int
+setup_free_fn(void *arg)
+{
+	(void) arg;
+	return (child_setup_free());
+}
+
+static int
+setup_converge_fn(void *arg)
+{
+	(void) arg;
+	return (child_setup_converge());
+}
+
+static int
+run_free(const char *which, policy_t policy, boolean_t nocheck)
+{
+	free_args_t fa = { which, policy, nocheck };
+	int st;
+
+	(void) printf("INFO free %s, policy %s, ashift %llu%s\n", which,
+	    policy_names[policy], (u_longlong_t)ashift,
+	    nocheck ? ", nocheck" : "");
+	VERIFY0(phase("0 setup", setup_free_fn, NULL));
+	if (policy != P3) {
+		st = phase("1 move", child_move_fobjs, &policy);
+		check(st == 0, "the move phase passes (status %d)", st);
+	}
+	st = phase("2 free", child_free, &fa);
+	check(st == 0, "the free phase passes (status %d)", st);
+	run_zdb();
+	return (0);
+}
+
+static int
+run_fcrash(int point, policy_t policy, boolean_t late)
+{
+	fcrash_args_t fc = { point, late };
+	boolean_t committed = (point == SPIKE_CRASH_POST_UB);
+	int st;
+
+	(void) printf("INFO fcrash, crash at %s, policy %s, ashift %llu%s\n",
+	    point_names[point], policy_names[policy], (u_longlong_t)ashift,
+	    late ? ", late table removal" : "");
+	VERIFY0(phase("0 setup", setup_free_fn, NULL));
+	st = phase("1 move", child_move_fobjs, &policy);
+	check(st == 0, "the move phase passes (status %d)", st);
+	st = phase("A free", child_fcrash, &fc);
+	if (st == 2)
+		return (2);
+	check(st == 99, "A exits at the crash point (status %d)", st);
+	st = phase("B verify", child_fverify, &committed);
+	check(st == 0, "B finds the state %s the free (status %d)",
+	    committed ? "after" : "before", st);
+	run_zdb();
+	return (0);
+}
+
+static int
+run_converge(policy_t policy, boolean_t nolog)
+{
+	int st;
+
+	(void) printf("INFO converge, policy %s, ashift %llu, %s\n",
+	    policy_names[policy], (u_longlong_t)ashift,
+	    nolog ? "no log space map" : "log space map");
+	skip_features[0] = "fast_dedup";
+	skip_features[1] = nolog ? "log_spacemap" : NULL;
+	VERIFY0(phase("0 setup", setup_converge_fn, NULL));
+	st = phase("1 move", child_move_fobjs, &policy);
+	check(st == 0, "the move phase passes (status %d)", st);
+	st = phase("2 free", child_converge, NULL);
+	check(st == 0, "the free phase passes (status %d)", st);
+	run_zdb();
+	return (0);
+}
+
 static int
 parse_point(const char *s)
 {
@@ -1023,43 +2251,89 @@ parse_point(const char *s)
 	return (-1);
 }
 
+static int
+parse_policy(const char *s, boolean_t p3)
+{
+	if (strcmp(s, "P1") == 0)
+		return (P1);
+	if (strcmp(s, "P2") == 0)
+		return (P2);
+	if (p3 && strcmp(s, "P3") == 0)
+		return (P3);
+	return (-1);
+}
+
+static int
+usage(void)
+{
+	(void) fprintf(stderr, "usage: crash_probe <dir> <ashift> move "
+	    "<TABLE_DIRTY|MS_SYNCED|PRE_UB|POST_UB> <P1|P2> [split]\n"
+	    "       crash_probe <dir> <ashift> guard "
+	    "<mos|zil|stale|checkpoint>\n"
+	    "       crash_probe <dir> <ashift> free "
+	    "<plain|dedup|clone|gang|snap> <P1|P2> | free plain P3 "
+	    "[nocheck]\n"
+	    "       crash_probe <dir> <ashift> fcrash "
+	    "<TABLE_DIRTY|MS_SYNCED|PRE_UB|POST_UB> <P1|P2> [late]\n"
+	    "       crash_probe <dir> <ashift> converge <P1|P2> [nolog]\n");
+	return (2);
+}
+
 int
 main(int argc, char **argv)
 {
+	const char *mode = argc >= 4 ? argv[3] : "";
+	const char *opt = argc >= 7 ? argv[6] : NULL;
 	int point = -1;
-	policy_t policy = P1;
+	int policy = -1;
 	int st;
 
 	(void) setvbuf(stdout, NULL, _IOLBF, 0);
-	if (argc >= 6 && strcmp(argv[3], "move") == 0) {
-		point = parse_point(argv[4]);
-		if (strcmp(argv[5], "P2") == 0)
-			policy = P2;
-		else if (strcmp(argv[5], "P1") != 0)
-			point = -1;
-		if (argc == 7 && strcmp(argv[6], "split") != 0)
-			point = -1;
-	}
-	if (!((point != -1 && argc <= 7) || (argc == 5 &&
-	    strcmp(argv[3], "guard") == 0 && (strcmp(argv[4], "mos") == 0 ||
-	    strcmp(argv[4], "zil") == 0 || strcmp(argv[4], "stale") == 0 ||
-	    strcmp(argv[4], "checkpoint") == 0)))) {
-		(void) fprintf(stderr, "usage: crash_probe <dir> <ashift> move "
-		    "<TABLE_DIRTY|MS_SYNCED|PRE_UB|POST_UB> <P1|P2> [split]\n"
-		    "       crash_probe <dir> <ashift> guard "
-		    "<mos|zil|stale|checkpoint>\n");
-		return (2);
-	}
+	if (argc < 5 || argc > 7)
+		return (usage());
 	dir = argv[1];
 	ashift = strtoull(argv[2], NULL, 10);
 	sh = mmap(NULL, sizeof (*sh), PROT_READ | PROT_WRITE,
 	    MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 	VERIFY3P(sh, !=, MAP_FAILED);
 
-	if (point != -1)
-		st = run_move(point, policy, argc == 7);
-	else
+	if (strcmp(mode, "move") == 0 && argc >= 6) {
+		point = parse_point(argv[4]);
+		policy = parse_policy(argv[5], B_FALSE);
+		if (point == -1 || policy == -1 ||
+		    (opt != NULL && strcmp(opt, "split") != 0))
+			return (usage());
+		st = run_move(point, policy, opt != NULL);
+	} else if (strcmp(mode, "guard") == 0 && argc == 5 &&
+	    (strcmp(argv[4], "mos") == 0 || strcmp(argv[4], "zil") == 0 ||
+	    strcmp(argv[4], "stale") == 0 ||
+	    strcmp(argv[4], "checkpoint") == 0)) {
 		st = run_guard(argv[4]);
+	} else if (strcmp(mode, "free") == 0 && argc >= 6 &&
+	    (strcmp(argv[4], "plain") == 0 || strcmp(argv[4], "dedup") == 0 ||
+	    strcmp(argv[4], "clone") == 0 || strcmp(argv[4], "gang") == 0 ||
+	    strcmp(argv[4], "snap") == 0)) {
+		policy = parse_policy(argv[5], strcmp(argv[4], "plain") == 0);
+		if (policy == -1 ||
+		    (opt != NULL && strcmp(opt, "nocheck") != 0))
+			return (usage());
+		st = run_free(argv[4], policy, opt != NULL);
+	} else if (strcmp(mode, "fcrash") == 0 && argc >= 6) {
+		point = parse_point(argv[4]);
+		policy = parse_policy(argv[5], B_FALSE);
+		if (point == -1 || policy == -1 ||
+		    (opt != NULL && strcmp(opt, "late") != 0))
+			return (usage());
+		st = run_fcrash(point, policy, opt != NULL);
+	} else if (strcmp(mode, "converge") == 0 && argc <= 6) {
+		policy = parse_policy(argv[4], B_FALSE);
+		if (policy == -1 ||
+		    (argc == 6 && strcmp(argv[5], "nolog") != 0))
+			return (usage());
+		st = run_converge(policy, argc == 6);
+	} else {
+		return (usage());
+	}
 	if (st == 2) {
 		(void) printf("SKIP: not run on this libzpool\n");
 		return (2);

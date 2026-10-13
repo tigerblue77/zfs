@@ -4407,6 +4407,8 @@ vdev_sync(vdev_t *vd, uint64_t txg)
 
 	ASSERT3U(txg, ==, spa->spa_syncing_txg);
 	dmu_tx_t *tx = dmu_tx_create_assigned(spa->spa_dsl_pool, txg);
+	/* SPIKE: drop the redirects of moved blocks freed in this txg. */
+	vdev_raidz_redirect_sync(vd, tx);
 	if (zfs_range_tree_space(vd->vdev_obsolete_segments) > 0) {
 		ASSERT(vd->vdev_removing ||
 		    vd->vdev_ops == &vdev_indirect_ops);

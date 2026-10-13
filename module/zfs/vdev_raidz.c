@@ -2402,11 +2402,16 @@ vdev_raidz_layout_for_alloc(vdev_raidz_t *vdrz, uint64_t txg)
  * block pointers are not changed: I/O to the old DVA of a moved block is
  * sent to its new extent.  vdev_raidz_load() reads the vdev's table into
  * vd_redirects, and vdev_raidz_redirect_move() adds to both in the txg that
- * moves the block.  Nothing removes an entry yet.
+ * moves the block.  When the block is freed, vdev_raidz_redirect_remove()
+ * takes its entry out of memory and vdev_raidz_redirect_sync() out of the
+ * table, in the txg of the free.
  */
 typedef struct raidz_redirect_node {
 	avl_node_t rdn_link;
+	list_node_t rdn_pending;	/* on vd_redirect_pending once freed */
 	raidz_redirect_ent_t rdn_ent;
+	uint64_t rdn_free_txg;
+	uint64_t rdn_free_pass;
 } raidz_redirect_node_t;
 
 static volatile uint64_t raidz_redirect_hit_count;
@@ -2509,6 +2514,9 @@ vdev_raidz_redirect_destroy(vdev_raidz_t *vdrz)
 	void *cookie = NULL;
 
 	while ((rdn = avl_destroy_nodes(&vdrz->vd_redirects, &cookie)) != NULL)
+		kmem_free(rdn, sizeof (*rdn));
+	/* Only a txg that never synced leaves keys here. */
+	while ((rdn = list_remove_head(&vdrz->vd_redirect_pending)) != NULL)
 		kmem_free(rdn, sizeof (*rdn));
 }
 
@@ -2616,6 +2624,125 @@ vdev_raidz_redirect_persist(vdev_t *vd, const raidz_redirect_ent_t *ent,
 	VERIFY0(zap_add_uint64(mos, vdrz->vd_redirect_obj, key, 2,
 	    sizeof (uint64_t), 4, val, tx));
 	vdev_raidz_redirect_insert(vd, ent);
+}
+
+/*
+ * SPIKE: called by metaslab_free_dva() for each DVA it frees.  B_TRUE if the
+ * block of the raidz vdev vd whose DVA starts at offset, born in txg birth,
+ * was moved: its entry, returned in *ent, leaves memory now and the table in
+ * this txg (the vdev is dirtied so that vdev_sync() removes the key), and
+ * the caller frees [O, O + old_reserved) and N instead of the old extent.
+ * Every decision to free (DDT, BRT, gang trees, deadlists) is taken above
+ * metaslab_free_dva() with the bp unchanged, so each moved DVA comes here
+ * exactly once.
+ */
+boolean_t
+vdev_raidz_redirect_remove(vdev_t *vd, uint64_t offset, uint64_t birth,
+    raidz_redirect_ent_t *ent)
+{
+	spa_t *spa;
+	uint64_t txg;
+	vdev_raidz_t *vdrz;
+	raidz_redirect_node_t search;
+	raidz_redirect_node_t *rdn;
+
+	/* Most frees match nothing: look as a reader first. */
+	if (!vdev_raidz_redirect_get(vd, offset, birth, NULL))
+		return (B_FALSE);
+	spa = vd->vdev_spa;
+	txg = spa_syncing_txg(spa);
+	vdrz = vd->vdev_tsd;
+	search.rdn_ent.rde_offset = offset;
+	search.rdn_ent.rde_birth = birth;
+	rw_enter(&vdrz->vd_redirect_lock, RW_WRITER);
+	rdn = avl_find(&vdrz->vd_redirects, &search, NULL);
+	if (rdn != NULL) {
+		avl_remove(&vdrz->vd_redirects, rdn);
+		rdn->rdn_free_txg = txg;
+		rdn->rdn_free_pass = spa_sync_pass(spa);
+		list_insert_tail(&vdrz->vd_redirect_pending, rdn);
+		*ent = rdn->rdn_ent;
+	}
+	rw_exit(&vdrz->vd_redirect_lock);
+	if (rdn == NULL)
+		return (B_FALSE);
+
+	vdev_dirty(vd, 0, NULL, txg);
+	/* SPIKE: a test may arm the crash points for this txg. */
+	if (spike_crash_arm_free) {
+		spike_crash_arm_free = 0;
+		spike_crash_txg = txg;
+	}
+	return (B_TRUE);
+}
+
+static spike_redirect_stat_t *
+spike_redirect_stat(uint64_t txg)
+{
+	spike_redirect_stat_t *rst =
+	    &spike_redirect_stats[txg % SPIKE_REDIRECT_TXGS];
+
+	if (rst->rst_txg != txg) {
+		memset(rst, 0, sizeof (*rst));
+		rst->rst_txg = txg;
+	}
+	return (rst);
+}
+
+/*
+ * SPIKE: called by vdev_sync() in every sync pass.  Removes from the table
+ * the keys of the moved blocks freed since the last call, so that the table
+ * and the metaslab frees commit under the same uberblock.  A free never
+ * allocates, and the table is in the MOS, whose blocks are never moved, so
+ * these removals free nothing that comes back here: spa_sync() converges.
+ */
+void
+vdev_raidz_redirect_sync(vdev_t *vd, dmu_tx_t *tx)
+{
+	spa_t *spa = vd->vdev_spa;
+	objset_t *mos = spa->spa_meta_objset;
+	uint64_t txg = dmu_tx_get_txg(tx);
+	uint64_t pass = MIN(MAX(spa_sync_pass(spa), 1), SPIKE_REDIRECT_PASSES);
+	vdev_raidz_t *vdrz;
+	raidz_redirect_node_t *rdn;
+	list_t todo;
+
+	if (vd->vdev_ops != &vdev_raidz_ops)
+		return;
+	vdrz = vd->vdev_tsd;
+	list_create(&todo, sizeof (raidz_redirect_node_t),
+	    offsetof(raidz_redirect_node_t, rdn_pending));
+	rw_enter(&vdrz->vd_redirect_lock, RW_WRITER);
+	list_move_tail(&todo, &vdrz->vd_redirect_pending);
+	rw_exit(&vdrz->vd_redirect_lock);
+	if (list_is_empty(&todo)) {
+		list_destroy(&todo);
+		return;
+	}
+
+	/* zap_remove() may read the MOS: no lock held here. */
+	while ((rdn = list_remove_head(&todo)) != NULL) {
+		uint64_t key[2] = { rdn->rdn_ent.rde_offset,
+		    rdn->rdn_ent.rde_birth };
+
+		/* SPIKE: test-only, remove the key one txg late. */
+		if (spike_redirect_late_remove && rdn->rdn_free_txg == txg) {
+			rw_enter(&vdrz->vd_redirect_lock, RW_WRITER);
+			list_insert_tail(&vdrz->vd_redirect_pending, rdn);
+			rw_exit(&vdrz->vd_redirect_lock);
+			vdev_dirty(vd, 0, NULL, txg + 1);
+			continue;
+		}
+		VERIFY(spike_redirect_late_remove || rdn->rdn_free_txg == txg);
+		VERIFY0(zap_remove_uint64(mos, vdrz->vd_redirect_obj, key, 2,
+		    tx));
+		spike_redirect_stat(rdn->rdn_free_txg)->rst_freed[MIN(MAX(
+		    rdn->rdn_free_pass, 1), SPIKE_REDIRECT_PASSES) - 1]++;
+		spike_redirect_stat(txg)->rst_removed[pass - 1]++;
+		kmem_free(rdn, sizeof (*rdn));
+	}
+	list_destroy(&todo);
+	spike_crash_check(spa, txg, SPIKE_CRASH_TABLE_DIRTY);
 }
 
 /*
@@ -6182,6 +6309,18 @@ uint64_t spike_redirect_claim_delta = 0;
 int spike_redirect_claim_enable = 1;
 
 /*
+ * SPIKE, not for merge: test-only switches of the free of moved blocks.
+ * spike_redirect_check_enable = 0 makes metaslab_check_free() check a moved
+ * block's old extent again; spike_redirect_late_remove removes its key from
+ * the table a txg after its frees; spike_crash_arm_free arms the crash
+ * points for the txg of the next free of a moved block.
+ */
+int spike_redirect_check_enable = 1;
+int spike_redirect_late_remove = 0;
+int spike_crash_arm_free = 0;
+spike_redirect_stat_t spike_redirect_stats[SPIKE_REDIRECT_TXGS];
+
+/*
  * SPIKE, not for merge: test-only crash points.  A test sets
  * spike_crash_point, and spike_crash_txg or lets the move arm it with its own
  * txg; the process then exits with status 99 at that point of that txg.
@@ -6192,6 +6331,12 @@ int spike_crash_point = SPIKE_CRASH_NONE;
 void
 spike_crash_check(spa_t *spa, uint64_t txg, int point)
 {
+	/* SPIKE: POST_UB comes right after spa_sync() converged. */
+	if (point == SPIKE_CRASH_POST_UB &&
+	    spike_redirect_stats[txg % SPIKE_REDIRECT_TXGS].rst_txg == txg) {
+		spike_redirect_stats[txg % SPIKE_REDIRECT_TXGS].rst_passes =
+		    spa_sync_pass(spa);
+	}
 	if (point != spike_crash_point || txg != spike_crash_txg || txg == 0)
 		return;
 	cmn_err(CE_NOTE, "%s: spike crash point %d in txg %llu",
@@ -6732,6 +6877,8 @@ vdev_raidz_init(spa_t *spa, nvlist_t *nv, void **tsd)
 	avl_create(&vdrz->vd_redirects, vdev_raidz_redirect_compare,
 	    sizeof (raidz_redirect_node_t),
 	    offsetof(raidz_redirect_node_t, rdn_link));
+	list_create(&vdrz->vd_redirect_pending, sizeof (raidz_redirect_node_t),
+	    offsetof(raidz_redirect_node_t, rdn_pending));
 	rw_init(&vdrz->vd_redirect_lock, NULL, RW_DEFAULT, NULL);
 
 	vdrz->vd_physical_width = children;
@@ -6831,6 +6978,7 @@ vdev_raidz_fini(vdev_t *vd)
 	mutex_destroy(&vdrz->vd_expand_lock);
 	vdev_raidz_redirect_destroy(vdrz);
 	avl_destroy(&vdrz->vd_redirects);
+	list_destroy(&vdrz->vd_redirect_pending);
 	rw_destroy(&vdrz->vd_redirect_lock);
 	if (vdrz->vd_parity_epochs != NULL) {
 		kmem_free(vdrz->vd_parity_epochs,

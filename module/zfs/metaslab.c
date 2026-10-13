@@ -5847,6 +5847,17 @@ metaslab_unalloc_dva(spa_t *spa, const dva_t *dva, uint64_t txg)
 }
 
 /*
+ * SPIKE: whether a free of space allocated in txg birth must be kept for the
+ * checkpoint, the rule metaslab_free() applies to a whole bp.
+ */
+static boolean_t
+metaslab_free_is_checkpointed(spa_t *spa, uint64_t birth)
+{
+	return (birth <= spa->spa_checkpoint_txg &&
+	    spa_syncing_txg(spa) > spa->spa_checkpoint_txg);
+}
+
+/*
  * Free the block represented by the given DVA.
  */
 void
@@ -5863,6 +5874,25 @@ metaslab_free_dva(spa_t *spa, const dva_t *dva, uint64_t birth,
 
 	if (DVA_GET_GANG(dva)) {
 		size = vdev_gang_header_asize(vd, birth);
+	}
+
+	/*
+	 * SPIKE, not for merge: a moved raidz block holds [O, O + kept) of
+	 * its old extent and its new extent N, whatever its DVA says: free
+	 * those, each checkpointed by its own birth, and drop the redirect in
+	 * this txg.  A frozen pool frees nothing and keeps the redirect.
+	 */
+	raidz_redirect_ent_t rde;
+	if (spa_syncing_txg(spa) <= spa_freeze_txg(spa) &&
+	    vdev_raidz_redirect_remove(vd, offset, birth, &rde)) {
+		ASSERT3U(rde.rde_old_reserved, <=, size);
+		if (rde.rde_old_reserved != 0) {
+			metaslab_free_impl(vd, offset, rde.rde_old_reserved,
+			    metaslab_free_is_checkpointed(spa, birth));
+		}
+		metaslab_free_impl(vd, rde.rde_new_offset, rde.rde_new_asize,
+		    metaslab_free_is_checkpointed(spa, rde.rde_new_birth));
+		return;
 	}
 
 	metaslab_free_impl(vd, offset, size, checkpoint);
@@ -6170,6 +6200,10 @@ metaslab_free(spa_t *spa, const blkptr_t *bp, uint64_t txg, boolean_t now)
 
 	for (int d = 0; d < ndvas; d++) {
 		if (now) {
+			/* SPIKE: only a block born in this txg; none moved. */
+			ASSERT(!vdev_raidz_redirect_lookup(spa,
+			    DVA_GET_VDEV(&dva[d]), DVA_GET_OFFSET(&dva[d]),
+			    BP_GET_PHYSICAL_BIRTH(bp)));
 			metaslab_unalloc_dva(spa, &dva[d], txg);
 		} else {
 			ASSERT3U(txg, ==, spa_syncing_txg(spa));
@@ -6293,6 +6327,23 @@ metaslab_check_free(spa_t *spa, const blkptr_t *bp)
 			    BP_GET_PHYSICAL_BIRTH(bp));
 
 		ASSERT3P(vd, !=, NULL);
+
+		/*
+		 * SPIKE: a moved raidz block holds [O, O + kept) and N, which
+		 * metaslab_free_dva() will free, not its old extent.
+		 */
+		raidz_redirect_ent_t rde;
+		if (spike_redirect_check_enable &&
+		    vdev_raidz_redirect_get(vd, offset,
+		    BP_GET_PHYSICAL_BIRTH(bp), &rde)) {
+			if (rde.rde_old_reserved != 0) {
+				metaslab_check_free_impl(vd, offset,
+				    rde.rde_old_reserved);
+			}
+			metaslab_check_free_impl(vd, rde.rde_new_offset,
+			    rde.rde_new_asize);
+			continue;
+		}
 
 		metaslab_check_free_impl(vd, offset, size);
 	}

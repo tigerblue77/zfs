@@ -5,7 +5,8 @@ blocks of a RAID-Z vdev written before a parity change, including blocks
 that snapshots still reference, without changing any block pointer.
 
 `module/zfs/vdev_raidz.c` keeps a redirect table per raidz vdev (step 3
-kept it in memory; step 5 makes it persistent).  An entry maps a block, by
+kept it in memory; step 5 makes it persistent and drops an entry when its
+block is freed).  An entry maps a block, by
 its DVA offset and physical birth, to a new extent re-encoded with the
 layout of a later txg.  `vdev_raidz_io_start()` sends the I/O there
 (offset, layout and `io_txg`), and `vdev_raidz_io_verify()` checks the map
@@ -130,6 +131,68 @@ zdb without its knowledge of moved blocks reports N leaked, those claim
 errors, or the table object leaked.  `redirect_probe` gives the step 3 and
 step 4 results unchanged.
 
-Not covered: freeing a moved block (next part), a checkpoint-aware move,
-resilver and DTL handling beyond the children's own DTL checks, kernel
-builds, and scale.
+## Step 5, part B: freeing a moved block
+
+Every decision to free a block (the DDT's refcount, the BRT's, gang trees,
+deadlists, the free list and the deferred bpobj) is taken above
+`metaslab_free_dva()` with the block pointer unchanged, and that function
+already receives the physical birth.  There, a raidz DVA whose {offset,
+birth} has an entry is converted: `vdev_raidz_redirect_remove()` takes the
+entry out of memory and queues its key, and the caller frees
+[O, O + old_reserved) and N instead of the old extent, each checkpointed by
+its own birth (t1 and t2; no test takes a checkpoint).  A frozen pool frees
+nothing and keeps the entry.  The vdev is dirtied for the syncing txg, and
+`vdev_raidz_redirect_sync()`, called by `vdev_sync()` in every pass, removes
+the queued keys from the table, so the frees and the removal commit under
+the same uberblock.  `metaslab_check_free()` checks [O, O + old_reserved)
+and N for a moved DVA, and the now=TRUE path asserts that no redirect
+matches.
+
+    crash_probe <dir> <ashift> free <plain|dedup|clone|gang|snap> <P1|P2>
+    crash_probe <dir> <ashift> free plain P3 [nocheck]
+    crash_probe <dir> <ashift> fcrash <TABLE_DIRTY|MS_SYNCED|PRE_UB|POST_UB> <P1|P2> [late]
+    crash_probe <dir> <ashift> converge <P1|P2> [nolog]
+
+`free` moves a plain object, the block of a dedup pair (refcount 2), the
+block of a clone pair (one BRT reference), a gang header and its children,
+and a block that only a snapshot holds, then frees one case.  The first
+free of a pair must change nothing; after the free that converts, its txg
+and TXG_DEFER_SIZE more, and again after an export and import, each freed
+moved DVA's entry is gone from memory and from the ZAP, [O, O +
+old_reserved) and N are in `ms_allocatable`, the bytes those extents held
+dropped by exactly old_reserved + new_asize each, vs_alloc agrees with the
+metaslab trees, every other object reads back, and zdb finds no leak.
+`fcrash` frees the plain object with the crash points armed for the txg of
+the free (`spike_crash_arm_free`): before POST_UB a fresh read-only import
+finds the object, its entry and its extents, and reads it through the
+redirect; at POST_UB all are gone; zdb is clean at every point.
+`converge` frees 38 moved blocks of plain, dedup and gang objects in one
+tx, with or without the log space map, and prints from
+`spike_redirect_stats` how many were freed and removed in each sync pass.
+
+At ashift 12 and 9 all of these pass under P1 and P2.  The plain, gang,
+clone and snapshot frees convert in pass 1; the dedup block converts in
+pass 2, after the DDT drops its last reference.  In `converge`, with the
+log space map, 30 blocks convert in pass 1 and the 8 dedup blocks in pass 2
+of the same txg, which takes 3 or 4 passes; without it, the 8 dedup frees
+go to the deferred bpobj and convert in pass 1 of the next txg, after
+`vdev_sync()`, and leave the table in its pass 2 (4 passes).  Each key
+leaves the table in the txg of its free.  A free parked in the deferred
+bpobj waits for a txg that changes something (`spa_sync()` skips the
+deferred frees of a no-op txg); the probe dirties each txg it waits for.
+
+On the previous step's code, freeing a moved block frees its old extent
+and nothing else: under P1, N leaks (zdb: `leaked space` at N) and the
+entry stays; under P2, the tail freed by the move is freed again, and the
+debug build aborts in `metaslab_sync_done()` when the defer tree is vacated
+into `ms_allocatable` (`adding segment ... overlapping`), or, after a crash
+at POST_UB, zdb aborts loading the metaslab (`removing segment ... not
+completely overlapped`).  `spike_redirect_late_remove` removes the key a
+txg after the frees: F(POST_UB) then finds the entry of a freed block.
+P3 keeps nothing, so a legitimate free of a moved block finds the whole old
+extent free; with `nocheck` (`spike_redirect_check_enable = 0`) or on the
+previous code, `metaslab_check_free()` aborts (`segment already in tree`).
+
+Not covered: a checkpoint-aware move or free (the flags are computed, never
+exercised), a frozen pool, resilver and DTL handling beyond the children's
+own DTL checks, kernel builds, and scale.
