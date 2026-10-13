@@ -523,6 +523,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/anyraid/anyraid_encryption_001_pos.ksh \
 	functional/anyraid/anyraid_faildisk_write_replace_resilver.ksh \
 	functional/anyraid/anyraid_gang_blocks_001_pos.ksh \
+	functional/anyraid/anyraid_initialize_tile_end.ksh \
 	functional/anyraid/anyraid_offline_anymirror_001_pos.ksh \
 	functional/anyraid/anyraid_offline_anymirror_002_neg.ksh \
 	functional/anyraid/anyraid_offline_anyraidz_001_pos.ksh \
