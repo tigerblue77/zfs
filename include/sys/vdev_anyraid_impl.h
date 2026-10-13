@@ -170,6 +170,15 @@ _Static_assert(sizeof (relocate_task_phys_t) == 32,
 #define	VDEV_ANYRAID_HEADER_CUR_TASK	"cur_task"
 #define	VDEV_ANYRAID_HEADER_CONTRACTING_LEAF	"contracting_leaf"
 
+/*
+ * vd_checkpoint_tile holds the last tile mapped when the checkpoint was
+ * taken, and the tiles after it are dropped when the pool rewinds to it.
+ * A vdev with no checkpoint holds VDEV_ANYRAID_CHECKPOINT_NONE, and one
+ * that had no tile mapped yet VDEV_ANYRAID_CHECKPOINT_EMPTY.
+ */
+#define	VDEV_ANYRAID_CHECKPOINT_NONE	UINT32_MAX
+#define	VDEV_ANYRAID_CHECKPOINT_EMPTY	(UINT32_MAX - 1)
+
 #define	VART_TILE		"tile"
 #define	VART_SOURCE_DISK	"source_disk"
 #define	VART_SOURCE_OFF		"source_off"

@@ -10389,7 +10389,9 @@ zdb_dump_anyraid_map_vdev(vdev_t *vd, int verbosity)
 	    "tile_size", (u_longlong_t)va->vd_tile_size);
 	(void) printf("\t%-8s%8llu", "tiles",
 	    (u_longlong_t)avl_numnodes(&va->vd_tile_map));
-	if (va->vd_checkpoint_tile != UINT32_MAX) {
+	if (va->vd_checkpoint_tile == VDEV_ANYRAID_CHECKPOINT_EMPTY) {
+		(void) printf(".  %-12s %10s\n", "checkpoint tile", "none");
+	} else if (va->vd_checkpoint_tile != VDEV_ANYRAID_CHECKPOINT_NONE) {
 		(void) printf(".  %-12s %10u\n", "checkpoint tile",
 		    va->vd_checkpoint_tile);
 	} else {

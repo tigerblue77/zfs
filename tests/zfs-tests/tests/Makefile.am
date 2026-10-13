@@ -484,6 +484,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/alloc_class/cleanup.ksh \
 	functional/alloc_class/setup.ksh \
 	functional/anyraid/anyraid_checkpoint.ksh \
+	functional/anyraid/anyraid_checkpoint_empty_vdev.ksh \
 	functional/anyraid/anyraid_clean_mirror_001_pos.ksh \
 	functional/anyraid/anyraid_clean_mirror_002_pos.ksh \
 	functional/anyraid/anyraid_clean_mirror_003_pos.ksh \

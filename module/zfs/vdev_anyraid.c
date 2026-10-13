@@ -281,6 +281,18 @@ vdev_anyraid_header_offset(vdev_t *vd, int id)
 		    (VDEV_ANYRAID_MAP_COPIES - id) * full_size);
 }
 
+/*
+ * Whether a tile was mapped after the checkpoint, so that rewinding to it
+ * drops the tile.
+ */
+static inline boolean_t
+anyraid_tile_after_checkpoint(const vdev_anyraid_t *va, uint32_t tile_id)
+{
+	if (va->vd_checkpoint_tile == VDEV_ANYRAID_CHECKPOINT_EMPTY)
+		return (B_TRUE);
+	return (tile_id > va->vd_checkpoint_tile);
+}
+
 static inline int
 anyraid_tile_compare(const void *p1, const void *p2)
 {
@@ -856,7 +868,7 @@ anyraid_open_existing(vdev_t *vd, uint64_t child, int32_t **child_capacities)
 		spa->spa_anyraid_relocate = var;
 	}
 
-	va->vd_checkpoint_tile = UINT32_MAX;
+	va->vd_checkpoint_tile = VDEV_ANYRAID_CHECKPOINT_NONE;
 	(void) nvlist_lookup_uint32(header.ah_nvl,
 	    VDEV_ANYRAID_HEADER_CHECKPOINT, &va->vd_checkpoint_tile);
 
@@ -904,8 +916,8 @@ anyraid_open_existing(vdev_t *vd, uint64_t child, int32_t **child_capacities)
 	uint8_t pat_cnt = 0;
 	anyraid_tile_t *at = NULL;
 	for (uint32_t off = 0; off < map_length; off += size) {
-		if (checkpoint_rb && cur_tile > va->vd_checkpoint_tile &&
-		    pat_cnt == 0)
+		if (checkpoint_rb && pat_cnt == 0 &&
+		    anyraid_tile_after_checkpoint(va, cur_tile))
 			break;
 
 		int next_map = off / SPA_MAXBLOCKSIZE;
@@ -2032,7 +2044,7 @@ vdev_anyraid_write_map_sync(vdev_t *vd, zio_t *pio, uint64_t txg,
 	/* Write out each sub-tile in turn */
 	while (cur) {
 		if (status == VDEV_CONFIG_REWINDING_CHECKPOINT &&
-		    cur->at_tile_id > va->vd_checkpoint_tile)
+		    anyraid_tile_after_checkpoint(va, cur->at_tile_id))
 			break;
 
 		anyraid_tile_t *next = AVL_NEXT(&va->vd_tile_map, cur);
@@ -2078,11 +2090,11 @@ vdev_anyraid_write_map_sync(vdev_t *vd, zio_t *pio, uint64_t txg,
 
 	if (status == VDEV_CONFIG_NO_CHECKPOINT ||
 	    status == VDEV_CONFIG_REWINDING_CHECKPOINT) {
-		va->vd_checkpoint_tile = UINT32_MAX;
+		va->vd_checkpoint_tile = VDEV_ANYRAID_CHECKPOINT_NONE;
 	} else if (status == VDEV_CONFIG_CREATING_CHECKPOINT) {
 		anyraid_tile_t *at = avl_last(&va->vd_tile_map);
-		ASSERT(at);
-		va->vd_checkpoint_tile = at->at_tile_id;
+		va->vd_checkpoint_tile = at != NULL ? at->at_tile_id :
+		    VDEV_ANYRAID_CHECKPOINT_EMPTY;
 	}
 	rw_exit(&va->vd_lock);
 
@@ -2121,7 +2133,7 @@ vdev_anyraid_write_map_sync(vdev_t *vd, zio_t *pio, uint64_t txg,
 	    anyraidvd->vdev_children);
 	kmem_free(sizes, sizeof (*sizes) * anyraidvd->vdev_children);
 
-	if (va->vd_checkpoint_tile != UINT32_MAX) {
+	if (va->vd_checkpoint_tile != VDEV_ANYRAID_CHECKPOINT_NONE) {
 		fnvlist_add_uint32(header, VDEV_ANYRAID_HEADER_CHECKPOINT,
 		    va->vd_checkpoint_tile);
 	}
