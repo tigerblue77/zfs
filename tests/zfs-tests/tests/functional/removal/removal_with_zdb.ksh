@@ -72,4 +72,10 @@ if [[ $zdbstat != 0 ]]; then
 	    "$zdbstat following removal."
 fi
 
+# -P prints the size of the indirect vdev's mapping as an exact number.
+log_must zpool set cachefile=none $TESTPOOL
+log_must eval "zdb -e -p $DISKPATH -bPL $TESTPOOL >$zdbout 2>&1"
+log_must zpool set cachefile= $TESTPOOL
+log_must grep -q "in memory" $zdbout
+
 log_pass "Can use zdb during removal"
