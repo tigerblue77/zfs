@@ -5973,6 +5973,20 @@ vdev_raidz_init(spa_t *spa, nvlist_t *nv, void **tsd)
 	if (error != 0)
 		return (SET_ERROR(EINVAL));
 
+	/*
+	 * Only vdev_raidz_parity_epochs_set() makes a table, with its vdev
+	 * ZAP copy and the feature that keep it.  The config of a vdev that
+	 * is created, with the pool or by vdev add, rather than loaded from
+	 * disk, cannot carry one: it would be used without either.
+	 */
+	if ((spa->spa_load_state == SPA_LOAD_NONE ||
+	    spa->spa_load_state == SPA_LOAD_CREATE) &&
+	    nvlist_exists(nv, ZPOOL_CONFIG_RAIDZ_PARITY_EPOCHS)) {
+		zfs_dbgmsg("%s: refusing the parity-epoch table in the config "
+		    "of a new raidz vdev", spa_name(spa));
+		return (SET_ERROR(EINVAL));
+	}
+
 	uint64_t nparity;
 	if (nvlist_lookup_uint64(nv, ZPOOL_CONFIG_NPARITY, &nparity) == 0) {
 		if (nparity == 0 || nparity > VDEV_RAIDZ_MAXPARITY)

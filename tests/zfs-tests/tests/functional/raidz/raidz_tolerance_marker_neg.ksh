@@ -26,9 +26,9 @@
 #	not make a raidz1 vdev survive two failures.
 #
 # STRATEGY:
-#	1. Create a raidz1 pool whose vdev config carries a parity-epoch table
-#	   that ends at parity 2, a completion marker for parity 2 and the
-#	   digest of the table that goes with it.
+#	1. Create a raidz1 pool from a vdev config that carries a completion
+#	   marker for parity 2 and the digest of the table that goes with it,
+#	   and store that table, which ends at parity 2, as zhack does.
 #	2. Fault two children of the open pool: the vdev has to go from
 #	   DEGRADED to CANT_OPEN, as it does in a pool without the marker.
 #	3. Import the pool with two children missing: it must not open.
