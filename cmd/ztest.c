@@ -4027,9 +4027,7 @@ ztest_vdev_attach_detach(ztest_ds_t *zd, uint64_t id)
 		expected_error = replacing ? 0 : EBUSY;
 	else if (vdev_lookup_by_path(rvd, newpath) != NULL)
 		expected_error = EBUSY;
-	else if (newsize < oldsize && !(newvd_is_dspare ||
-	    (vdev_is_anyraid(pvd) &&
-	    newsize < pvd->vdev_ops->vdev_op_min_asize(pvd, oldvd))))
+	else if (!newvd_is_dspare && newsize < oldsize)
 		expected_error = EOVERFLOW;
 	else if (ashift > oldvd->vdev_top->vdev_ashift)
 		expected_error = EDOM;

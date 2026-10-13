@@ -541,6 +541,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/anyraid/anyraid_rebalance_008.ksh \
 	functional/anyraid/anyraid_rebalance_009.ksh \
 	functional/anyraid/anyraid_rebalance_noop_neg.ksh \
+	functional/anyraid/anyraid_replace_small_neg.ksh \
 	functional/anyraid/anyraid_scrub_001_pos.ksh \
 	functional/anyraid/anyraid_send_recv_001_pos.ksh \
 	functional/anyraid/anyraid_snapshot_001_pos.ksh \
