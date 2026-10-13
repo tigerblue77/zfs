@@ -169,14 +169,18 @@ typedef struct vdev_raidz {
 	 * SPIKE, not for merge: blocks moved to a new extent, as
 	 * raidz_redirect_node_t's keyed by {old offset, physical birth}, and
 	 * the MOS ZAP that holds them (0 until the first move).  The lock
-	 * protects the tree and the list; the I/O path takes it as a reader.
-	 * The list holds the entries of moved blocks freed in the syncing
-	 * txg, whose keys vdev_sync() removes from the ZAP.
+	 * protects the tree and the lists; the I/O path takes it as a reader.
+	 * The entry of a freed block stays in the tree as a tombstone, which
+	 * I/O still follows, until its extents leave the defer trees: on the
+	 * pending list until vdev_sync() removes its key from the ZAP in the
+	 * txg of the free, then on the tombstone list.
 	 */
 	avl_tree_t vd_redirects;
 	krwlock_t vd_redirect_lock;
 	uint64_t vd_redirect_obj;
 	list_t vd_redirect_pending;
+	list_t vd_redirect_tombs;
+	uint64_t vd_redirect_ntombs;	/* pending and tombs */
 	/* Damaged entries a read-only import left out of vd_redirects. */
 	uint64_t vd_redirect_damaged;
 } vdev_raidz_t;
@@ -250,6 +254,10 @@ extern int vdev_raidz_redirect_move(spa_t *, uint64_t,
     raidz_redirect_move_t *, int, raidz_redirect_keep_t, boolean_t);
 extern boolean_t vdev_raidz_redirect_get(vdev_t *, uint64_t, uint64_t,
     raidz_redirect_ent_t *);
+extern boolean_t vdev_raidz_redirect_get_live(vdev_t *, uint64_t, uint64_t,
+    raidz_redirect_ent_t *);
+extern uint64_t vdev_raidz_redirect_tombstones(spa_t *, uint64_t);
+extern void vdev_raidz_redirect_expire(vdev_t *, uint64_t);
 extern boolean_t vdev_raidz_redirect_lookup(spa_t *, uint64_t, uint64_t,
     uint64_t);
 extern uint64_t vdev_raidz_redirect_count(spa_t *, uint64_t);

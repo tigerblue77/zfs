@@ -6346,7 +6346,7 @@ metaslab_check_free(spa_t *spa, const blkptr_t *bp)
 		 */
 		raidz_redirect_ent_t rde;
 		if (spike_redirect_check_enable &&
-		    vdev_raidz_redirect_get(vd, offset,
+		    vdev_raidz_redirect_get_live(vd, offset,
 		    BP_GET_PHYSICAL_BIRTH(bp), &rde)) {
 			/* The free leaks what an unfit entry holds. */
 			if (!vdev_raidz_redirect_fits(vd, &rde, size))

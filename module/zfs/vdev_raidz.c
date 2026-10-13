@@ -2406,13 +2406,16 @@ vdev_raidz_layout_for_alloc(vdev_raidz_t *vdrz, uint64_t txg)
  * sent to its new extent.  vdev_raidz_load() reads the vdev's table into
  * vd_redirects, and vdev_raidz_redirect_move() adds to both in the txg that
  * moves the block.  When the block is freed, vdev_raidz_redirect_remove()
- * takes its entry out of memory and vdev_raidz_redirect_sync() out of the
- * table, in the txg of the free.
+ * turns its entry into a tombstone and vdev_raidz_redirect_sync() takes it
+ * out of the table, in the txg of the free; vdev_raidz_redirect_expire()
+ * drops the tombstone once the block's extents leave the defer trees.
  */
 typedef struct raidz_redirect_node {
 	avl_node_t rdn_link;
-	list_node_t rdn_pending;	/* on vd_redirect_pending once freed */
+	/* On vd_redirect_pending, then vd_redirect_tombs, once freed. */
+	list_node_t rdn_pending;
 	raidz_redirect_ent_t rdn_ent;
+	boolean_t rdn_tomb;
 	uint64_t rdn_free_txg;
 	uint64_t rdn_free_pass;
 } raidz_redirect_node_t;
@@ -2439,14 +2442,9 @@ vdev_raidz_redirect_hits(void)
 	return (raidz_redirect_hit_count);
 }
 
-/*
- * SPIKE: B_TRUE, and the entry in *ent if ent is not NULL, if the block of
- * the raidz vdev vd whose DVA starts at offset, born in txg birth, has been
- * moved.
- */
-boolean_t
-vdev_raidz_redirect_get(vdev_t *vd, uint64_t offset, uint64_t birth,
-    raidz_redirect_ent_t *ent)
+static boolean_t
+vdev_raidz_redirect_find(vdev_t *vd, uint64_t offset, uint64_t birth,
+    raidz_redirect_ent_t *ent, boolean_t tombs)
 {
 	vdev_raidz_t *vdrz;
 	raidz_redirect_node_t search;
@@ -2459,10 +2457,36 @@ vdev_raidz_redirect_get(vdev_t *vd, uint64_t offset, uint64_t birth,
 	search.rdn_ent.rde_birth = birth;
 	rw_enter(&vdrz->vd_redirect_lock, RW_READER);
 	rdn = avl_find(&vdrz->vd_redirects, &search, NULL);
+	if (rdn != NULL && rdn->rdn_tomb && !tombs)
+		rdn = NULL;
 	if (rdn != NULL && ent != NULL)
 		*ent = rdn->rdn_ent;
 	rw_exit(&vdrz->vd_redirect_lock);
 	return (rdn != NULL);
+}
+
+/*
+ * SPIKE: B_TRUE, and the entry in *ent if ent is not NULL, if I/O to the
+ * block of the raidz vdev vd whose DVA starts at offset, born in txg birth,
+ * goes to a new extent: the block was moved, and is live or was freed so
+ * recently that its extents are still in the defer trees (a tombstone).
+ */
+boolean_t
+vdev_raidz_redirect_get(vdev_t *vd, uint64_t offset, uint64_t birth,
+    raidz_redirect_ent_t *ent)
+{
+	return (vdev_raidz_redirect_find(vd, offset, birth, ent, B_TRUE));
+}
+
+/*
+ * SPIKE: the same for a live block only, as the free path and the claims
+ * see them: a tombstone's block is already freed.
+ */
+boolean_t
+vdev_raidz_redirect_get_live(vdev_t *vd, uint64_t offset, uint64_t birth,
+    raidz_redirect_ent_t *ent)
+{
+	return (vdev_raidz_redirect_find(vd, offset, birth, ent, B_FALSE));
 }
 
 /*
@@ -2478,9 +2502,12 @@ vdev_raidz_redirect_lookup(spa_t *spa, uint64_t vdev, uint64_t offset,
 	    birth, NULL));
 }
 
-/* SPIKE: the number of entries vdev <vdev> holds in memory. */
-uint64_t
-vdev_raidz_redirect_count(spa_t *spa, uint64_t vdev)
+/*
+ * SPIKE: the number of live entries vdev <vdev> holds in memory, or of
+ * tombstones with <tombs>.
+ */
+static uint64_t
+vdev_raidz_redirect_nodes(spa_t *spa, uint64_t vdev, boolean_t tombs)
 {
 	uint64_t n = 0;
 	vdev_t *vd;
@@ -2491,11 +2518,25 @@ vdev_raidz_redirect_count(spa_t *spa, uint64_t vdev)
 		vdev_raidz_t *vdrz = vd->vdev_tsd;
 
 		rw_enter(&vdrz->vd_redirect_lock, RW_READER);
-		n = avl_numnodes(&vdrz->vd_redirects);
+		n = tombs ? vdrz->vd_redirect_ntombs :
+		    avl_numnodes(&vdrz->vd_redirects) -
+		    vdrz->vd_redirect_ntombs;
 		rw_exit(&vdrz->vd_redirect_lock);
 	}
 	spa_config_exit(spa, SCL_VDEV, FTAG);
 	return (n);
+}
+
+uint64_t
+vdev_raidz_redirect_count(spa_t *spa, uint64_t vdev)
+{
+	return (vdev_raidz_redirect_nodes(spa, vdev, B_FALSE));
+}
+
+uint64_t
+vdev_raidz_redirect_tombstones(spa_t *spa, uint64_t vdev)
+{
+	return (vdev_raidz_redirect_nodes(spa, vdev, B_TRUE));
 }
 
 /* SPIKE: the damaged entries a read-only import of vdev <vdev> ignored. */
@@ -2565,7 +2606,7 @@ vdev_raidz_redirect_scan_min_txg(spa_t *spa, uint64_t min_txg,
 		    rdn = AVL_NEXT(&vdrz->vd_redirects, rdn)) {
 			const raidz_redirect_ent_t *e = &rdn->rdn_ent;
 
-			if (e->rde_new_birth > min_txg &&
+			if (!rdn->rdn_tomb && e->rde_new_birth > min_txg &&
 			    e->rde_new_birth < max_txg && e->rde_birth <= min)
 				min = e->rde_birth - 1;
 		}
@@ -2598,10 +2639,16 @@ vdev_raidz_redirect_destroy(vdev_raidz_t *vdrz)
 	raidz_redirect_node_t *rdn;
 	void *cookie = NULL;
 
+	/*
+	 * Only a txg that never synced leaves keys pending.  Both lists hold
+	 * nodes of the tree, which frees them.
+	 */
+	while (list_remove_head(&vdrz->vd_redirect_pending) != NULL)
+		;
+	while (list_remove_head(&vdrz->vd_redirect_tombs) != NULL)
+		;
+	vdrz->vd_redirect_ntombs = 0;
 	while ((rdn = avl_destroy_nodes(&vdrz->vd_redirects, &cookie)) != NULL)
-		kmem_free(rdn, sizeof (*rdn));
-	/* Only a txg that never synced leaves keys here. */
-	while ((rdn = list_remove_head(&vdrz->vd_redirect_pending)) != NULL)
 		kmem_free(rdn, sizeof (*rdn));
 }
 
@@ -2829,9 +2876,12 @@ vdev_raidz_redirect_persist(vdev_t *vd, const raidz_redirect_ent_t *ent,
 /*
  * SPIKE: called by metaslab_free_dva() for each DVA it frees.  B_TRUE if the
  * block of the raidz vdev vd whose DVA starts at offset, born in txg birth,
- * was moved: its entry, returned in *ent, leaves memory now and the table in
- * this txg (the vdev is dirtied so that vdev_sync() removes the key), and
- * the caller frees [O, O + old_reserved) and N instead of the old extent.
+ * was moved: its entry, returned in *ent, becomes a tombstone now and leaves
+ * the table in this txg (the vdev is dirtied so that vdev_sync() removes the
+ * key), and the caller frees [O, O + old_reserved) and N instead of the old
+ * extent.  The tombstone keeps sending I/O issued with the freed block's
+ * pointer to N, which no other block can hold before it is dropped: the
+ * old extent's tail may be another block's since the move.
  * Every decision to free (DDT, BRT, gang trees, deadlists) is taken above
  * metaslab_free_dva() with the bp unchanged, so each moved DVA comes here
  * exactly once.
@@ -2847,7 +2897,7 @@ vdev_raidz_redirect_remove(vdev_t *vd, uint64_t offset, uint64_t birth,
 	raidz_redirect_node_t *rdn;
 
 	/* Most frees match nothing: look as a reader first. */
-	if (!vdev_raidz_redirect_get(vd, offset, birth, NULL))
+	if (!vdev_raidz_redirect_get_live(vd, offset, birth, NULL))
 		return (B_FALSE);
 	spa = vd->vdev_spa;
 	txg = spa_syncing_txg(spa);
@@ -2856,8 +2906,11 @@ vdev_raidz_redirect_remove(vdev_t *vd, uint64_t offset, uint64_t birth,
 	search.rdn_ent.rde_birth = birth;
 	rw_enter(&vdrz->vd_redirect_lock, RW_WRITER);
 	rdn = avl_find(&vdrz->vd_redirects, &search, NULL);
+	if (rdn != NULL && rdn->rdn_tomb)
+		rdn = NULL;
 	if (rdn != NULL) {
-		avl_remove(&vdrz->vd_redirects, rdn);
+		rdn->rdn_tomb = B_TRUE;
+		vdrz->vd_redirect_ntombs++;
 		rdn->rdn_free_txg = txg;
 		rdn->rdn_free_pass = spa_sync_pass(spa);
 		list_insert_tail(&vdrz->vd_redirect_pending, rdn);
@@ -2939,10 +2992,55 @@ vdev_raidz_redirect_sync(vdev_t *vd, dmu_tx_t *tx)
 		spike_redirect_stat(rdn->rdn_free_txg)->rst_freed[MIN(MAX(
 		    rdn->rdn_free_pass, 1), SPIKE_REDIRECT_PASSES) - 1]++;
 		spike_redirect_stat(txg)->rst_removed[pass - 1]++;
-		kmem_free(rdn, sizeof (*rdn));
+		rw_enter(&vdrz->vd_redirect_lock, RW_WRITER);
+		list_insert_tail(&vdrz->vd_redirect_tombs, rdn);
+		rw_exit(&vdrz->vd_redirect_lock);
 	}
 	list_destroy(&todo);
 	spike_crash_check(spa, txg, SPIKE_CRASH_TABLE_DIRTY);
+}
+
+/*
+ * SPIKE: called by vdev_sync_dispatch() for txg, before the metaslabs move
+ * the frees of txg - TXG_DEFER_SIZE from their defer trees to the
+ * allocatable ones: drops the tombstones of the blocks freed then, whose
+ * [O, O + old_reserved) and N another block may take from now on, or every
+ * tombstone if this txg defers no free, as metaslab_sync_done() decides.
+ * Nothing of a tombstone is persisted: a fresh import has no I/O in flight.
+ */
+void
+vdev_raidz_redirect_expire(vdev_t *vd, uint64_t txg)
+{
+	spa_t *spa = vd->vdev_spa;
+	metaslab_class_t *mc = spa_normal_class(spa);
+	vdev_raidz_t *vdrz;
+	raidz_redirect_node_t *rdn, *next;
+	boolean_t defer;
+	uint64_t left;
+
+	if (vd->vdev_ops != &vdev_raidz_ops)
+		return;
+	vdrz = vd->vdev_tsd;
+	/* SPIKE: mirrors defer_allowed in metaslab_sync_done(). */
+	defer = metaslab_class_get_space(mc) - metaslab_class_get_alloc(mc) >
+	    spa_get_slop_space(spa) && !vd->vdev_removing &&
+	    !vd->vdev_rz_expanding;
+	rw_enter(&vdrz->vd_redirect_lock, RW_WRITER);
+	for (rdn = list_head(&vdrz->vd_redirect_tombs); rdn != NULL;
+	    rdn = next) {
+		next = list_next(&vdrz->vd_redirect_tombs, rdn);
+		if (defer && rdn->rdn_free_txg + TXG_DEFER_SIZE > txg)
+			continue;
+		list_remove(&vdrz->vd_redirect_tombs, rdn);
+		avl_remove(&vdrz->vd_redirects, rdn);
+		vdrz->vd_redirect_ntombs--;
+		kmem_free(rdn, sizeof (*rdn));
+	}
+	left = vdrz->vd_redirect_ntombs;
+	rw_exit(&vdrz->vd_redirect_lock);
+	/* Keep this vdev synced until its last tombstone is dropped. */
+	if (left != 0)
+		vdev_dirty(vd, 0, NULL, txg + 1);
 }
 
 /*
@@ -6995,7 +7093,7 @@ vdev_raidz_redirect_claim(vdev_t *vd, uint64_t offset, uint64_t size,
 	int err = 0;
 
 	if (!spike_redirect_claim_enable || spa_writeable(vd->vdev_spa) ||
-	    !vdev_raidz_redirect_get(vd, offset, birth, &ent))
+	    !vdev_raidz_redirect_get_live(vd, offset, birth, &ent))
 		return (B_FALSE);
 	if (!vdev_raidz_redirect_fits(vd, &ent, size)) {
 		*errp = SET_ERROR(EINVAL);
@@ -7268,6 +7366,8 @@ vdev_raidz_init(spa_t *spa, nvlist_t *nv, void **tsd)
 	    offsetof(raidz_redirect_node_t, rdn_link));
 	list_create(&vdrz->vd_redirect_pending, sizeof (raidz_redirect_node_t),
 	    offsetof(raidz_redirect_node_t, rdn_pending));
+	list_create(&vdrz->vd_redirect_tombs, sizeof (raidz_redirect_node_t),
+	    offsetof(raidz_redirect_node_t, rdn_pending));
 	rw_init(&vdrz->vd_redirect_lock, NULL, RW_DEFAULT, NULL);
 
 	vdrz->vd_physical_width = children;
@@ -7368,6 +7468,7 @@ vdev_raidz_fini(vdev_t *vd)
 	vdev_raidz_redirect_destroy(vdrz);
 	avl_destroy(&vdrz->vd_redirects);
 	list_destroy(&vdrz->vd_redirect_pending);
+	list_destroy(&vdrz->vd_redirect_tombs);
 	rw_destroy(&vdrz->vd_redirect_lock);
 	if (vdrz->vd_parity_epochs != NULL) {
 		kmem_free(vdrz->vd_parity_epochs,

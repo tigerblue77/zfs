@@ -326,7 +326,43 @@ freeing plain-A then aborts, except for `epoch`, `future` and `reserved0`
 that the old load took a key it could not look up for the end of the
 table: it loaded 2 of 8 entries at ashift 12, 2 of 7 at ashift 9.
 
+Freeing a moved block took its entry out of memory at once, while
+[O, O + old_reserved) and N stayed in the defer trees for TXG_DEFER_SIZE
+txgs.  I/O issued with the freed block's pointer in that window (a stale
+holder's read, a scan I/O already queued) missed the table and went to O,
+whose tail P2 freed at the move and another block may hold: a checksum
+error, or, when only one column of O differs, a reconstruction that
+succeeds and a self-heal write into the other block.  The free now leaves
+the entry in the tree as a tombstone, which I/O, resilver and scan routing
+still follow to N, and which the free path, the claims, the counts and the
+scan window ignore.  `vdev_sync_dispatch()` drops it in the txg whose sync
+moves the free's extents out of the defer trees, before it does (in the
+txg of the free itself when that txg defers no free, as
+`metaslab_sync_done()` decides).  [O, O + old_reserved) is freed with N,
+so no other block can be born at O while the tombstone stands, and none
+born later has its key.  Nothing of a tombstone is persisted.
+
+    crash_probe <dir> <ashift> tomb <read|repair>
+
+After the free modes' setup and a P2 move of all but small-Z, plain-A is
+freed and its saved block pointer read with `zio_read()` as soon as the
+free's txg has synced.  `read` first moves small-Z with its N claimed at
+the start of plain-A's freed tail, a live block inside O; `repair`
+overwrites one sector of a data column of plain-A's freed tail on disk, as
+a block written there would.  The read must return plain-A's bytes through
+one redirect hit and leave every column of O as it was; the tombstone must
+stand while the free's extents are not allocatable, be gone once txg
+free + TXG_DEFER_SIZE has synced, not answer the free path asked for
+plain-A's key again, and not survive an import; zdb must find the pool
+clean.  On the previous commit and on the one before the minor fixes, at
+ashift 12 and 9, `read` fails with ECKSUM and no redirect hit, and
+`repair` returns plain-A's bytes rebuilt from O and rewrites the
+overwritten column of O.
+
 Not covered: a checkpoint-aware move or free (the flags are computed, never
-exercised), a frozen pool, the table walk that should replace the widened
-window and its cost on a large pool, a mirror beside the raidz vdev,
-kernel builds, and scale.
+exercised), a frozen pool, a tombstone dropped early because a txg defers
+no free (a nearly full pool), a scan I/O issued in the same sync as the
+free (only a stale holder's read is exercised), a damaged entry whose N
+overlaps another entry's extents, the table walk that should replace the
+widened window and its cost on a large pool, a mirror beside the raidz
+vdev, kernel builds, and scale.

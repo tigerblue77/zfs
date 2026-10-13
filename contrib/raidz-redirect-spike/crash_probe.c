@@ -167,6 +167,7 @@
 #define	MAXOBJS		96
 #define	POLL_TXGS	40
 #define	SPILL_SIZE	(16ULL << 10)
+#define	TOMB_MARKER	0xa5
 
 extern uint64_t metaslab_force_ganging;
 extern uint_t metaslab_force_ganging_pct;
@@ -193,6 +194,11 @@ extern int spike_redirect_move_live __attribute__((weak));
 extern int spike_redirect_keep_none __attribute__((weak));
 extern uint64_t vdev_raidz_redirect_damaged(spa_t *, uint64_t)
     __attribute__((weak));
+/* Weak: the tombstones of freed entries, absent from the previous step's. */
+extern uint64_t vdev_raidz_redirect_tombstones(spa_t *, uint64_t)
+    __attribute__((weak));
+extern boolean_t vdev_raidz_redirect_get_live(vdev_t *, uint64_t, uint64_t,
+    raidz_redirect_ent_t *) __attribute__((weak));
 /* Weak: the previous step's in-memory table, absent from this one. */
 extern int vdev_raidz_redirect_add(uint64_t, uint64_t, uint64_t, uint64_t,
     uint64_t, uint64_t) __attribute__((weak));
@@ -1989,12 +1995,17 @@ zap_entry(spa_t *spa, int i)
 	    key, 2, NULL, NULL));
 }
 
+/* Whether move i has a live entry in memory; a tombstone is not one. */
 static boolean_t
 mem_entry(spa_t *spa, int i)
 {
-	return (vdev_raidz_redirect_get(spa->spa_root_vdev->vdev_child[0],
-	    DVA_GET_OFFSET(&sh->sh_bp[i].blk_dva[0]),
-	    BP_GET_PHYSICAL_BIRTH(&sh->sh_bp[i]), NULL));
+	vdev_t *vd = spa->spa_root_vdev->vdev_child[0];
+	uint64_t o = DVA_GET_OFFSET(&sh->sh_bp[i].blk_dva[0]);
+	uint64_t b = BP_GET_PHYSICAL_BIRTH(&sh->sh_bp[i]);
+
+	if (vdev_raidz_redirect_get_live != NULL)
+		return (vdev_raidz_redirect_get_live(vd, o, b, NULL));
+	return (vdev_raidz_redirect_get(vd, o, b, NULL));
 }
 
 /* Whether move i belongs to an object in the set (by fobj index). */
@@ -3571,6 +3582,258 @@ run_corrupt(const char *how, policy_t policy)
 	return (0);
 }
 
+/*
+ * The tomb mode.  A holder of plain-A's block pointer reads it right after
+ * plain-A was freed, while [O, O + kept) and N sit in the defer trees, under
+ * P2.  'read': small-Z's new extent is first placed in plain-A's freed
+ * tail, so that O holds another live block.  'repair': one sector of a
+ * data column of plain-A's freed tail is overwritten on disk, as a block
+ * written there would, which leaves O one column from plain-A's bytes.
+ */
+typedef struct tomb_arg {
+	uint64_t	ta_offset;
+	uint64_t	ta_birth;
+	boolean_t	ta_removed;
+	uint64_t	ta_txg;
+} tomb_arg_t;
+
+/* The free path, called again for plain-A's key, must not convert it. */
+static void
+tomb_remove_sync(void *arg, dmu_tx_t *tx)
+{
+	tomb_arg_t *ta = arg;
+	vdev_t *vd = dmu_tx_pool(tx)->dp_spa->spa_root_vdev->vdev_child[0];
+	raidz_redirect_ent_t ent;
+
+	ta->ta_txg = dmu_tx_get_txg(tx);
+	ta->ta_removed = vdev_raidz_redirect_remove(vd, ta->ta_offset,
+	    ta->ta_birth, &ent);
+}
+
+static boolean_t
+tomb_lookup(spa_t *spa, uint64_t offset, uint64_t birth)
+{
+	return (vdev_raidz_redirect_get(spa->spa_root_vdev->vdev_child[0],
+	    offset, birth, NULL));
+}
+
+static int
+child_tomb(void *arg)
+{
+	const char *how = arg;
+	boolean_t repair = (strcmp(how, "repair") == 0);
+	int a = find_fobj("plain-A");
+	int i = find_move("plain-A");
+	const raidz_redirect_ent_t *e = &sh->sh_rdm[i].rdm_ent;
+	blkptr_t bp = sh->sh_bp[i];
+	zbookmark_phys_t zb = sh->sh_zb[i];
+	uint64_t o = DVA_GET_OFFSET(&bp.blk_dva[0]);
+	uint64_t t1 = BP_GET_PHYSICAL_BIRTH(&bp);
+	uint64_t kept = e->rde_old_reserved;
+	uint64_t lsize = BP_GET_LSIZE(&bp);
+	uint64_t sector = 1ULL << ashift;
+	uint64_t *want = malloc(lsize);
+	uint8_t *cols[WIDTH] = { NULL };
+	uint64_t f, synced, hits, tombs;
+	int changed = 0, err;
+	boolean_t match;
+	tomb_arg_t ta;
+	raidz_row_t *rr;
+	raidz_map_t *rm;
+	abd_t *abd;
+	spa_t *spa;
+	zio_t zio;
+
+	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+	spa = import_pool();
+	VERIFY3U(kept, <, sh->sh_rdm[i].rdm_old_asize);
+	if (!repair) {
+		/* small-Z's N, claimed at the start of plain-A's tail. */
+		int z = find_fobj("small-Z");
+		int k = sh->sh_nmoves;
+		objset_t *os;
+
+		VERIFY0(dmu_objset_hold(POOL, FTAG, &os));
+		add_fobj_moves(spa, os, z, 0);
+		dmu_objset_rele(os, FTAG);
+		sh->sh_rdm[k].rdm_place = o + kept;
+		err = vdev_raidz_redirect_move(spa, 0, &sh->sh_rdm[k], 1,
+		    RAIDZ_REDIRECT_KEEP_FIRST, B_FALSE);
+		print_move(k);
+		check(err == 0 && sh->sh_rdm[k].rdm_error == 0 &&
+		    sh->sh_rdm[k].rdm_ent.rde_new_offset == o + kept,
+		    "small-Z's new extent lies in plain-A's freed tail at %llx "
+		    "(error %d, block error %d)", (u_longlong_t)(o + kept),
+		    err, sh->sh_rdm[k].rdm_error);
+		sh->sh_fobj[z].fo_moved = B_TRUE;
+	}
+
+	f = free_fobjs(spa, &a, 1);
+	txg_wait_synced(spa_get_dsl(spa), f);
+	(void) printf("INFO freed plain-A in txg %llu; O=%llx kept %llu, "
+	    "N=%llx asize %llu\n", (u_longlong_t)f, (u_longlong_t)o,
+	    (u_longlong_t)kept, (u_longlong_t)e->rde_new_offset,
+	    (u_longlong_t)e->rde_new_asize);
+
+	/* plain-A's old extent, column by column, as its old layout has it. */
+	rm = rs_map(&zio, o, BP_GET_PSIZE(&bp), 1);
+	rr = rm->rm_row[0];
+	if (repair) {
+		/* A sector of the second data column, in the freed tail. */
+		const raidz_col_t *rc = &rr->rr_col[rr->rr_firstdatacol + 1];
+		uint8_t *mark = malloc(sector);
+		char path[PATH_BUF];
+		int fd;
+
+		memset(mark, TOMB_MARKER, sector);
+		child_file(path, sizeof (path), rc->rc_devidx);
+		fd = open(path, O_RDWR);
+		VERIFY3S(fd, !=, -1);
+		VERIFY3S(pwrite(fd, mark, sector, rc->rc_offset +
+		    VDEV_LABEL_START_SIZE), ==, sector);
+		(void) close(fd);
+		free(mark);
+		(void) printf("INFO overwrote child %d at %llx, a sector of "
+		    "plain-A's data column %d\n", (int)rc->rc_devidx,
+		    (u_longlong_t)rc->rc_offset, rr->rr_firstdatacol + 1);
+	}
+	for (int c = 0; c < rr->rr_cols; c++) {
+		if (rr->rr_col[c].rc_size == 0)
+			continue;
+		cols[c] = malloc(rr->rr_col[c].rc_size);
+		rs_col_io(&rr->rr_col[c], cols[c], B_FALSE);
+	}
+
+	/* The stale read. */
+	abd = abd_alloc_linear(lsize, B_FALSE);
+	fill_pattern(want, lsize, sh->sh_fobj[a].fo_seed);
+	hits = vdev_raidz_redirect_hits();
+	err = zio_wait(zio_read(NULL, spa, &bp, abd, lsize, NULL, NULL,
+	    ZIO_PRIORITY_SYNC_READ, ZIO_FLAG_CANFAIL, &zb));
+	hits = vdev_raidz_redirect_hits() - hits;
+	match = (err == 0 && memcmp(abd_to_buf(abd), want, lsize) == 0);
+	synced = spa_last_synced_txg(spa);
+	tombs = vdev_raidz_redirect_tombstones != NULL ?
+	    vdev_raidz_redirect_tombstones(spa, 0) : 0;
+	(void) printf("INFO stale read of plain-A after txg %llu synced: "
+	    "err=%d match=%d redirect hits %llu, %llu tombstone(s)\n",
+	    (u_longlong_t)synced, err, match, (u_longlong_t)hits,
+	    (u_longlong_t)tombs);
+	for (int c = 0; c < rr->rr_cols; c++) {
+		uint8_t *now;
+
+		if (cols[c] == NULL)
+			continue;
+		now = malloc(rr->rr_col[c].rc_size);
+		rs_col_io(&rr->rr_col[c], now, B_FALSE);
+		if (memcmp(now, cols[c], rr->rr_col[c].rc_size) != 0) {
+			(void) printf("INFO column %d of O, on child %d, was "
+			    "written by the read\n", c,
+			    (int)rr->rr_col[c].rc_devidx);
+			changed++;
+		}
+		free(now);
+		free(cols[c]);
+	}
+	rs_map_free(&zio, rm);
+	abd_free(abd);
+	free(want);
+	check(synced < f + TXG_DEFER_SIZE, "the read came before the defer "
+	    "window of the free closed (txg %llu synced, freed in %llu)",
+	    (u_longlong_t)synced, (u_longlong_t)f);
+	check(err == 0 && match && hits == 1, "the stale read of plain-A goes "
+	    "to N and returns its bytes (err=%d match=%d hits=%llu)", err,
+	    match, (u_longlong_t)hits);
+	check(changed == 0, "nothing of plain-A's old extent was written (%d "
+	    "columns changed)", changed);
+
+	/* What the tombstone does and does not do. */
+	if (vdev_raidz_redirect_tombstones != NULL) {
+		check(tombs == 1, "plain-A's entry stands as a tombstone "
+		    "(%llu)", (u_longlong_t)tombs);
+		check(tomb_lookup(spa, o, t1) && !mem_entry(spa, i), "I/O "
+		    "finds it, the live lookups do not");
+		check(!tomb_lookup(spa, o, f + TXG_DEFER_SIZE + 1),
+		    "a block born at O after the window would not find it");
+	}
+	check(!in_allocatable(spa, o, kept) && !in_allocatable(spa,
+	    e->rde_new_offset, e->rde_new_asize), "neither [O, O + kept) nor "
+	    "N can be allocated yet");
+	ta.ta_offset = o;
+	ta.ta_birth = t1;
+	ta.ta_removed = B_FALSE;
+	VERIFY0(dsl_sync_task(POOL, NULL, tomb_remove_sync, &ta, 0,
+	    ZFS_SPACE_CHECK_NONE));
+	check(!ta.ta_removed, "the free path, asked again for plain-A's key "
+	    "in txg %llu, does not convert it", (u_longlong_t)ta.ta_txg);
+
+	/* The tombstone stands until the sync of txg f + TXG_DEFER_SIZE. */
+	if (vdev_raidz_redirect_tombstones != NULL &&
+	    spa_last_synced_txg(spa) < f + TXG_DEFER_SIZE) {
+		check(vdev_raidz_redirect_tombstones(spa, 0) == 1, "with txg "
+		    "%llu synced, it still stands",
+		    (u_longlong_t)spa_last_synced_txg(spa));
+		txg_wait_synced(spa_get_dsl(spa), f + TXG_DEFER_SIZE);
+		check(vdev_raidz_redirect_tombstones(spa, 0) == 0, "with txg "
+		    "%llu synced, it is gone", (u_longlong_t)(f +
+		    TXG_DEFER_SIZE));
+	}
+
+	/* Past the window: nothing is left of the entry. */
+	for (int k = 0; k <= TXG_DEFER_SIZE + 1; k++) {
+		dirty_txg(spa);
+		txg_wait_synced(spa_get_dsl(spa), 0);
+	}
+	if (vdev_raidz_redirect_tombstones != NULL) {
+		check(vdev_raidz_redirect_tombstones(spa, 0) == 0 &&
+		    !tomb_lookup(spa, o, t1), "after txg %llu, the tombstone "
+		    "is gone (%llu)", (u_longlong_t)spa_last_synced_txg(spa),
+		    (u_longlong_t)vdev_raidz_redirect_tombstones(spa, 0));
+	}
+	check(in_allocatable(spa, o, kept) && in_allocatable(spa,
+	    e->rde_new_offset, e->rde_new_asize), "[O, O + kept) and N are "
+	    "allocatable again");
+	sh->sh_fobj[a].fo_gone = B_TRUE;
+	check_others_read();
+	export_pool(spa);
+	spa = import_pool();
+	check(vdev_raidz_redirect_tombstones == NULL ||
+	    vdev_raidz_redirect_tombstones(spa, 0) == 0, "an import finds no "
+	    "tombstone");
+	check_others_read();
+	export_pool(spa);
+	kernel_fini();
+	return (failures == 0 ? 0 : 1);
+}
+
+/* Phase 1 of tomb: move every block but small-Z's, under P2. */
+static int
+child_tomb_move(void *arg)
+{
+	policy_t policy = P2;
+
+	(void) arg;
+	sh->sh_fobj[find_fobj("small-Z")].fo_moved = B_FALSE;
+	return (child_move_fobjs(&policy));
+}
+
+static int
+run_tomb(const char *how)
+{
+	int st;
+
+	(void) printf("INFO tomb %s, policy P2, ashift %llu\n", how,
+	    (u_longlong_t)ashift);
+	sh->sh_small = B_TRUE;
+	VERIFY0(phase("0 setup", setup_free_fn, NULL));
+	st = phase("1 move", child_tomb_move, NULL);
+	check(st == 0, "the move phase passes (status %d)", st);
+	st = phase("2 stale read", child_tomb, (void *)how);
+	check(st == 0, "the stale-read phase passes (status %d)", st);
+	run_zdb();
+	return (0);
+}
+
 static int
 parse_point(const char *s)
 {
@@ -3610,7 +3873,8 @@ usage(void)
 	    "<offline|offlinescrub|control|replace> [nofix|nowiden|nocols]\n"
 	    "       crash_probe <dir> <ashift> stalebp <P1|P2> [same] "
 	    "[nolive]\n"
-	    "       crash_probe <dir> <ashift> corrupt <kind> [P1|P2]\n");
+	    "       crash_probe <dir> <ashift> corrupt <kind> [P1|P2]\n"
+	    "       crash_probe <dir> <ashift> tomb <read|repair>\n");
 	return (2);
 }
 
@@ -3695,6 +3959,9 @@ main(int argc, char **argv)
 		if (policy == -1)
 			return (usage());
 		st = run_corrupt(argv[4], policy);
+	} else if (strcmp(mode, "tomb") == 0 && argc == 5 &&
+	    (strcmp(argv[4], "read") == 0 || strcmp(argv[4], "repair") == 0)) {
+		st = run_tomb(argv[4]);
 	} else if (strcmp(mode, "stalebp") == 0) {
 		boolean_t same = B_FALSE, nolive = B_FALSE;
 

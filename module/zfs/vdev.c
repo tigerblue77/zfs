@@ -4372,6 +4372,9 @@ vdev_sync_dispatch(vdev_t *vd, uint64_t txg)
 
 	ASSERT(vdev_is_concrete(vd));
 
+	/* SPIKE: before the defer trees empty, drop the tombstones of moves. */
+	vdev_raidz_redirect_expire(vd, txg);
+
 	for (metaslab_t *msp = txg_list_head(&vd->vdev_ms_list, TXG_CLEAN(txg));
 	    msp; msp = txg_list_next(&vd->vdev_ms_list, msp, TXG_CLEAN(txg))) {
 		(void) taskq_dispatch(spa->spa_sync_tq,
