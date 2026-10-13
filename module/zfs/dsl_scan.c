@@ -37,6 +37,7 @@
 #include <sys/zfs_znode.h>
 #include <sys/spa_impl.h>
 #include <sys/vdev_impl.h>
+#include <sys/vdev_raidz.h>
 #include <sys/zil_impl.h>
 #include <sys/zio_checksum.h>
 #include <sys/brt.h>
@@ -4942,6 +4943,30 @@ scan_io_queue_insert(dsl_scan_io_queue_t *queue, const blkptr_t *bp, int dva_i,
 }
 
 /*
+ * SPIKE, not for merge: a test-only switch for the routing below, kept so
+ * that the sorted path can still be shown failing.
+ */
+int spike_scan_redirect_unsorted = 1;
+
+/*
+ * SPIKE: B_TRUE if a DVA of the block is redirected to a new extent.  The
+ * sorted queues would account the block at its old extent, part of which
+ * another block may now hold, and the extent tree's fill accounting does
+ * not allow two queued extents to overlap.
+ */
+static boolean_t
+dsl_scan_bp_redirected(const blkptr_t *bp)
+{
+	for (int i = 0; i < BP_GET_NDVAS(bp); i++) {
+		if (vdev_raidz_redirect_lookup(DVA_GET_VDEV(&bp->blk_dva[i]),
+		    DVA_GET_OFFSET(&bp->blk_dva[i]),
+		    BP_GET_PHYSICAL_BIRTH(bp)))
+			return (B_TRUE);
+	}
+	return (B_FALSE);
+}
+
+/*
  * Given a set of I/O parameters as discovered by the metadata traversal
  * process, attempts to place the I/O into the sorted queues (if allowed),
  * or immediately executes the I/O.
@@ -4956,9 +4981,11 @@ dsl_scan_enqueue(dsl_pool_t *dp, const blkptr_t *bp, int zio_flags,
 
 	/*
 	 * Gang blocks are hard to issue sequentially, so we just issue them
-	 * here immediately instead of queuing them.
+	 * here immediately instead of queuing them.  SPIKE: so are blocks
+	 * read from a new extent, which the queues cannot place.
 	 */
-	if (!dp->dp_scan->scn_is_sorted || BP_IS_GANG(bp)) {
+	if (!dp->dp_scan->scn_is_sorted || BP_IS_GANG(bp) ||
+	    (spike_scan_redirect_unsorted && dsl_scan_bp_redirected(bp))) {
 		scan_exec_io(dp, bp, zio_flags, zb, NULL);
 		return;
 	}

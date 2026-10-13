@@ -2449,7 +2449,7 @@ vdev_raidz_redirect_hits(void)
 }
 
 static const raidz_redirect_t *
-vdev_raidz_redirect_find(const zio_t *zio)
+vdev_raidz_redirect_match(uint64_t vdev, uint64_t offset, uint64_t birth)
 {
 	uint64_t n = raidz_redirect_count;
 
@@ -2457,12 +2457,28 @@ vdev_raidz_redirect_find(const zio_t *zio)
 	for (uint64_t i = 0; i < n; i++) {
 		const raidz_redirect_t *rd = &raidz_redirects[i];
 
-		if (rd->rd_vdev == zio->io_vd->vdev_id &&
-		    rd->rd_offset == zio->io_offset &&
-		    rd->rd_birth == BP_GET_PHYSICAL_BIRTH(zio->io_bp))
+		if (rd->rd_vdev == vdev && rd->rd_offset == offset &&
+		    rd->rd_birth == birth)
 			return (rd);
 	}
 	return (NULL);
+}
+
+static const raidz_redirect_t *
+vdev_raidz_redirect_find(const zio_t *zio)
+{
+	return (vdev_raidz_redirect_match(zio->io_vd->vdev_id,
+	    zio->io_offset, BP_GET_PHYSICAL_BIRTH(zio->io_bp)));
+}
+
+/*
+ * SPIKE: B_TRUE if the I/O of the block born in txg <birth> whose DVA is at
+ * <offset> on top-level vdev <vdev> is sent to a new extent.
+ */
+boolean_t
+vdev_raidz_redirect_lookup(uint64_t vdev, uint64_t offset, uint64_t birth)
+{
+	return (vdev_raidz_redirect_match(vdev, offset, birth) != NULL);
 }
 
 /*

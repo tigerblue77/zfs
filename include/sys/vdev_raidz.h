@@ -189,6 +189,7 @@ extern int vdev_raidz_redirect_add(uint64_t, uint64_t, uint64_t, uint64_t,
     uint64_t, uint64_t);
 extern void vdev_raidz_redirect_clear(void);
 extern uint64_t vdev_raidz_redirect_hits(void);
+extern boolean_t vdev_raidz_redirect_lookup(uint64_t, uint64_t, uint64_t);
 
 /* RAIDZ scratch area pause points (for testing) */
 #define	RAIDZ_EXPAND_PAUSE_NONE	0

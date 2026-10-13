@@ -27,6 +27,28 @@
  *       reads back, with three it does not, and an old parity-1 block does
  *       not with two
  *
+ * Spike step 4: what may the move do with the old extent [O, O + A) of a
+ * moved block?  The policy is applied in the move's own sync task: P1 keeps
+ * it whole (the checks above always run with P1), P2 keeps its first sector
+ * and frees the rest, P3 frees it whole.
+ *
+ *   redirect_probe <dir> <ashift> brt <P1|P2|P3> [alone]
+ *
+ *   T4a a block X cloned into a second object is moved, a new block Y is
+ *       steered onto X's old extent (one allocator, best fit), then freed.
+ *       Y must not start at O, X must keep its clone reference, Y's extent
+ *       must be free again and both objects of X must read back.  A second,
+ *       unmoved cloned block keeps the vdev's BRT in use, unless 'alone'.
+ *
+ *   redirect_probe <dir> <ashift> scan <P1|P2|P3> [nofix]
+ *
+ *   T4b blocks X are moved, new blocks Y are steered onto the freed part of
+ *       their old extents, and the pool is scrubbed with the sorted scan.
+ *       The scrub must finish, issue every byte it examined, repair a bad
+ *       column of a moved and of a new block and find no error.  'nofix'
+ *       turns off the spike's routing of redirected blocks to the unsorted
+ *       path (spike_scan_redirect_unsorted in dsl_scan.c).
+ *
  * Prints one PASS or FAIL line per check and exits 1 if any check failed.
  */
 
@@ -42,11 +64,16 @@
 #include <sys/dmu.h>
 #include <sys/dmu_tx.h>
 #include <sys/dmu_objset.h>
+#include <sys/dnode.h>
+#include <sys/bpobj.h>
+#include <sys/brt.h>
 #include <sys/dsl_pool.h>
 #include <sys/dsl_prop.h>
 #include <sys/dsl_scan.h>
 #include <sys/dsl_synctask.h>
 #include <sys/metaslab.h>
+#include <sys/metaslab_impl.h>
+#include <sys/range_tree.h>
 #include <sys/txg.h>
 #include <sys/vdev.h>
 #include <sys/vdev_impl.h>
@@ -69,6 +96,12 @@
 
 extern uint64_t metaslab_force_ganging;
 extern uint_t metaslab_force_ganging_pct;
+/* Weak: absent from a libzpool without the spike's scan routing. */
+extern int spike_scan_redirect_unsorted __attribute__((weak));
+
+/* What the move does with the old extent of a moved block. */
+typedef enum policy { P1, P2, P3 } policy_t;
+static const char *const policy_names[] = { "P1", "P2", "P3" };
 
 static const char *dir;
 static uint64_t ashift;
@@ -195,23 +228,30 @@ cycle_pool(spa_t *spa)
 	return (import_pool());
 }
 
+/* An object of one incompressible block of <size> bytes. */
 static uint64_t
-put_object(objset_t *os, uint64_t seed)
+put_object_size(objset_t *os, uint64_t seed, uint64_t size)
 {
-	uint64_t *buf = malloc(BLKSZ);
+	uint64_t *buf = malloc(size);
 	dmu_tx_t *tx;
 	uint64_t obj;
 
-	fill_pattern(buf, BLKSZ, seed);
+	fill_pattern(buf, size, seed);
 	tx = dmu_tx_create(os);
-	dmu_tx_hold_write(tx, DMU_NEW_OBJECT, 0, BLKSZ);
+	dmu_tx_hold_write(tx, DMU_NEW_OBJECT, 0, size);
 	VERIFY0(dmu_tx_assign(tx, DMU_TX_WAIT));
-	obj = dmu_object_alloc(os, DMU_OT_PLAIN_FILE_CONTENTS, BLKSZ,
+	obj = dmu_object_alloc(os, DMU_OT_PLAIN_FILE_CONTENTS, size,
 	    DMU_OT_NONE, 0, tx);
-	dmu_write(os, obj, 0, BLKSZ, buf, tx, DMU_READ_NO_PREFETCH);
+	dmu_write(os, obj, 0, size, buf, tx, DMU_READ_NO_PREFETCH);
 	dmu_tx_commit(tx);
 	free(buf);
 	return (obj);
+}
+
+static uint64_t
+put_object(objset_t *os, uint64_t seed)
+{
+	return (put_object_size(os, seed, BLKSZ));
 }
 
 static blkptr_t
@@ -228,22 +268,29 @@ object_bp(objset_t *os, uint64_t obj)
 
 /* Read an object of the root dataset; 0 and a match, or the error. */
 static int
-read_object(spa_t *spa, uint64_t obj, uint64_t seed, boolean_t *match)
+read_object_size(uint64_t obj, uint64_t seed, uint64_t size,
+    boolean_t *match)
 {
 	objset_t *os;
-	uint64_t *buf = malloc(BLKSZ), *want = malloc(BLKSZ);
+	uint64_t *buf = malloc(size), *want = malloc(size);
 	int err;
 
-	(void) spa;
 	VERIFY0(dmu_objset_own(POOL, DMU_OST_ANY, B_FALSE, B_TRUE, FTAG, &os));
-	fill_pattern(want, BLKSZ, seed);
-	memset(buf, 0, BLKSZ);
-	err = dmu_read(os, obj, 0, BLKSZ, buf, DMU_READ_NO_PREFETCH);
-	*match = (err == 0 && memcmp(buf, want, BLKSZ) == 0);
+	fill_pattern(want, size, seed);
+	memset(buf, 0, size);
+	err = dmu_read(os, obj, 0, size, buf, DMU_READ_NO_PREFETCH);
+	*match = (err == 0 && memcmp(buf, want, size) == 0);
 	dmu_objset_disown(os, B_TRUE, FTAG);
 	free(buf);
 	free(want);
 	return (err);
+}
+
+static int
+read_object(spa_t *spa, uint64_t obj, uint64_t seed, boolean_t *match)
+{
+	(void) spa;
+	return (read_object_size(obj, seed, BLKSZ, match));
 }
 
 /*
@@ -383,19 +430,53 @@ typedef struct move {
 	uint64_t	mv_new_offset;
 	uint64_t	mv_new_birth;
 	uint64_t	mv_new_asize;
+	uint64_t	mv_old_asize;	/* the old extent is [O, O + this) */
+	uint64_t	mv_kept;	/* the policy keeps [O, O + this) */
 	extent_t	mv_old;
 	extent_t	mv_new;
 } move_t;
 
 typedef struct move_arg {
-	move_t	*ma_moves;
-	int	ma_n;
+	move_t		*ma_moves;
+	int		ma_n;
+	policy_t	ma_policy;
+	uint64_t	ma_far;		/* if not 0, claim N from here on */
 } move_arg_t;
+
+/*
+ * Apply the policy to the old extent of a block that has just been moved,
+ * in the move's own sync task: free whatever the policy does not keep.  The
+ * free is never checkpointed, which is only right with no checkpoint.
+ */
+static void
+old_extent_policy(spa_t *spa, move_t *mv, policy_t policy)
+{
+	vdev_t *tvd = spa->spa_root_vdev->vdev_child[0];
+	const dva_t *dva = &mv->mv_bp.blk_dva[0];
+	uint64_t offset = DVA_GET_OFFSET(dva);
+
+	mv->mv_old_asize = DVA_GET_GANG(dva) ? vdev_gang_header_asize(tvd,
+	    BP_GET_PHYSICAL_BIRTH(&mv->mv_bp)) : DVA_GET_ASIZE(dva);
+	mv->mv_kept = mv->mv_old_asize;
+	if (policy == P2)
+		mv->mv_kept = 1ULL << tvd->vdev_ashift;
+	else if (policy == P3)
+		mv->mv_kept = 0;
+	if (mv->mv_kept == mv->mv_old_asize)
+		return;
+
+	VERIFY(!spa_has_checkpoint(spa));
+	spa_config_enter(spa, SCL_FREE, FTAG, RW_READER);
+	metaslab_free_concrete(tvd, offset + mv->mv_kept,
+	    mv->mv_old_asize - mv->mv_kept, B_FALSE);
+	spa_config_exit(spa, SCL_FREE, FTAG);
+}
 
 /*
  * Re-encode every block in a sync task of a txg of the new epoch: allocate
  * an extent sized for its layout, write the raw bytes there through the
- * raidz vdev with that layout, and register the redirect.
+ * raidz vdev with that layout, register the redirect, and apply the policy
+ * to the old extent.
  */
 static void
 move_sync(void *arg, dmu_tx_t *tx)
@@ -418,11 +499,26 @@ move_sync(void *arg, dmu_tx_t *tx)
 		BP_SET_LEVEL(&wbp, 0);
 		BP_SET_BYTEORDER(&wbp, ZFS_HOST_BYTEORDER);
 
-		metaslab_trace_init(&zal);
-		VERIFY0(metaslab_alloc(spa, spa_normal_class(spa),
-		    mv->mv_psize, &wbp, 1, txg, NULL, 0, &zal, 0, FTAG));
-		metaslab_trace_fini(&zal);
-		BP_SET_BIRTH(&wbp, txg, txg);
+		if (ma->ma_far != 0) {
+			/* Place N deliberately, away from every old extent. */
+			vdev_t *tvd = spa->spa_root_vdev->vdev_child[0];
+			uint64_t asize = vdev_psize_to_asize_txg(tvd,
+			    mv->mv_psize, txg);
+
+			DVA_SET_VDEV(&wbp.blk_dva[0], 0);
+			DVA_SET_OFFSET(&wbp.blk_dva[0], ma->ma_far);
+			DVA_SET_ASIZE(&wbp.blk_dva[0], asize);
+			BP_SET_BIRTH(&wbp, txg, txg);
+			VERIFY0(metaslab_claim(spa, &wbp, txg));
+			ma->ma_far += asize;
+		} else {
+			metaslab_trace_init(&zal);
+			VERIFY0(metaslab_alloc(spa, spa_normal_class(spa),
+			    mv->mv_psize, &wbp, 1, txg, NULL, 0, &zal, 0,
+			    FTAG));
+			metaslab_trace_fini(&zal);
+			BP_SET_BIRTH(&wbp, txg, txg);
+		}
 
 		VERIFY0(zio_wait(zio_rewrite(NULL, spa, txg, &wbp,
 		    mv->mv_data, mv->mv_psize, NULL, NULL,
@@ -435,7 +531,30 @@ move_sync(void *arg, dmu_tx_t *tx)
 		    DVA_GET_OFFSET(&mv->mv_bp.blk_dva[0]),
 		    BP_GET_PHYSICAL_BIRTH(&mv->mv_bp), mv->mv_new_offset,
 		    mv->mv_new_birth, mv->mv_new_asize));
+		old_extent_policy(spa, mv, ma->ma_policy);
 	}
+}
+
+static void
+run_moves(spa_t *spa, move_t *moves, int n, policy_t policy, uint64_t far)
+{
+	move_arg_t ma = { moves, n, policy, far };
+
+	VERIFY0(dsl_sync_task(POOL, NULL, move_sync, &ma, 0,
+	    ZFS_SPACE_CHECK_NONE));
+	txg_wait_synced(spa_get_dsl(spa), 0);
+}
+
+/* Name a plain (not gang) block to move and read its raw bytes. */
+static void
+move_prepare(spa_t *spa, move_t *mv, const char *name, const blkptr_t *bp)
+{
+	memset(mv, 0, sizeof (*mv));
+	VERIFY(!BP_IS_GANG(bp));
+	mv->mv_name = name;
+	mv->mv_bp = *bp;
+	mv->mv_psize = BP_GET_PSIZE(bp);
+	mv->mv_data = read_raw(spa, bp, mv->mv_psize);
 }
 
 typedef struct epoch_arg {
@@ -462,6 +581,93 @@ epoch_sync(void *arg, dmu_tx_t *tx)
 	vdev_t *vd = dmu_tx_pool(tx)->dp_spa->spa_root_vdev->vdev_child[0];
 
 	VERIFY0(vdev_raidz_parity_epochs_set(vd, ea->ea_table, 2, tx));
+}
+
+/* The parity-2 epoch, from the first txg it may start in. */
+static uint64_t
+add_parity2_epoch(spa_t *spa)
+{
+	epoch_arg_t ea = { { 0, WIDTH, 1, 0, WIDTH, 2 } };
+
+	VERIFY0(dsl_sync_task(POOL, epoch_check, epoch_sync, &ea, 0,
+	    ZFS_SPACE_CHECK_NONE));
+	txg_wait_synced(spa_get_dsl(spa), ea.ea_table[3]);
+	(void) printf("INFO parity 2 from txg %llu\n",
+	    (u_longlong_t)ea.ea_table[3]);
+	return (ea.ea_table[3]);
+}
+
+/*
+ * Wait until the pool's pending frees have been issued and have left the
+ * defer trees, so that what they freed is allocatable again.
+ */
+static void
+wait_frees(spa_t *spa)
+{
+	dsl_pool_t *dp = spa_get_dsl(spa);
+
+	for (int i = 0; i < 100 && !bpobj_is_empty(&dp->dp_free_bpobj); i++)
+		txg_wait_synced(dp, 0);
+	VERIFY(bpobj_is_empty(&dp->dp_free_bpobj));
+	txg_wait_synced(dp, 0);
+	txg_wait_synced(dp, 0);
+}
+
+/* B_TRUE if [offset, offset + size) of vdev 0 is free and allocatable. */
+static boolean_t
+range_allocatable(spa_t *spa, uint64_t offset, uint64_t size)
+{
+	vdev_t *tvd = spa->spa_root_vdev->vdev_child[0];
+	metaslab_t *msp = tvd->vdev_ms[offset >> tvd->vdev_ms_shift];
+	boolean_t ok;
+
+	mutex_enter(&msp->ms_lock);
+	VERIFY0(metaslab_load(msp));
+	ok = zfs_range_tree_contains(msp->ms_allocatable, offset, size);
+	mutex_exit(&msp->ms_lock);
+	return (ok);
+}
+
+/* The free segments of vdev 0's metaslab <m> below <limit>. */
+static void
+print_free(spa_t *spa, uint64_t m, uint64_t limit)
+{
+	vdev_t *tvd = spa->spa_root_vdev->vdev_child[0];
+	metaslab_t *msp = tvd->vdev_ms[m];
+	zfs_range_tree_t *rt = msp->ms_allocatable;
+	zfs_btree_index_t where;
+
+	mutex_enter(&msp->ms_lock);
+	VERIFY0(metaslab_load(msp));
+	(void) printf("INFO free below %llx in metaslab %llu:",
+	    (u_longlong_t)limit, (u_longlong_t)m);
+	for (zfs_range_seg_t *rs = zfs_btree_first(&rt->rt_root, &where);
+	    rs != NULL && zfs_rs_get_start(rs, rt) < limit;
+	    rs = zfs_btree_next(&rt->rt_root, &where, &where)) {
+		(void) printf(" [%llx,+%llu)",
+		    (u_longlong_t)zfs_rs_get_start(rs, rt),
+		    (u_longlong_t)(zfs_rs_get_end(rs, rt) -
+		    zfs_rs_get_start(rs, rt)));
+	}
+	(void) printf("\n");
+	mutex_exit(&msp->ms_lock);
+}
+
+static void
+print_move(spa_t *spa, const move_t *mv)
+{
+	vdev_t *tvd = spa->spa_root_vdev->vdev_child[0];
+
+	(void) printf("INFO %s: O=%llx t1=%llu old asize=%llu kept=%llu "
+	    "-> N=%llx t2=%llu new asize=%llu (metaslabs %llu -> %llu)\n",
+	    mv->mv_name, (u_longlong_t)DVA_GET_OFFSET(&mv->mv_bp.blk_dva[0]),
+	    (u_longlong_t)BP_GET_PHYSICAL_BIRTH(&mv->mv_bp),
+	    (u_longlong_t)mv->mv_old_asize, (u_longlong_t)mv->mv_kept,
+	    (u_longlong_t)mv->mv_new_offset, (u_longlong_t)mv->mv_new_birth,
+	    (u_longlong_t)mv->mv_new_asize,
+	    (u_longlong_t)(DVA_GET_OFFSET(&mv->mv_bp.blk_dva[0]) >>
+	    tvd->vdev_ms_shift),
+	    (u_longlong_t)(mv->mv_new_offset >> tvd->vdev_ms_shift));
 }
 
 static uint64_t
@@ -565,8 +771,9 @@ data_children(extent_t *ex, int n, int *children)
 		children[i] = rr->rr_col[rr->rr_firstdatacol + i].rc_devidx;
 }
 
-int
-main(int argc, char **argv)
+/* Spike step 3: the read path, with the old extents kept whole (P1). */
+static void
+run_classic(void)
 {
 	enum { A, B, S, D, G, E, NMOVED, CTL = NMOVED, CTL2, NOBJ };
 	static const char *names[] = { "plain-A", "plain-B", "plain-S",
@@ -581,15 +788,6 @@ main(int argc, char **argv)
 	boolean_t match;
 	uint64_t hits;
 	int err;
-
-	(void) setvbuf(stdout, NULL, _IOLBF, 0);
-	if (argc != 3) {
-		(void) fprintf(stderr,
-		    "usage: redirect_probe <dir> <ashift>\n");
-		return (2);
-	}
-	dir = argv[1];
-	ashift = strtoull(argv[2], NULL, 10);
 
 	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
 	create_pool();
@@ -692,25 +890,10 @@ main(int argc, char **argv)
 	extent_map(&ctl2_old, DVA_GET_OFFSET(&ctl2_bp.blk_dva[0]),
 	    BP_GET_PSIZE(&ctl2_bp), 1);
 
-	/* The parity-2 epoch, from the first txg it may start in. */
-	{
-		epoch_arg_t ea = { { 0, WIDTH, 1, 0, WIDTH, 2 } };
+	(void) add_parity2_epoch(spa);
 
-		VERIFY0(dsl_sync_task(POOL, epoch_check, epoch_sync, &ea, 0,
-		    ZFS_SPACE_CHECK_NONE));
-		txg_wait_synced(spa_get_dsl(spa), ea.ea_table[3]);
-		(void) printf("INFO parity 2 from txg %llu\n",
-		    (u_longlong_t)ea.ea_table[3]);
-	}
-
-	/* Re-encode and redirect. */
-	{
-		move_arg_t ma = { moves, nmoves };
-
-		VERIFY0(dsl_sync_task(POOL, NULL, move_sync, &ma, 0,
-		    ZFS_SPACE_CHECK_NONE));
-		txg_wait_synced(spa_get_dsl(spa), 0);
-	}
+	/* Re-encode and redirect, keeping the old extents. */
+	run_moves(spa, moves, nmoves, P1, 0);
 	for (int i = 0; i < nmoves; i++) {
 		move_t *mv = &moves[i];
 		vdev_t *tvd = spa->spa_root_vdev->vdev_child[0];
@@ -871,6 +1054,449 @@ main(int argc, char **argv)
 	    (u_longlong_t)vdev_raidz_redirect_hits());
 	export_pool(spa);
 	kernel_fini();
+}
+
+/*
+ * The size of Y: the largest psize whose asize in the new epoch fits in what
+ * P2 frees of an old extent, so that best fit finds that hole an exact match
+ * under P2 and a near one under P3.  The same size is used under P1.
+ */
+static uint64_t
+steered_psize(spa_t *spa, const move_t *mv)
+{
+	vdev_t *tvd = spa->spa_root_vdev->vdev_child[0];
+	uint64_t hole = mv->mv_old_asize - (1ULL << tvd->vdev_ashift);
+	uint64_t psize = 1ULL << tvd->vdev_ashift;
+
+	while (vdev_psize_to_asize_txg(tvd, psize + (1ULL << tvd->vdev_ashift),
+	    mv->mv_new_birth) <= hole)
+		psize += 1ULL << tvd->vdev_ashift;
+	return (psize);
+}
+
+static void
+set_tunable(const char *arg)
+{
+	VERIFY0(handle_tunable_option(arg, B_TRUE));
+}
+
+/* An empty object with 128K blocks holding a clone of <src>'s block. */
+static uint64_t
+clone_object(spa_t *spa, objset_t *os, uint64_t src)
+{
+	blkptr_t bps[1];
+	size_t nbps = 1;
+	dnode_t *dn;
+	dmu_tx_t *tx;
+	uint64_t obj;
+
+	tx = dmu_tx_create(os);
+	dmu_tx_hold_bonus(tx, DMU_NEW_OBJECT);
+	VERIFY0(dmu_tx_assign(tx, DMU_TX_WAIT));
+	obj = dmu_object_alloc(os, DMU_OT_PLAIN_FILE_CONTENTS, BLKSZ,
+	    DMU_OT_NONE, 0, tx);
+	dmu_tx_commit(tx);
+	txg_wait_synced(spa_get_dsl(spa), 0);
+
+	VERIFY0(dmu_read_l0_bps(os, src, 0, BLKSZ, bps, &nbps));
+	VERIFY3U(nbps, ==, 1);
+	VERIFY0(dnode_hold(os, obj, FTAG, &dn));
+	tx = dmu_tx_create(os);
+	dmu_tx_hold_clone_by_dnode(tx, dn, 0, BLKSZ, BLKSZ);
+	VERIFY0(dmu_tx_assign(tx, DMU_TX_WAIT));
+	VERIFY0(dmu_brt_clone(os, obj, 0, BLKSZ, tx, bps, nbps));
+	dmu_tx_commit(tx);
+	dnode_rele(dn, FTAG);
+	txg_wait_synced(spa_get_dsl(spa), 0);
+	return (obj);
+}
+
+/*
+ * Write one block per object, in one txg, with a single allocator and
+ * best-fit allocation, so that each lands in the smallest free segment that
+ * holds it: the freed part of an old extent when the policy freed one.
+ */
+static void
+put_steered(spa_t *spa, uint64_t *objs, blkptr_t *bps, const uint64_t *seeds,
+    int n, uint64_t size)
+{
+	objset_t *os;
+
+	set_tunable("metaslab_df_free_pct=100");
+	VERIFY0(dmu_objset_own(POOL, DMU_OST_ANY, B_FALSE, B_TRUE, FTAG, &os));
+	for (int i = 0; i < n; i++)
+		objs[i] = put_object_size(os, seeds[i], size);
+	txg_wait_synced(spa_get_dsl(spa), 0);
+	for (int i = 0; i < n; i++)
+		bps[i] = object_bp(os, objs[i]);
+	dmu_objset_disown(os, B_TRUE, FTAG);
+	set_tunable("metaslab_df_free_pct=4");
+}
+
+/* Where Y lies against the old extent of X. */
+static const char *
+y_place(const move_t *mv, const blkptr_t *ybp)
+{
+	uint64_t o = DVA_GET_OFFSET(&mv->mv_bp.blk_dva[0]);
+	uint64_t y = DVA_GET_OFFSET(&ybp->blk_dva[0]);
+	uint64_t yend = y + DVA_GET_ASIZE(&ybp->blk_dva[0]);
+
+	if (y == o)
+		return ("starts at O");
+	if (y < o + mv->mv_old_asize && yend > o)
+		return ("overlaps the old extent");
+	return ("is outside the old extent");
+}
+
+/* Blocks written in one txg, which the allocator lays out back to back. */
+#define	NRUN	8
+
+/* Write NRUN one-block objects in one txg, seeds from <seed0> on. */
+static void
+put_run(spa_t *spa, objset_t *os, uint64_t seed0, uint64_t *objs,
+    blkptr_t *bps)
+{
+	for (int i = 0; i < NRUN; i++)
+		objs[i] = put_object(os, seed0 + i);
+	txg_wait_synced(spa_get_dsl(spa), 0);
+	(void) printf("INFO run of %d blocks:", NRUN);
+	for (int i = 0; i < NRUN; i++) {
+		bps[i] = object_bp(os, objs[i]);
+		(void) printf(" %llx", (u_longlong_t)DVA_GET_OFFSET(
+		    &bps[i].blk_dva[0]));
+	}
+	(void) printf("\n");
+}
+
+/* B_TRUE if other blocks of the run end at bps[i]'s start / start at end. */
+static boolean_t
+run_neighbour(const blkptr_t *bps, int i, boolean_t after)
+{
+	uint64_t o = DVA_GET_OFFSET(&bps[i].blk_dva[0]);
+	uint64_t e = o + DVA_GET_ASIZE(&bps[i].blk_dva[0]);
+
+	for (int j = 0; j < NRUN; j++) {
+		uint64_t oj = DVA_GET_OFFSET(&bps[j].blk_dva[0]);
+
+		if (j == i)
+			continue;
+		if (after ? oj == e :
+		    oj + DVA_GET_ASIZE(&bps[j].blk_dva[0]) == o)
+			return (B_TRUE);
+	}
+	return (B_FALSE);
+}
+
+/*
+ * T4a: BRT reference theft through an alias at O.  X is a block of a run
+ * written in one txg with run blocks on both sides, so that what the
+ * policy frees of its old extent is a hole of exactly that size.  Unless
+ * <alone>, another block K of the run is cloned too, so that the vdev's BRT
+ * stays in use whatever happens to X's entry.
+ */
+static void
+run_brt(policy_t policy, boolean_t alone)
+{
+	uint64_t seed_y = 12, seed0 = 20;
+	uint64_t objs[NRUN], a, b, c, o, refs, ysize;
+	blkptr_t bps[NRUN];
+	blkptr_t xbp, bbp, ybp;
+	objset_t *os;
+	spa_t *spa;
+	move_t mv;
+	boolean_t match;
+	int err, x = -1, k;
+
+	set_tunable("spa_num_allocators=1");
+	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+	create_pool();
+	VERIFY0(spa_open(POOL, &spa, FTAG));
+	(void) printf("INFO T4a policy %s%s, ashift %llu, %llu metaslabs of "
+	    "%llu bytes\n", policy_names[policy],
+	    alone ? ", X the only cloned block" : "", (u_longlong_t)ashift,
+	    (u_longlong_t)spa->spa_root_vdev->vdev_child[0]->vdev_ms_count,
+	    1ULL << spa->spa_root_vdev->vdev_child[0]->vdev_ms_shift);
+
+	/* X in the parity-1 epoch, cloned into a second object. */
+	VERIFY0(dmu_objset_own(POOL, DMU_OST_ANY, B_FALSE, B_TRUE, FTAG, &os));
+	put_run(spa, os, seed0, objs, bps);
+	for (int i = 0; i < NRUN && x == -1; i++) {
+		if (run_neighbour(bps, i, B_FALSE) &&
+		    run_neighbour(bps, i, B_TRUE))
+			x = i;
+	}
+	VERIFY3S(x, !=, -1);
+	k = (x + 1) % NRUN;
+	a = objs[x];
+	b = clone_object(spa, os, a);
+	if (!alone)
+		(void) clone_object(spa, os, objs[k]);
+	(void) printf("INFO X is run block %d; K, run block %d, is %s\n", x, k,
+	    alone ? "not cloned" : "cloned");
+	xbp = object_bp(os, a);
+	move_prepare(spa, &mv, "X", &xbp);
+	bbp = object_bp(os, b);
+	dmu_objset_disown(os, B_TRUE, FTAG);
+	o = DVA_GET_OFFSET(&mv.mv_bp.blk_dva[0]);
+	refs = brt_entry_get_refcount(spa, &mv.mv_bp);
+	check(DVA_EQUAL(&bbp.blk_dva[0], &mv.mv_bp.blk_dva[0]) &&
+	    BP_GET_PHYSICAL_BIRTH(&bbp) == BP_GET_PHYSICAL_BIRTH(&mv.mv_bp),
+	    "T4a the clone names X's DVA and physical birth");
+	check(refs == 1, "T4a X has one BRT reference before the move (%llu)",
+	    (u_longlong_t)refs);
+
+	/* Move X, apply the policy, let the freed part become allocatable. */
+	(void) add_parity2_epoch(spa);
+	run_moves(spa, &mv, 1, policy, 0);
+	wait_frees(spa);
+	print_move(spa, &mv);
+	if (mv.mv_kept < mv.mv_old_asize) {
+		(void) printf("INFO X's freed part [%llx, %llx) allocatable: "
+		    "%d\n", (u_longlong_t)(o + mv.mv_kept),
+		    (u_longlong_t)(o + mv.mv_old_asize),
+		    range_allocatable(spa, o + mv.mv_kept,
+		    mv.mv_old_asize - mv.mv_kept));
+	}
+
+	/* Y, steered onto the old extent if the policy freed any of it. */
+	print_free(spa, 0, mv.mv_new_offset + mv.mv_new_asize + (1 << 20));
+	ysize = steered_psize(spa, &mv);
+	put_steered(spa, &c, &ybp, &seed_y, 1, ysize);
+	(void) printf("INFO Y: offset=%llx psize=%llu asize=%llu birth=%llu, "
+	    "Y - O = %lld: Y %s\n",
+	    (u_longlong_t)DVA_GET_OFFSET(&ybp.blk_dva[0]),
+	    (u_longlong_t)BP_GET_PSIZE(&ybp),
+	    (u_longlong_t)DVA_GET_ASIZE(&ybp.blk_dva[0]),
+	    (u_longlong_t)BP_GET_PHYSICAL_BIRTH(&ybp),
+	    (longlong_t)(DVA_GET_OFFSET(&ybp.blk_dva[0]) - o),
+	    y_place(&mv, &ybp));
+	(void) printf("INFO BRT refcount at Y's offset before Y is freed: "
+	    "%llu\n", (u_longlong_t)brt_entry_get_refcount(spa, &ybp));
+
+	/* Free Y. */
+	VERIFY0(dmu_objset_own(POOL, DMU_OST_ANY, B_FALSE, B_TRUE, FTAG, &os));
+	VERIFY0(dmu_free_long_object(os, c));
+	dmu_objset_disown(os, B_TRUE, FTAG);
+	txg_wait_synced(spa_get_dsl(spa), 0);
+	wait_frees(spa);
+
+	check(DVA_GET_OFFSET(&ybp.blk_dva[0]) != o,
+	    "T4a Y does not start at X's old offset (Y at %llx, O at %llx)",
+	    (u_longlong_t)DVA_GET_OFFSET(&ybp.blk_dva[0]), (u_longlong_t)o);
+	refs = brt_entry_get_refcount(spa, &mv.mv_bp);
+	check(refs == 1, "T4a X keeps its one BRT reference after Y is freed "
+	    "(%llu)", (u_longlong_t)refs);
+	check(range_allocatable(spa, DVA_GET_OFFSET(&ybp.blk_dva[0]),
+	    DVA_GET_ASIZE(&ybp.blk_dva[0])),
+	    "T4a Y's extent [%llx, +%llu) is allocatable again",
+	    (u_longlong_t)DVA_GET_OFFSET(&ybp.blk_dva[0]),
+	    (u_longlong_t)DVA_GET_ASIZE(&ybp.blk_dva[0]));
+
+	spa = cycle_pool(spa);
+	(void) printf("INFO after reimport: X refcount %llu, Y's extent "
+	    "allocatable %d\n",
+	    (u_longlong_t)brt_entry_get_refcount(spa, &mv.mv_bp),
+	    range_allocatable(spa, DVA_GET_OFFSET(&ybp.blk_dva[0]),
+	    DVA_GET_ASIZE(&ybp.blk_dva[0])));
+	err = read_object(spa, a, seed0 + x, &match);
+	check(err == 0 && match, "T4a X's object reads back (err=%d match=%d)",
+	    err, match);
+	err = read_object(spa, b, seed0 + x, &match);
+	check(err == 0 && match, "T4a X's clone reads back (err=%d match=%d)",
+	    err, match);
+	(void) printf("INFO redirect hits: %llu\n",
+	    (u_longlong_t)vdev_raidz_redirect_hits());
+	export_pool(spa);
+	kernel_fini();
+}
+
+/*
+ * T4b: a sorted scrub with blocks Y overlapping the freed part of old
+ * extents.  The blocks X moved are those of a run written in one txg that
+ * have another run block right after them, so that what P2 frees of each is
+ * a hole of exactly that size.
+ */
+static void
+run_scan(policy_t policy, boolean_t fix)
+{
+	uint64_t robj[NRUN], xobj[NRUN], yobj[NRUN], xseed[NRUN], yseed[NRUN];
+	blkptr_t rbp[NRUN], ybp[NRUN];
+	move_t moves[NRUN];
+	extent_t xnew, ynew;
+	pool_scan_stat_t ps;
+	objset_t *os;
+	spa_t *spa;
+	int npairs = 0, overlaps = 0, cx, cy;
+	uint64_t hits, others = 0, ysize;
+	boolean_t match;
+	int err;
+
+	set_tunable("spa_num_allocators=1");
+	set_tunable("zfs_scan_legacy=0");
+	if (&spike_scan_redirect_unsorted != NULL)
+		spike_scan_redirect_unsorted = fix;
+	(void) printf("INFO T4b policy %s, ashift %llu, routing of "
+	    "redirected blocks: %s\n", policy_names[policy],
+	    (u_longlong_t)ashift, &spike_scan_redirect_unsorted == NULL ?
+	    "absent from this libzpool" :
+	    spike_scan_redirect_unsorted ? "on" : "off");
+	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+	create_pool();
+	VERIFY0(spa_open(POOL, &spa, FTAG));
+	(void) printf("INFO %llu metaslabs of %llu bytes\n",
+	    (u_longlong_t)spa->spa_root_vdev->vdev_child[0]->vdev_ms_count,
+	    1ULL << spa->spa_root_vdev->vdev_child[0]->vdev_ms_shift);
+
+	VERIFY0(dmu_objset_own(POOL, DMU_OST_ANY, B_FALSE, B_TRUE, FTAG, &os));
+	put_run(spa, os, 100, robj, rbp);
+	for (int i = 0; i < NRUN; i++) {
+		if (!run_neighbour(rbp, i, B_TRUE))
+			continue;
+		xobj[npairs] = robj[i];
+		xseed[npairs] = 100 + i;
+		yseed[npairs] = 200 + i;
+		move_prepare(spa, &moves[npairs], "X", &rbp[i]);
+		npairs++;
+	}
+	dmu_objset_disown(os, B_TRUE, FTAG);
+	VERIFY3S(npairs, >, 0);
+
+	/*
+	 * The new extents go to the last metaslab, far from the run, so that
+	 * the scan's extent tree gets no unqueued gap from them near X.
+	 */
+	(void) add_parity2_epoch(spa);
+	{
+		vdev_t *tvd = spa->spa_root_vdev->vdev_child[0];
+
+		run_moves(spa, moves, npairs, policy,
+		    tvd->vdev_ms[tvd->vdev_ms_count - 1]->ms_start);
+	}
+	wait_frees(spa);
+	ysize = steered_psize(spa, &moves[0]);
+	put_steered(spa, yobj, ybp, yseed, npairs, ysize);
+	for (int i = 0; i < npairs; i++) {
+		const char *where = "is outside every old extent";
+
+		print_move(spa, &moves[i]);
+		for (int j = 0; j < npairs; j++) {
+			if (strcmp(y_place(&moves[j], &ybp[i]),
+			    "is outside the old extent") != 0) {
+				where = y_place(&moves[j], &ybp[i]);
+				overlaps++;
+				break;
+			}
+		}
+		(void) printf("INFO Y%d: offset=%llx psize=%llu asize=%llu: "
+		    "%s\n", i, (u_longlong_t)DVA_GET_OFFSET(&ybp[i].blk_dva[0]),
+		    (u_longlong_t)BP_GET_PSIZE(&ybp[i]),
+		    (u_longlong_t)DVA_GET_ASIZE(&ybp[i].blk_dva[0]), where);
+	}
+	(void) printf("INFO %d of %d Y blocks overlap an old extent\n",
+	    overlaps, npairs);
+
+	/* A bad column in X0's new extent and in Y0, for the scrub to fix. */
+	extent_map(&xnew, moves[0].mv_new_offset, moves[0].mv_psize, 2);
+	extent_save(&xnew);
+	extent_map(&ynew, DVA_GET_OFFSET(&ybp[0].blk_dva[0]), ysize, 2);
+	extent_save(&ynew);
+	cx = extent_corrupt(&xnew, 0);
+	cy = extent_corrupt(&ynew, 0);
+
+	spa = cycle_pool(spa);
+	reset_errors(spa);
+	hits = vdev_raidz_redirect_hits();
+	VERIFY0(spa_scan(spa, POOL_SCAN_SCRUB, 0));
+	while (dsl_scan_scrubbing(spa_get_dsl(spa)))
+		txg_wait_synced(spa_get_dsl(spa), 0);
+	VERIFY0(spa_scan_get_stats(spa, &ps));
+	(void) printf("INFO scrub: state=%llu examined=%llu skipped=%llu "
+	    "issued=%llu to_examine=%llu errors=%llu, redirect hits %llu\n",
+	    (u_longlong_t)ps.pss_state, (u_longlong_t)ps.pss_examined,
+	    (u_longlong_t)ps.pss_skipped, (u_longlong_t)ps.pss_issued,
+	    (u_longlong_t)ps.pss_to_examine, (u_longlong_t)ps.pss_errors,
+	    (u_longlong_t)(vdev_raidz_redirect_hits() - hits));
+	(void) printf("INFO scrub: checksum errors by child:");
+	for (int c = 0; c < WIDTH; c++) {
+		uint64_t errs = child_cksum_errors(spa, c);
+
+		(void) printf(" %llu", (u_longlong_t)errs);
+		if (c != cx && c != cy)
+			others += errs;
+	}
+	(void) printf(" (bad columns on children %d and %d)\n", cx, cy);
+
+	check(ps.pss_state == DSS_FINISHED, "T4b the scrub finished (%llu)",
+	    (u_longlong_t)ps.pss_state);
+	check(ps.pss_errors == 0, "T4b the scrub found no unrecoverable "
+	    "block (%llu)", (u_longlong_t)ps.pss_errors);
+	check(ps.pss_issued == ps.pss_examined - ps.pss_skipped, "T4b the "
+	    "scrub issued every byte it examined and did not skip "
+	    "(examined %llu, skipped %llu, issued %llu)",
+	    (u_longlong_t)ps.pss_examined, (u_longlong_t)ps.pss_skipped,
+	    (u_longlong_t)ps.pss_issued);
+	check(vdev_raidz_redirect_hits() - hits >= npairs, "T4b the scrub "
+	    "read every moved block through its redirect (%llu hits, %d "
+	    "blocks)", (u_longlong_t)(vdev_raidz_redirect_hits() - hits),
+	    npairs);
+	check(others == 0, "T4b no checksum error on the children without a "
+	    "bad column (%llu)", (u_longlong_t)others);
+	spa = cycle_pool(spa);
+	check(extent_same(&xnew), "T4b the scrub repaired X0's new extent");
+	check(extent_same(&ynew), "T4b the scrub repaired Y0's extent");
+	for (int i = 0; i < npairs; i++) {
+		boolean_t ymatch;
+		int yerr;
+
+		err = read_object(spa, xobj[i], xseed[i], &match);
+		yerr = read_object_size(yobj[i], yseed[i], ysize, &ymatch);
+		check(err == 0 && match && yerr == 0 && ymatch, "T4b X%d and "
+		    "Y%d read back (err=%d/%d match=%d/%d)", i, i, err, yerr,
+		    match, ymatch);
+	}
+	export_pool(spa);
+	kernel_fini();
+}
+
+static int
+parse_policy(const char *s, policy_t *policy)
+{
+	for (int p = P1; p <= P3; p++) {
+		if (strcmp(s, policy_names[p]) == 0) {
+			*policy = p;
+			return (0);
+		}
+	}
+	return (-1);
+}
+
+int
+main(int argc, char **argv)
+{
+	policy_t policy = P1;
+
+	(void) setvbuf(stdout, NULL, _IOLBF, 0);
+	if (argc < 3 || (argc > 3 && (argc < 5 || argc > 6 ||
+	    parse_policy(argv[4], &policy) != 0 ||
+	    (strcmp(argv[3], "brt") != 0 && strcmp(argv[3], "scan") != 0) ||
+	    (argc == 6 && strcmp(argv[5],
+	    strcmp(argv[3], "brt") == 0 ? "alone" : "nofix") != 0)))) {
+		(void) fprintf(stderr, "usage: redirect_probe <dir> <ashift>\n"
+		    "       redirect_probe <dir> <ashift> brt <P1|P2|P3> "
+		    "[alone]\n"
+		    "       redirect_probe <dir> <ashift> scan <P1|P2|P3> "
+		    "[nofix]\n");
+		return (2);
+	}
+	dir = argv[1];
+	ashift = strtoull(argv[2], NULL, 10);
+
+	if (argc == 3)
+		run_classic();
+	else if (strcmp(argv[3], "brt") == 0)
+		run_brt(policy, argc == 6);
+	else
+		run_scan(policy, argc == 5);
 	(void) printf("%s: %d failure(s)\n", failures == 0 ? "PASS" : "FAIL",
 	    failures);
 	return (failures == 0 ? 0 : 1);
