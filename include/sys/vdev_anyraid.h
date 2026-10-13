@@ -100,6 +100,10 @@ typedef struct vdev_anyraid_relocate {
 	kcondvar_t	var_cv;
 	uint64_t	var_nonalloc;
 	uint64_t	var_object;
+	/* Metaslabs kept from allocation until the relocation is done */
+	uint64_t	*var_held_ms;
+	uint64_t	var_nheld_ms;
+	uint64_t	var_held_ms_size;
 } vdev_anyraid_relocate_t;
 
 typedef struct vdev_anyraid {

@@ -1305,6 +1305,8 @@ vdev_anyraid_metaslab_size(vdev_t *vd, uint64_t *shiftp)
 	*shiftp = MIN(*shiftp, highbit64(va->vd_tile_size) - 1);
 }
 
+static void anyraid_relocate_release_tiles(vdev_t *vd, boolean_t enable);
+
 static void
 vdev_anyraid_close(vdev_t *vd)
 {
@@ -1333,6 +1335,7 @@ vdev_anyraid_close(vdev_t *vd)
 		kmem_free(vart, sizeof (*vart));
 	while ((vart = list_remove_head(&var->var_done_list)))
 		kmem_free(vart, sizeof (*vart));
+	anyraid_relocate_release_tiles(vd, B_FALSE);
 	var->var_synced_offset = var->var_offset = 0;
 	var->var_synced_task = var->var_task = 0;
 }
@@ -2515,6 +2518,84 @@ tasklist_write(spa_t *spa, vdev_anyraid_relocate_t *var, dmu_tx_t *tx)
 	dmu_buf_rele(dbp, FTAG);
 }
 
+/*
+ * Until a relocation is done, the destination of each move is reserved and
+ * its source stays mapped, so the vdev can map fewer new tiles than its size
+ * promises: updated_asize is what it can still hold.  Leave allocatable as
+ * many of the lowest unmapped tiles as it can still map, and disable the
+ * metaslabs of the other unmapped tiles, or a write there would find no free
+ * slot to map its tile to.
+ */
+static void
+anyraid_relocate_hold_tiles(vdev_t *vd, uint64_t updated_asize)
+{
+	vdev_anyraid_t *va = vd->vdev_tsd;
+	vdev_anyraid_relocate_t *var = &va->vd_relocate;
+	uint64_t tsize = va->vd_tile_size * va->vd_width;
+
+	ASSERT0P(var->var_held_ms);
+	if (vd->vdev_ms_count == 0)
+		return;
+
+	uint64_t size = vd->vdev_ms_count * sizeof (uint64_t);
+	uint64_t *held = kmem_alloc(size, KM_SLEEP);
+	uint64_t nheld = 0;
+
+	rw_enter(&va->vd_lock, RW_READER);
+	uint64_t mapped = avl_numnodes(&va->vd_tile_map);
+	uint64_t budget = updated_asize / tsize > mapped ?
+	    updated_asize / tsize - mapped : 0;
+	uint64_t last_tile = UINT64_MAX;
+	boolean_t allowed = B_FALSE;
+	for (uint64_t m = 0; m < vd->vdev_ms_count; m++) {
+		anyraid_tile_t search;
+		search.at_tile_id = vd->vdev_ms[m]->ms_start / tsize;
+		if (avl_find(&va->vd_tile_map, &search, NULL) != NULL)
+			continue;
+		if (search.at_tile_id != last_tile) {
+			last_tile = search.at_tile_id;
+			allowed = budget > 0;
+			if (allowed)
+				budget--;
+		}
+		if (!allowed)
+			held[nheld++] = m;
+	}
+	rw_exit(&va->vd_lock);
+
+	for (uint64_t i = 0; i < nheld; i++)
+		metaslab_disable_nowait(vd->vdev_ms[held[i]]);
+	zfs_dbgmsg("anyraid vdev %llu: relocation holds %llu metaslabs, "
+	    "%llu tiles mapped, %llu more fit", (u_longlong_t)vd->vdev_id,
+	    (u_longlong_t)nheld, (u_longlong_t)mapped,
+	    (u_longlong_t)(updated_asize / tsize - MIN(mapped,
+	    updated_asize / tsize)));
+
+	var->var_held_ms = held;
+	var->var_nheld_ms = nheld;
+	var->var_held_ms_size = size;
+}
+
+/*
+ * Give the metaslabs held by anyraid_relocate_hold_tiles() back, to the
+ * allocator once the relocation is done, or to nobody when the vdev closes.
+ */
+static void
+anyraid_relocate_release_tiles(vdev_t *vd, boolean_t enable)
+{
+	vdev_anyraid_t *va = vd->vdev_tsd;
+	vdev_anyraid_relocate_t *var = &va->vd_relocate;
+
+	if (var->var_held_ms == NULL)
+		return;
+	for (uint64_t i = 0; enable && i < var->var_nheld_ms; i++)
+		metaslab_enable(vd->vdev_ms[var->var_held_ms[i]], B_FALSE,
+		    B_FALSE);
+	kmem_free(var->var_held_ms, var->var_held_ms_size);
+	var->var_held_ms = NULL;
+	var->var_nheld_ms = var->var_held_ms_size = 0;
+}
+
 static int
 tasklist_read(vdev_t *vd)
 {
@@ -2641,6 +2722,8 @@ disable_tail:
 	kmem_free(num_tiles, vd->vdev_children * sizeof (*num_tiles));
 	var->var_nonalloc = vd->vdev_asize - updated_asize;
 	vdev_update_nonallocating_space(vd, var->var_nonalloc, B_TRUE);
+	if (va->vd_contracting_leaf == -1)
+		anyraid_relocate_hold_tiles(vd, updated_asize);
 	if (va->vd_contracting_leaf != -1) {
 		uint64_t start = MIN(vd->vdev_ms_count,
 		    updated_asize >> vd->vdev_ms_shift);
@@ -2710,6 +2793,8 @@ anyraid_scrub_done(spa_t *spa, dmu_tx_t *tx, void *arg)
 	}
 
 	rw_exit(&va->vd_lock);
+	if (!contracting)
+		anyraid_relocate_release_tiles(ada->vd, B_TRUE);
 
 	spa_config_enter(spa, SCL_STATE_ALL, FTAG, RW_WRITER);
 	if (!contracting) {
@@ -3016,6 +3101,7 @@ vdev_anyraid_setup_rebalance(vdev_t *vd, dmu_tx_t *tx)
 	ASSERT3U(vd->vdev_asize, >=, updated_asize);
 	var->var_nonalloc = vd->vdev_asize - updated_asize;
 	vdev_update_nonallocating_space(vd, var->var_nonalloc, B_TRUE);
+	anyraid_relocate_hold_tiles(vd, updated_asize);
 
 	objset_t *mos = vd->vdev_spa->spa_meta_objset;
 	var->var_object = dmu_object_alloc(mos, DMU_OTN_UINT32_METADATA,
