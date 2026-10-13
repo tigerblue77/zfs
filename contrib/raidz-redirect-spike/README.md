@@ -197,7 +197,8 @@ previous code, `metaslab_check_free()` aborts (`segment already in tree`).
 
 A resilver takes its window from the DTLs and prunes every block pointer
 born before it, and `vdev_raidz_need_resilver()` tested the DTL at the old
-birth and the columns of the old extent.  A block moved while a child was
+birth and the columns of the old extent (step 6 below replaces the first
+half of this fix).  A block moved while a child was
 offline was never visited: the resilver finished, cleared the child's DTL,
 and left the child's column of N stale, so the block had lost a level of
 parity without a trace.  A replace, whose window covers every txg, still
@@ -275,15 +276,15 @@ so those shapes needed no change.
 
 The table load checked only that N was inside the vdev, non-empty and
 born after the block.  Each entry must now be one the move could have
-written: its key two uint64s and its value five; the old extent [O, O +
-old asize) and N aligned extents of one metaslab, N clear of the old
-extent; old_reserved non-zero, aligned and no larger than the old asize;
-the new birth after the birth, no later than the pool's last txg and in a
-later parity epoch.  The value gains the old asize for that: nothing else
-in the entry bounds old_reserved.  The move refuses a block of the
-current epoch, and P3, which keeps nothing, unless the test-only
-`spike_redirect_keep_none` is set, as the probes do for P3 (zdb, through
-`SPIKE_ZDB_KEEP_NONE`).
+written: its key two uint64s and its value five (25 since step 6); the
+old extent [O, O + old asize) and N aligned extents of one metaslab, N
+clear of the old extent; old_reserved non-zero, aligned and no larger
+than the old asize; the new birth after the birth, no later than the
+pool's last txg and in a later parity epoch.  The value gains the old
+asize for that: nothing else in the entry bounds old_reserved.  The move
+refuses a block of the current epoch, and P3, which keeps nothing, unless
+the test-only `spike_redirect_keep_none` is set, as the probes do for P3
+(zdb, through `SPIKE_ZDB_KEEP_NONE`).
 
 A damaged entry fails a read-write import with EROFS: ignored, its block
 would be freed whole at an old extent part of which may now be another
@@ -359,10 +360,84 @@ ashift 12 and 9, `read` fails with ECKSUM and no redirect hit, and
 `repair` returns plain-A's bytes rebuilt from O and rewrites the
 overwritten column of O.
 
+## Step 6: resilvers and txg-ranged scrubs walk the table
+
+A resilver takes its window (min, max) from the DTLs, both bounds
+exclusive, and the traversal prunes every block pointer born at or before
+min.  A moved block keeps its birth t1 while N was written in t2, so one
+with t1 <= min < t2 < max, a block moved while a child was missing, is
+never reached; `dsl_scan_done()` then reassesses the DTLs and the child's
+column of N stays stale.  The stopgap of the fixes above lowered min to the
+oldest such t1, which traverses everything born since.
+
+Each entry's value now also holds the block pointer the move found live and
+the bookmark that named it (25 uint64s; only the five fields of the entry
+are kept in memory).  `dsl_scan_visit()` starts with a walk of the table,
+`dsl_scan_redirect_pass()`, before the DDT and the traversal: for each live
+entry with t1 <= min < t2 < max, it checks the stored block pointer (it
+must name the entry's key and pass `zfs_blkptr_verify()`, otherwise the
+entry counts as one scan error), asks `dsl_scan_need_resilver()` about N at
+t2, and reads the block with the stored pointer through `scan_exec_io()`,
+as the scan's own I/O. `vdev_raidz_io_start()` sends it to N with `io_txg`
+t2, so the children whose DTL holds t2 are rebuilt and the checksum
+verifies the result.  Blocks with t1 inside the window are left to the
+traversal, and a full scan (min 0) skips the walk.  The walk suspends with
+the scan (`dsl_scan_check_suspend()`), and its cursor {state, vdev, offset,
+birth} is synced with `scn_phys` under the pool directory key
+`org.openzfs:spike_scan_redirect_cursor` and read back by
+`dsl_scan_init()`, so the scan cannot complete, nor the DTLs be reassessed,
+before the walk is done, and a resumed scan continues it.  Its reads are
+waited for in the txg that issues them, and a block freed before the scan
+of a txg is a tombstone the walk skips.  `spike_resilver_redirects` gains
+`SPIKE_RESILVER_TABLE_PASS` (4); its default is now 6, the walk and
+`vdev_raidz_need_resilver()` at N, with the stopgap (1) off and kept for
+the comparison.  Test-only: `spike_scan_redirect_batch` (entries read per
+txg), `spike_scan_redirect_verify`, `spike_scan_watch` and
+`spike_scan_pass_stats`.  The resilver mode's `nowiden` (2) now also turns
+the walk off, so `offline` still fails with it.
+
+    crash_probe <dir> <ashift> rpass <R1|R2|R3|R4|R5|R6> <P1|P2> [none|stopgap|pass|both|noverify]
+
+The setup is the resilver mode's plus 64 MiB of unmoved data written after
+every block to move: the moved blocks hold about 1% of what is allocated.
+R1 offlines child 2, moves plain, dedup, clone, gang and snapshot-only
+blocks, brings the child back and resilvers; zdb must be clean, a scrub
+must repair nothing, and a copy of the pool's files, with child 0 offline
+and one more column of each N damaged, must read back every object.  R2
+moves with every child online, damages a data column of each N and scrubs
+txgs (epoch, now) with `spa_scan_range()`: each column must be rebuilt.  R3
+reads one block per txg, exports after two, and the import must find the
+resilver running and child 2's DTL still holding t2, resume from the cursor
+and read the rest. R4 holds the walk (`zfs_scan_suspend_progress`), moves
+late-L, frees the moved object the walk reaches next and lets it go: it
+must meet the tombstone, read nothing at the extents the free released,
+leave late-L (t2 after the window) alone, and R1's checks pass.  R5 adds a
+mirror beside the raidz: the resilver must repair nothing on it.  R6
+rewrites plain-A's stored block pointer to name vdev 99.
+
+At ashift 12 and 9, under P1 and P2, R1 to R5 pass, and R6 passes under P2
+with one scan error.  With `none` (no walk, no stopgap), and on the
+previous commit with `spike_resilver_redirects` 2, R1 to R5 fail: the scrub
+after the resilver finds 5 to 9 checksum errors on child 2 and repairs
+them, the copy returns ECKSUM for the moved objects, the ranged scrub
+leaves every damaged column as it was, and R3 has no walk to resume (in
+three of four runs the resilver had finished before the export, in the
+fourth it had not started).  With `noverify`, R6 fails an ASSERT in
+`vdev_mirror_io_start()` in the sync thread.  The stopgap passes R1 and R5
+too.  On R1 under P2 at ashift 12, the resilver with the walk examined 1.7
+MB and visited 6346 block pointers in the window (58, 70); with the
+stopgap, 86.4 MB and 13524 in (4, 70).  Both issued about 1.6 MB and their
+leaves read 4.5 and 4.7 MB: raidz's and the mirror's need_resilver skip the
+unmoved blocks by their DTLs, so here the stopgap costs traversal, not data
+reads.  Beside a mirror (R5), the mirror's leaves read 0.1 MB or less
+either way and nothing was repaired there.
+
 Not covered: a checkpoint-aware move or free (the flags are computed, never
 exercised), a frozen pool, a tombstone dropped early because a txg defers
 no free (a nearly full pool), a scan I/O issued in the same sync as the
 free (only a stale holder's read is exercised), a damaged entry whose N
-overlaps another entry's extents, the table walk that should replace the
-widened window and its cost on a large pool, a mirror beside the raidz
-vdev, kernel builds, and scale.
+overlaps another entry's extents, the walk's cost on a large table (it
+looks at every entry; an index by t2 would bound it by the window) and the
+stopgap's on a large pool, two raidz vdevs with entries, a sorted scan
+interrupted while its queues are not empty, a sequential rebuild, kernel
+builds, and scale.

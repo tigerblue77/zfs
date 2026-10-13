@@ -85,6 +85,17 @@ typedef struct dsl_errorscrub_phys {
 	/ sizeof (uint64_t))
 
 /*
+ * SPIKE, not for merge: the pool directory key of the cursor of the walk of
+ * moved raidz blocks, and its states.  dsl_scan_phys_t has a fixed on-disk
+ * size, so the cursor cannot go there.
+ */
+#define	DMU_POOL_SPIKE_SCAN_RDC		"org.openzfs:spike_scan_redirect_cursor"
+#define	SPIKE_RDC_WORDS			4
+#define	SPIKE_RDC_PENDING		0	/* not started */
+#define	SPIKE_RDC_WALKING		1	/* past the key in words 1-3 */
+#define	SPIKE_RDC_DONE			2
+
+/*
  * Every pool will have one dsl_scan_t and this structure will contain
  * in-memory information about the scan and a pointer to the on-disk
  * representation (i.e. dsl_scan_phys_t). Most of the state of the scan
@@ -173,6 +184,14 @@ typedef struct dsl_scan {
 	uint64_t scn_queues_pending;	/* outstanding data to issue */
 	/* members needed for syncing error scrub status to disk */
 	dsl_errorscrub_phys_t errorscrub_phys;
+	/*
+	 * SPIKE, not for merge: the cursor of the scan's walk of moved raidz
+	 * blocks, {state, vdev, offset, birth} (dsl_scan_redirect_pass()),
+	 * synced with scn_phys under a key of its own, and the copy synced
+	 * last.
+	 */
+	uint64_t scn_spike_rdc[SPIKE_RDC_WORDS];
+	uint64_t scn_spike_rdc_cached[SPIKE_RDC_WORDS];
 } dsl_scan_t;
 
 typedef struct {

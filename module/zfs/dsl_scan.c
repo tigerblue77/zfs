@@ -121,6 +121,17 @@ static void scan_ds_queue_remove(dsl_scan_t *scn, uint64_t dsobj);
 static void scan_ds_queue_sync(dsl_scan_t *scn, dmu_tx_t *tx);
 static uint64_t dsl_scan_count_data_disks(spa_t *spa);
 static void read_by_block_level(dsl_scan_t *scn, zbookmark_phys_t zb);
+/* SPIKE: the walk of moved raidz blocks. */
+static void dsl_scan_redirect_load(dsl_scan_t *scn);
+static void dsl_scan_redirect_sync_state(dsl_scan_t *scn,
+    const uint64_t *rdc, dmu_tx_t *tx);
+static void dsl_scan_redirect_pass(dsl_scan_t *scn, dmu_tx_t *tx);
+static boolean_t dsl_scan_need_resilver(spa_t *spa, const dva_t *dva,
+    size_t psize, uint64_t phys_birth);
+static void count_block_skipped(dsl_scan_t *scn, const blkptr_t *bp,
+    boolean_t all);
+static void scan_exec_io(dsl_pool_t *dp, const blkptr_t *bp, int zio_flags,
+    const zbookmark_phys_t *zb, dsl_scan_io_queue_t *queue);
 
 extern uint_t zfs_vdev_async_write_active_min_dirty_percent;
 static int zfs_scan_blkstats = 0;
@@ -715,6 +726,7 @@ dsl_scan_init(dsl_pool_t *dp, uint64_t txg)
 	}
 
 	memcpy(&scn->scn_phys_cached, &scn->scn_phys, sizeof (scn->scn_phys));
+	dsl_scan_redirect_load(scn);
 
 	/* reload the queue into the in-core state */
 	if (scn->scn_phys.scn_queue_obj != 0) {
@@ -930,6 +942,9 @@ dsl_scan_sync_state(dsl_scan_t *scn, dmu_tx_t *tx, state_sync_type_t sync_type)
 		    &scn->scn_phys, tx));
 		memcpy(&scn->scn_phys_cached, &scn->scn_phys,
 		    sizeof (scn->scn_phys));
+		dsl_scan_redirect_sync_state(scn, scn->scn_spike_rdc, tx);
+		memcpy(scn->scn_spike_rdc_cached, scn->scn_spike_rdc,
+		    sizeof (scn->scn_spike_rdc));
 
 		if (scn->scn_checkpointing)
 			zfs_dbgmsg("finish scan checkpoint for %s",
@@ -942,6 +957,8 @@ dsl_scan_sync_state(dsl_scan_t *scn, dmu_tx_t *tx, state_sync_type_t sync_type)
 		    DMU_POOL_DIRECTORY_OBJECT,
 		    DMU_POOL_SCAN, sizeof (uint64_t), SCAN_PHYS_NUMINTS,
 		    &scn->scn_phys_cached, tx));
+		dsl_scan_redirect_sync_state(scn, scn->scn_spike_rdc_cached,
+		    tx);
 	}
 }
 
@@ -998,6 +1015,9 @@ dsl_scan_setup_sync(void *arg, dmu_tx_t *tx)
 	scn->scn_done_txg = 0;
 	scn->scn_last_checkpoint = 0;
 	scn->scn_checkpointing = B_FALSE;
+	/* SPIKE: the walk of moved raidz blocks starts over. */
+	memset(scn->scn_spike_rdc, 0, sizeof (scn->scn_spike_rdc));
+	memset(&spike_scan_pass_stats, 0, sizeof (spike_scan_pass_stats));
 	spa_scan_stat_init(spa);
 	vdev_scan_stat_init(spa->spa_root_vdev);
 
@@ -3233,11 +3253,187 @@ dsl_scan_ds_maxtxg(dsl_dataset_t *ds)
 	return (smt);
 }
 
+/*
+ * SPIKE, not for merge: the walk of moved raidz blocks.  A moved block
+ * keeps the birth t1 in its block pointer while its new extent N was
+ * written in t2, so the traversal, which prunes by t1, never reaches one
+ * with t1 <= scn_min_txg < t2 < scn_max_txg, and a child that missed t2
+ * keeps a stale column of N once the DTLs are reassessed.  The table holds
+ * each moved block's block pointer, as the move found it live: the walk
+ * reads such blocks with it, flagged as the scan's own I/O, so that the
+ * raidz children whose DTL holds t2 are repaired at N (io_txg is t2 there)
+ * and the checksum verifies what is rebuilt.  It runs before the DDT and
+ * the traversal, suspends as they do, and keeps its cursor under a key of
+ * its own, synced with scn_phys: the scan cannot complete, and the DTLs
+ * cannot be reassessed, before it is done.  Its reads are waited for in
+ * the txg that issues them, as the scan's are, and a block freed before
+ * the scan of a txg is a tombstone the walk skips, so no read reaches an
+ * extent a free released.  SPIKE: the walk looks at every entry of the
+ * table; an index by t2 would bound it by the entries in the window.
+ */
+static void
+dsl_scan_redirect_load(dsl_scan_t *scn)
+{
+	uint64_t *rdc = scn->scn_spike_rdc;
+	int err;
+
+	err = zap_lookup(scn->scn_dp->dp_meta_objset,
+	    DMU_POOL_DIRECTORY_OBJECT, DMU_POOL_SPIKE_SCAN_RDC,
+	    sizeof (uint64_t), SPIKE_RDC_WORDS, rdc);
+	/* Missing or damaged: walk again from the start, which is safe. */
+	if (err != 0 || rdc[0] > SPIKE_RDC_DONE)
+		memset(rdc, 0, sizeof (scn->scn_spike_rdc));
+	memcpy(scn->scn_spike_rdc_cached, rdc, sizeof (scn->scn_spike_rdc));
+	if (dsl_scan_is_running(scn) && rdc[0] == SPIKE_RDC_WALKING) {
+		spike_scan_pass_stats.sps_resumed++;
+		zfs_dbgmsg("spike: %s: walk of moved blocks resumes after "
+		    "{%llu, %llx, %llu}", spa_name(scn->scn_dp->dp_spa),
+		    (u_longlong_t)rdc[1], (u_longlong_t)rdc[2],
+		    (u_longlong_t)rdc[3]);
+	}
+}
+
+static void
+dsl_scan_redirect_sync_state(dsl_scan_t *scn, const uint64_t *rdc,
+    dmu_tx_t *tx)
+{
+	objset_t *mos = scn->scn_dp->dp_meta_objset;
+	int err;
+
+	if (dsl_scan_is_running(scn)) {
+		VERIFY0(zap_update(mos, DMU_POOL_DIRECTORY_OBJECT,
+		    DMU_POOL_SPIKE_SCAN_RDC, sizeof (uint64_t),
+		    SPIKE_RDC_WORDS, rdc, tx));
+		return;
+	}
+	err = zap_remove(mos, DMU_POOL_DIRECTORY_OBJECT,
+	    DMU_POOL_SPIKE_SCAN_RDC, tx);
+	VERIFY(err == 0 || err == ENOENT);
+}
+
+/* SPIKE: read one moved block the walk found, if the scan needs it. */
+static void
+dsl_scan_redirect_read(dsl_scan_t *scn, uint64_t vdev,
+    const raidz_redirect_ent_t *ent, const blkptr_t *bp,
+    const zbookmark_phys_t *zb, dmu_tx_t *tx)
+{
+	spike_scan_pass_stat_t *st = &spike_scan_pass_stats;
+	dsl_pool_t *dp = scn->scn_dp;
+	spa_t *spa = dp->dp_spa;
+	int zio_flags = ZIO_FLAG_SCAN_THREAD | ZIO_FLAG_CANFAIL;
+	uint64_t asize = BP_GET_ASIZE(bp);
+	uint64_t *tr;
+	boolean_t needs_io;
+
+	if (!dsl_scan_is_thorough_scrub(scn))
+		zio_flags |= ZIO_FLAG_RAW;
+	scn->scn_phys.scn_examined += asize;
+	spa->spa_scan_pass_exam += asize;
+	if (scn->scn_phys.scn_func == POOL_SCAN_SCRUB) {
+		zio_flags |= ZIO_FLAG_SCRUB;
+		needs_io = B_TRUE;
+	} else {
+		dva_t ndva = { { 0 } };
+
+		/* What a resilver must rebuild lies at N, written in t2. */
+		ASSERT3U(scn->scn_phys.scn_func, ==, POOL_SCAN_RESILVER);
+		zio_flags |= ZIO_FLAG_RESILVER;
+		DVA_SET_VDEV(&ndva, vdev);
+		DVA_SET_OFFSET(&ndva, ent->rde_new_offset);
+		DVA_SET_ASIZE(&ndva, ent->rde_new_asize);
+		DVA_SET_GANG(&ndva, BP_IS_GANG(bp));
+		needs_io = dsl_scan_need_resilver(spa, &ndva, BP_GET_PSIZE(bp),
+		    ent->rde_new_birth);
+	}
+	if (!needs_io || zfs_no_scrub_io) {
+		count_block_skipped(scn, bp, B_TRUE);
+		return;
+	}
+	st->sps_issued++;
+	st->sps_issued_bytes += asize;
+	tr = st->sps_trace[st->sps_ntrace++ % SPIKE_SCAN_TRACE];
+	tr[0] = vdev;
+	tr[1] = ent->rde_offset;
+	tr[2] = ent->rde_birth;
+	tr[3] = tx->tx_txg;
+	scan_exec_io(dp, bp, zio_flags, zb, NULL);
+}
+
+static void
+dsl_scan_redirect_pass(dsl_scan_t *scn, dmu_tx_t *tx)
+{
+	spike_scan_pass_stat_t *st = &spike_scan_pass_stats;
+	uint64_t *rdc = scn->scn_spike_rdc;
+	uint64_t n = 0;
+
+	if (rdc[0] == SPIKE_RDC_DONE ||
+	    !(spike_resilver_redirects & SPIKE_RESILVER_TABLE_PASS))
+		return;
+	/* No block is born in txg 0: a full scan's traversal reaches all. */
+	if (scn->scn_phys.scn_min_txg == 0) {
+		rdc[0] = SPIKE_RDC_DONE;
+		return;
+	}
+	if (rdc[0] == SPIKE_RDC_PENDING) {
+		memset(rdc, 0, sizeof (scn->scn_spike_rdc));
+		rdc[0] = SPIKE_RDC_WALKING;
+	}
+	st->sps_txgs++;
+	for (;;) {
+		raidz_redirect_ent_t ent;
+		blkptr_t bp;
+		zbookmark_phys_t zb;
+		int err;
+
+		/* SPIKE: test-only, at most this many entries per txg. */
+		if (spike_scan_redirect_batch != 0 &&
+		    n >= spike_scan_redirect_batch) {
+			scn->scn_suspending = B_TRUE;
+			break;
+		}
+		if (dsl_scan_check_suspend(scn, NULL))
+			break;
+		err = vdev_raidz_redirect_scan_next(scn->scn_dp->dp_spa,
+		    &rdc[1], scn->scn_phys.scn_min_txg,
+		    scn->scn_phys.scn_max_txg, &ent, &bp, &zb);
+		if (err == EAGAIN)
+			continue;
+		if (err == ENOENT) {
+			rdc[0] = SPIKE_RDC_DONE;
+			st->sps_done_txg = tx->tx_txg;
+			zfs_dbgmsg("spike: %s: walk of moved blocks done in "
+			    "txg %llu: %llu walked, %llu in the window, %llu "
+			    "read", spa_name(scn->scn_dp->dp_spa),
+			    (u_longlong_t)tx->tx_txg,
+			    (u_longlong_t)st->sps_walked,
+			    (u_longlong_t)st->sps_in_window,
+			    (u_longlong_t)st->sps_issued);
+			break;
+		}
+		n++;
+		if (err != 0) {
+			/* Counted as a scan error; nothing else to log. */
+			st->sps_damaged++;
+			scn->scn_phys.scn_errors++;
+			continue;
+		}
+		dsl_scan_redirect_read(scn, rdc[1], &ent, &bp, &zb, tx);
+	}
+}
+
 static void
 dsl_scan_visit(dsl_scan_t *scn, dmu_tx_t *tx)
 {
 	scan_ds_t *sds;
 	dsl_pool_t *dp = scn->scn_dp;
+
+	/*
+	 * SPIKE: the moved blocks the traversal cannot reach come first, so
+	 * that the scan cannot complete before they are read.
+	 */
+	dsl_scan_redirect_pass(scn, tx);
+	if (scn->scn_suspending)
+		return;
 
 	if (scn->scn_phys.scn_ddt_bookmark.ddb_class <=
 	    scn->scn_phys.scn_ddt_class_max) {
@@ -4760,6 +4956,8 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 		taskq_wait_id(dp->dp_sync_taskq, prefetch_tqid);
 		(void) zio_wait(scn->scn_zio_root);
 		scn->scn_zio_root = NULL;
+		/* SPIKE: test-only, what the traversal visited. */
+		spike_scan_pass_stats.sps_visited += scn->scn_visited_this_txg;
 
 		zfs_dbgmsg("scan visited %llu blocks of %s in %llums "
 		    "(%llu os's, %llu holes, %llu < mintxg, "

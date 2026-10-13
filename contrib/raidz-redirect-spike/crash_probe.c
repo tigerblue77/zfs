@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * Spike step 5 (throwaway, not part of any tree): is the move of old-epoch
- * raidz blocks atomic across a crash, does a fresh process find the
- * redirects, does zdb account for moved blocks (part A), and does freeing a
- * moved block release what it holds, in one txg with its redirect (part B)?
+ * Spike steps 5 and 6 (throwaway, not part of any tree): is the move of
+ * old-epoch raidz blocks atomic across a crash, does a fresh process find
+ * the redirects, does zdb account for moved blocks (part A), does freeing a
+ * moved block release what it holds, in one txg with its redirect (part B),
+ * and do resilvers and txg-ranged scrubs rebuild moved blocks (step 6)?
  *
  *   crash_probe <dir> <ashift> move <point> <P1|P2> [split]
  *   crash_probe <dir> <ashift> guard <mos|zil|stale|checkpoint|wrongzb>
@@ -15,6 +16,10 @@
  *   crash_probe <dir> <ashift> resilver <P1|P2>
  *       <offline|offlinescrub|control|replace> [nofix|nowiden|nocols]
  *   crash_probe <dir> <ashift> stalebp <P1|P2> [same] [nolive]
+ *   crash_probe <dir> <ashift> corrupt <kind> [P1|P2]
+ *   crash_probe <dir> <ashift> tomb <read|repair>
+ *   crash_probe <dir> <ashift> rpass <R1|R2|R3|R4|R5|R6> <P1|P2>
+ *       [none|stopgap|pass|both|noverify]
  *
  * The parent never initializes libzpool; every phase runs in a forked child.
  * Phase 0 creates a five-wide raidz1 pool of files in <dir>, writes a plain,
@@ -113,6 +118,34 @@
  * must read back after an export and import, and zdb must find no leak and
  * no claim error.  'nolive' clears the test-only spike_redirect_move_live.
  *
+ * rpass: the scan's walk of moved blocks by their new birth (step 6).
+ * Phase 0 is the resilver mode's plus bulk-B, 64 MiB written after every
+ * block to move (late-L too for R4, and a mirror of m0 and m1 beside the
+ * raidz, before bulk-B, for R5).  R1: child 2 offline, every block moved,
+ * child 2 back and resilvered; zdb; a scrub must then repair nothing, and
+ * a copy of the pool's files, with one column of each new extent damaged
+ * on a child other than 2 and RP_X and RP_X offline, must read back every
+ * object.  Each resilver prints MEASURE lines: its window, the bytes it
+ * examined and issued, the block pointers the traversal visited, what the
+ * leaves read, and what the walk did.  R2: every block moved with every
+ * child online, one data column of each new extent damaged, then a scrub
+ * of the txgs from the parity-2 epoch on must rebuild each one.  R3: R1
+ * with the walk limited to a block per txg (spike_scan_redirect_batch),
+ * exported once it has read two blocks, imported again: the walk must
+ * resume from its cursor and read the others.  R4: R1 with the walk held
+ * (zfs_scan_suspend_progress) after its first block, late-L moved, the
+ * moved object of plain-A and small-Z that the walk reaches first freed
+ * with a watch on its extents (spike_scan_watch), then the walk let go:
+ * it must skip the tombstone, read nothing of the freed block, and leave
+ * late-L, moved after the window, alone.  R5: R1 beside the mirror (N
+ * placed on the raidz by making the mirror noalloc during the move), which
+ * the resilver must not repair.  R6: plain-A's stored block pointer names
+ * vdev 99 on disk; the resilver must refuse it as one scan error and read
+ * every other moved block.  The last argument sets
+ * spike_resilver_redirects: none (2, no walk and no stopgap), stopgap (3),
+ * pass (6, the default), both (7); noverify clears
+ * spike_scan_redirect_verify.
+ *
  * Prints one PASS or FAIL line per check and exits 1 if any check failed.
  */
 
@@ -199,6 +232,11 @@ extern uint64_t vdev_raidz_redirect_tombstones(spa_t *, uint64_t)
     __attribute__((weak));
 extern boolean_t vdev_raidz_redirect_get_live(vdev_t *, uint64_t, uint64_t,
     raidz_redirect_ent_t *) __attribute__((weak));
+/* Weak: the scan's walk of moved blocks, absent from the previous step's. */
+extern spike_scan_pass_stat_t spike_scan_pass_stats __attribute__((weak));
+extern uint64_t spike_scan_watch[2][3] __attribute__((weak));
+extern int spike_scan_redirect_batch __attribute__((weak));
+extern int spike_scan_redirect_verify __attribute__((weak));
 /* Weak: the previous step's in-memory table, absent from this one. */
 extern int vdev_raidz_redirect_add(uint64_t, uint64_t, uint64_t, uint64_t,
     uint64_t, uint64_t) __attribute__((weak));
@@ -247,6 +285,16 @@ typedef struct shared {
 	boolean_t		sh_with_spill;	/* setup adds spill-S */
 	uint64_t		sh_obj_s;
 	uint64_t		sh_epoch_txg;	/* start of parity 2 */
+	/* rpass */
+	uint64_t		sh_bulk;	/* bytes of bulk-B, 0: none */
+	boolean_t		sh_mirror;	/* setup adds a mirror */
+	boolean_t		sh_late;	/* setup adds late-L */
+	int			sh_col_child[MAXMOVES];	/* R2: damaged */
+	uint64_t		sh_col_off[MAXMOVES];
+	uint64_t		sh_col_size[MAXMOVES];
+	uint64_t		sh_col_hash[MAXMOVES];	/* its bytes before */
+	uint64_t		sh_rp_window;	/* R3: the first process's */
+	int			sh_rp_freed;	/* R4: the freed move */
 } shared_t;
 
 static shared_t *sh;
@@ -1513,6 +1561,73 @@ set_dedup(uint64_t checksum)
 	VERIFY0(dsl_prop_set_int(POOL, "dedup", ZPROP_SRC_LOCAL, checksum));
 }
 
+/* A new object of <size> bytes of pattern <seed>, in 128K blocks. */
+static uint64_t
+put_bulk(objset_t *os, uint64_t seed, uint64_t size)
+{
+	const uint64_t chunk = 8ULL << 20;
+	char *buf = malloc(size);
+	dmu_tx_t *tx;
+	uint64_t obj;
+
+	fill_pattern((uint64_t *)buf, size, seed);
+	tx = dmu_tx_create(os);
+	dmu_tx_hold_bonus(tx, DMU_NEW_OBJECT);
+	VERIFY0(dmu_tx_assign(tx, DMU_TX_WAIT));
+	obj = dmu_object_alloc(os, DMU_OT_PLAIN_FILE_CONTENTS, BLKSZ,
+	    DMU_OT_NONE, 0, tx);
+	dmu_tx_commit(tx);
+	for (uint64_t off = 0; off < size; off += chunk) {
+		uint64_t len = MIN(chunk, size - off);
+
+		tx = dmu_tx_create(os);
+		dmu_tx_hold_write(tx, obj, off, len);
+		VERIFY0(dmu_tx_assign(tx, DMU_TX_WAIT));
+		dmu_write(os, obj, off, len, buf + off, tx,
+		    DMU_READ_NO_PREFETCH);
+		dmu_tx_commit(tx);
+	}
+	free(buf);
+	return (obj);
+}
+
+/* A second top-level vdev beside the raidz: a mirror of m0 and m1. */
+static void
+add_mirror(spa_t *spa)
+{
+	nvlist_t *child[2], *mirror, *root;
+	char path[PATH_BUF];
+
+	for (int c = 0; c < 2; c++) {
+		int fd;
+
+		(void) snprintf(path, sizeof (path), "%s/m%d", dir, c);
+		fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0666);
+		VERIFY3S(fd, !=, -1);
+		VERIFY0(ftruncate(fd, FILE_SIZE));
+		(void) close(fd);
+		child[c] = fnvlist_alloc();
+		fnvlist_add_string(child[c], ZPOOL_CONFIG_TYPE, VDEV_TYPE_FILE);
+		fnvlist_add_string(child[c], ZPOOL_CONFIG_PATH, path);
+		fnvlist_add_uint64(child[c], ZPOOL_CONFIG_ASHIFT, ashift);
+	}
+	mirror = fnvlist_alloc();
+	fnvlist_add_string(mirror, ZPOOL_CONFIG_TYPE, VDEV_TYPE_MIRROR);
+	fnvlist_add_uint64(mirror, ZPOOL_CONFIG_IS_LOG, 0);
+	fnvlist_add_nvlist_array(mirror, ZPOOL_CONFIG_CHILDREN,
+	    (const nvlist_t * const *)child, 2);
+	root = fnvlist_alloc();
+	fnvlist_add_string(root, ZPOOL_CONFIG_TYPE, VDEV_TYPE_ROOT);
+	fnvlist_add_nvlist_array(root, ZPOOL_CONFIG_CHILDREN,
+	    (const nvlist_t * const *)&mirror, 1);
+	VERIFY0(spa_vdev_add(spa, root, B_FALSE));
+	fnvlist_free(root);
+	fnvlist_free(mirror);
+	for (int c = 0; c < 2; c++)
+		fnvlist_free(child[c]);
+	(void) printf("INFO added a mirror of m0 and m1 as top-level vdev 1\n");
+}
+
 /*
  * Phase 0 of the free modes: a plain object, a dedup pair (one block, two
  * references), a clone pair (one block, one BRT reference), a gang object, a
@@ -1586,6 +1701,26 @@ child_setup_free(void)
 		sh->sh_fobj[z].fo_size = 1ULL << ashift;
 		sh->sh_fobj[z].fo_obj = put_object_size(os, 17,
 		    sh->sh_fobj[z].fo_size);
+		txg_wait_synced(spa_get_dsl(spa), 0);
+	}
+	if (sh->sh_late) {
+		/* Moved by rpass R4 while a resilver runs. */
+		sh->sh_fobj[add_fobj("late-L", 18, B_FALSE)].fo_obj =
+		    put_object(os, 18);
+		txg_wait_synced(spa_get_dsl(spa), 0);
+	}
+	if (sh->sh_mirror) {
+		dmu_objset_disown(os, B_TRUE, FTAG);
+		add_mirror(spa);
+		VERIFY0(dmu_objset_own(POOL, DMU_OST_ANY, B_FALSE, B_TRUE,
+		    FTAG, &os));
+	}
+	if (sh->sh_bulk != 0) {
+		/* Born after every block to move: the stopgap reaches it. */
+		int b = add_fobj("bulk-B", 19, B_FALSE);
+
+		sh->sh_fobj[b].fo_size = sh->sh_bulk;
+		sh->sh_fobj[b].fo_obj = put_bulk(os, 19, sh->sh_bulk);
 		txg_wait_synced(spa_get_dsl(spa), 0);
 	}
 	print_fobjs(os);
@@ -3278,12 +3413,12 @@ corrupt_sync(void *arg, dmu_tx_t *tx)
 	uint64_t key[3] = { DVA_GET_OFFSET(&sh->sh_bp[i].blk_dva[0]),
 	    BP_GET_PHYSICAL_BIRTH(&sh->sh_bp[i]), 0 };
 	uint64_t nkey[3];
-	uint64_t val[6] = { 0 };
+	uint64_t val[32] = { 0 };
 	uint64_t isz, nint, nlen = 2, nval;
 
 	VERIFY0(zap_length_uint64(mos, vdrz->vd_redirect_obj, key, 2, &isz,
 	    &nint));
-	VERIFY(isz == 8 && nint >= 4 && nint <= 5);
+	VERIFY(isz == 8 && nint >= 4 && nint <= 25);
 	VERIFY0(zap_lookup_uint64(mos, vdrz->vd_redirect_obj, key, 2, 8, nint,
 	    val));
 	(void) printf("INFO plain-A's entry {%llx, %llu}: %llu values: N=%llx "
@@ -3834,6 +3969,829 @@ run_tomb(const char *how)
 	return (0);
 }
 
+/*
+ * The rpass mode: the scan's walk of moved blocks by their new birth.
+ */
+#define	RP_X		0	/* the second child, offline for the reads */
+#define	RP_BULK		(64ULL << 20)
+
+typedef struct rp_args {
+	const char	*rp_test;	/* R1 ... R5 */
+	policy_t	rp_policy;
+	int		rp_fix;		/* spike_resilver_redirects, or -1 */
+} rp_args_t;
+
+static const char *rp_copy_dir;	/* rpass: the copy of the pool's files */
+
+/* What the leaves under vd did, summed. */
+typedef struct rp_leafstat {
+	uint64_t	rl_rd_bytes;
+	uint64_t	rl_rd_ops;
+	uint64_t	rl_wr_bytes;
+	uint64_t	rl_cksum;
+	uint64_t	rl_rd_errors;
+	uint64_t	rl_processed;
+	uint64_t	rl_healed;
+} rp_leafstat_t;
+
+static void
+rp_leaves(vdev_t *vd, rp_leafstat_t *ls)
+{
+	if (vd->vdev_ops->vdev_op_leaf) {
+		vdev_stat_t *vs = &vd->vdev_stat;
+
+		mutex_enter(&vd->vdev_stat_lock);
+		ls->rl_rd_bytes += vs->vs_bytes[ZIO_TYPE_READ];
+		ls->rl_rd_ops += vs->vs_ops[ZIO_TYPE_READ];
+		ls->rl_wr_bytes += vs->vs_bytes[ZIO_TYPE_WRITE];
+		ls->rl_cksum += vs->vs_checksum_errors;
+		ls->rl_rd_errors += vs->vs_read_errors;
+		ls->rl_processed += vs->vs_scan_processed;
+		ls->rl_healed += vs->vs_self_healed;
+		mutex_exit(&vd->vdev_stat_lock);
+		return;
+	}
+	for (int c = 0; c < vd->vdev_children; c++)
+		rp_leaves(vd->vdev_child[c], ls);
+}
+
+/* The leaves of top-level vdev <top>, or of the whole pool if -1. */
+static rp_leafstat_t
+rp_stat(spa_t *spa, int top)
+{
+	rp_leafstat_t ls = { 0 };
+
+	spa_config_enter(spa, SCL_VDEV, FTAG, RW_READER);
+	rp_leaves(top < 0 ? spa->spa_root_vdev :
+	    spa->spa_root_vdev->vdev_child[top], &ls);
+	spa_config_exit(spa, SCL_VDEV, FTAG);
+	return (ls);
+}
+
+static spike_scan_pass_stat_t *
+rp_walk(void)
+{
+	return (&spike_scan_pass_stats != NULL ? &spike_scan_pass_stats :
+	    NULL);
+}
+
+static void
+rp_print_walk(const char *when)
+{
+	spike_scan_pass_stat_t *st = rp_walk();
+
+	if (st == NULL) {
+		(void) printf("INFO %s: this libzpool has no walk of moved "
+		    "blocks\n", when);
+		return;
+	}
+	(void) printf("MEASURE %s walk: walked=%llu tombs=%llu in_window=%llu "
+	    "issued=%llu issued_bytes=%llu damaged=%llu txgs=%llu "
+	    "resumed=%llu done_txg=%llu traversal_visited=%llu "
+	    "watch_hits=%llu\n", when, (u_longlong_t)st->sps_walked,
+	    (u_longlong_t)st->sps_tombs, (u_longlong_t)st->sps_in_window,
+	    (u_longlong_t)st->sps_issued, (u_longlong_t)st->sps_issued_bytes,
+	    (u_longlong_t)st->sps_damaged, (u_longlong_t)st->sps_txgs,
+	    (u_longlong_t)st->sps_resumed, (u_longlong_t)st->sps_done_txg,
+	    (u_longlong_t)st->sps_visited, (u_longlong_t)st->sps_watch_hits);
+	for (uint64_t t = 0; t < MIN(st->sps_ntrace, SPIKE_SCAN_TRACE); t++) {
+		(void) printf("INFO walk read {%llu, %llx, %llu} in txg %llu\n",
+		    (u_longlong_t)st->sps_trace[t][0],
+		    (u_longlong_t)st->sps_trace[t][1],
+		    (u_longlong_t)st->sps_trace[t][2],
+		    (u_longlong_t)st->sps_trace[t][3]);
+	}
+}
+
+/* Whether the walk read move i's block (its key is in the trace). */
+static boolean_t
+rp_walk_read(int i)
+{
+	spike_scan_pass_stat_t *st = rp_walk();
+
+	for (uint64_t t = 0; st != NULL &&
+	    t < MIN(st->sps_ntrace, SPIKE_SCAN_TRACE); t++) {
+		if (st->sps_trace[t][1] ==
+		    DVA_GET_OFFSET(&sh->sh_bp[i].blk_dva[0]) &&
+		    st->sps_trace[t][2] == BP_GET_PHYSICAL_BIRTH(&sh->sh_bp[i]))
+			return (B_TRUE);
+	}
+	return (B_FALSE);
+}
+
+static void
+rp_set_batch(int batch)
+{
+	if (&spike_scan_redirect_batch == NULL) {
+		(void) printf("INFO this libzpool has no "
+		    "spike_scan_redirect_batch\n");
+		return;
+	}
+	spike_scan_redirect_batch = batch;
+	(void) printf("INFO spike_scan_redirect_batch=%d\n", batch);
+}
+
+/* What the resilver, or scrub, that just finished cost. */
+static void
+rp_measure(spa_t *spa, const char *what, const pool_scan_stat_t *ps,
+    const rp_leafstat_t *b, const rp_leafstat_t *a, uint64_t txgs)
+{
+	dsl_scan_t *scn = spa_get_dsl(spa)->dp_scan;
+
+	(void) printf("MEASURE %s: window (%llu, %llu) to_examine=%llu "
+	    "examined=%llu skipped=%llu issued=%llu processed=%llu "
+	    "errors=%llu txgs=%llu leaf_read_bytes=%llu leaf_read_ops=%llu "
+	    "leaf_cksum=%llu\n", what,
+	    (u_longlong_t)scn->scn_phys.scn_min_txg,
+	    (u_longlong_t)scn->scn_phys.scn_max_txg,
+	    (u_longlong_t)ps->pss_to_examine, (u_longlong_t)ps->pss_examined,
+	    (u_longlong_t)ps->pss_skipped, (u_longlong_t)ps->pss_issued,
+	    (u_longlong_t)ps->pss_processed, (u_longlong_t)ps->pss_errors,
+	    (u_longlong_t)txgs, (u_longlong_t)(a->rl_rd_bytes - b->rl_rd_bytes),
+	    (u_longlong_t)(a->rl_rd_ops - b->rl_rd_ops),
+	    (u_longlong_t)(a->rl_cksum - b->rl_cksum));
+}
+
+/* The objset of the moves' bookmarks, and the moves of fobj f appended. */
+static int
+rp_move_one(spa_t *spa, int f, policy_t policy)
+{
+	uint64_t snapid = snap_objset_id();
+	int first = sh->sh_nmoves;
+	objset_t *os;
+	int err;
+
+	VERIFY0(dmu_objset_hold(POOL, FTAG, &os));
+	add_fobj_moves(spa, os, f, snapid);
+	dmu_objset_rele(os, FTAG);
+	err = vdev_raidz_redirect_move(spa, 0, &sh->sh_rdm[first],
+	    sh->sh_nmoves - first, policy == P2 ? RAIDZ_REDIRECT_KEEP_FIRST :
+	    RAIDZ_REDIRECT_KEEP_ALL, B_FALSE);
+	for (int i = first; i < sh->sh_nmoves; i++) {
+		print_move(i);
+		if (sh->sh_rdm[i].rdm_error != 0)
+			err = sh->sh_rdm[i].rdm_error;
+	}
+	sh->sh_fobj[f].fo_moved = B_TRUE;
+	return (err);
+}
+
+/*
+ * R4, while the resilver runs: hold the walk (zfs_scan_suspend_progress),
+ * move late-L, then free whichever of plain-A and small-Z the walk reaches
+ * first, with a watch on the extents the free releases, and let the walk
+ * go on, through all that is left, while the freed block's tombstone
+ * stands.
+ */
+static void
+rp_free_and_move(spa_t *spa, policy_t policy, boolean_t walk)
+{
+	dsl_pool_t *dp = spa_get_dsl(spa);
+	dsl_scan_t *scn = dp->dp_scan;
+	int ia = find_move("plain-A"), iz = find_move("small-Z");
+	uint64_t oa = DVA_GET_OFFSET(&sh->sh_bp[ia].blk_dva[0]);
+	uint64_t oz = DVA_GET_OFFSET(&sh->sh_bp[iz].blk_dva[0]);
+	uint64_t c = walk ? scn->scn_spike_rdc[2] : 0;
+	const raidz_redirect_ent_t *e;
+	uint64_t o, txg;
+	int i, f, err;
+
+	zfs_scan_suspend_progress = 1;
+	txg_wait_synced(dp, 0);
+	txg_wait_synced(dp, 0);
+	err = rp_move_one(spa, find_fobj("late-L"), policy);
+	check(err == 0, "late-L moves while the resilver runs (%d), new "
+	    "birth %llu", err, (u_longlong_t)sh->sh_rdm[sh->sh_nmoves - 1].
+	    rdm_ent.rde_new_birth);
+
+	if (walk)
+		c = scn->scn_spike_rdc[2];
+	i = (oa > c && (oz <= c || oa < oz)) ? ia : iz;
+	e = &sh->sh_rdm[i].rdm_ent;
+	o = DVA_GET_OFFSET(&sh->sh_bp[i].blk_dva[0]);
+	f = sh->sh_owner[i];
+	(void) printf("INFO freeing %s, key {0, %llx, %llu}\n", sh->sh_name[i],
+	    (u_longlong_t)o,
+	    (u_longlong_t)BP_GET_PHYSICAL_BIRTH(&sh->sh_bp[i]));
+	if (walk) {
+		(void) printf("INFO walk held at cursor {%llu, %llx, %llu} "
+		    "state %llu\n", (u_longlong_t)scn->scn_spike_rdc[1],
+		    (u_longlong_t)scn->scn_spike_rdc[2],
+		    (u_longlong_t)scn->scn_spike_rdc[3],
+		    (u_longlong_t)scn->scn_spike_rdc[0]);
+		check(scn->scn_spike_rdc[0] == SPIKE_RDC_WALKING && c < o &&
+		    !rp_walk_read(i), "the walk has not reached %s's entry "
+		    "when it is freed", sh->sh_name[i]);
+	}
+	if (rp_walk() != NULL) {
+		spike_scan_watch[0][0] = 0;
+		spike_scan_watch[0][1] = o;
+		spike_scan_watch[0][2] = e->rde_old_reserved;
+		spike_scan_watch[1][0] = 0;
+		spike_scan_watch[1][1] = e->rde_new_offset;
+		spike_scan_watch[1][2] = e->rde_new_asize;
+		spike_scan_pass_stats.sps_watch_hits = 0;
+	}
+	txg = free_fobjs(spa, &f, 1);
+	txg_wait_synced(dp, txg);
+	sh->sh_rp_freed = i;
+	(void) printf("INFO freed %s in txg %llu: watching [%llx, +%llu) and "
+	    "[%llx, +%llu) for scan reads\n", sh->sh_fobj[f].fo_name,
+	    (u_longlong_t)txg, (u_longlong_t)o,
+	    (u_longlong_t)e->rde_old_reserved,
+	    (u_longlong_t)e->rde_new_offset, (u_longlong_t)e->rde_new_asize);
+	if (walk) {
+		check(vdev_raidz_redirect_tombstones(spa, 0) == 1, "its "
+		    "tombstone stands once txg %llu synced",
+		    (u_longlong_t)txg);
+		rp_set_batch(0);
+	}
+	zfs_scan_suspend_progress = 0;
+}
+
+/*
+ * R6: name another vdev in DVA 0 of the block pointer stored with plain-A's
+ * entry on disk, as damage would; the entry in memory is unchanged.
+ */
+static void
+rp_damage_bp_sync(void *arg, dmu_tx_t *tx)
+{
+	(void) arg;
+	spa_t *spa = dmu_tx_pool(tx)->dp_spa;
+	vdev_raidz_t *vdrz = spa->spa_root_vdev->vdev_child[0]->vdev_tsd;
+	objset_t *mos = spa_meta_objset(spa);
+	int i = find_move("plain-A");
+	uint64_t key[2] = { DVA_GET_OFFSET(&sh->sh_bp[i].blk_dva[0]),
+	    BP_GET_PHYSICAL_BIRTH(&sh->sh_bp[i]) };
+	uint64_t val[RAIDZ_REDIRECT_VALUES];
+	blkptr_t bp;
+
+	VERIFY0(zap_lookup_uint64(mos, vdrz->vd_redirect_obj, key, 2, 8,
+	    RAIDZ_REDIRECT_VALUES, val));
+	memcpy(&bp, &val[RAIDZ_REDIRECT_ENT_VALUES], sizeof (bp));
+	VERIFY(DVA_EQUAL(&bp.blk_dva[0], &sh->sh_bp[i].blk_dva[0]));
+	DVA_SET_VDEV(&bp.blk_dva[0], 99);
+	memcpy(&val[RAIDZ_REDIRECT_ENT_VALUES], &bp, sizeof (bp));
+	VERIFY0(zap_update_uint64(mos, vdrz->vd_redirect_obj, key, 2, 8,
+	    RAIDZ_REDIRECT_VALUES, val, tx));
+	(void) printf("INFO plain-A's stored block pointer now names vdev 99 "
+	    "in DVA 0\n");
+}
+
+/*
+ * Phase 1 of R1, R3, R4, R5: child 2 offline, move every block, bring it
+ * back and resilver.  R3 exports in the middle of the walk; R4 frees a
+ * moved block and moves another while the walk runs.
+ */
+static int
+child_rp_resilver(void *arg)
+{
+	rp_args_t *ra = arg;
+	boolean_t r3 = strcmp(ra->rp_test, "R3") == 0;
+	boolean_t r4 = strcmp(ra->rp_test, "R4") == 0;
+	boolean_t r5 = strcmp(ra->rp_test, "R5") == 0;
+	boolean_t r6 = strcmp(ra->rp_test, "R6") == 0;
+	spike_scan_pass_stat_t *st;
+	rp_leafstat_t b, a, bm, am;
+	pool_scan_stat_t ps;
+	vdev_state_t ns;
+	vdev_t *tvd, *cvd;
+	uint64_t t0, t2, mguid = 0;
+	boolean_t walk;
+	spa_t *spa;
+
+	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+	rs_set_fix(ra->rp_fix);
+	st = rp_walk();
+	walk = st != NULL && ra->rp_fix != 2 && ra->rp_fix != 3;
+	if ((r3 || r4) && walk)
+		rp_set_batch(1);
+	spa = import_pool();
+	tvd = spa->spa_root_vdev->vdev_child[0];
+	cvd = tvd->vdev_child[RS_CHILD];
+	sh->sh_watch = RS_CHILD;
+	VERIFY0(vdev_offline(spa, cvd->vdev_guid, 0));
+	(void) printf("INFO child %d offline (state %d)\n", RS_CHILD,
+	    (int)cvd->vdev_state);
+	if (r5) {
+		/* N must be on the raidz vdev. */
+		mguid = spa->spa_root_vdev->vdev_child[1]->vdev_guid;
+		VERIFY0(spa_vdev_noalloc(spa, mguid));
+	}
+	move_fobjs(spa, ra->rp_policy);
+	if (r5)
+		VERIFY0(spa_vdev_alloc(spa, mguid));
+	if (r6) {
+		VERIFY0(dsl_sync_task(POOL, NULL, rp_damage_bp_sync, NULL, 0,
+		    ZFS_SPACE_CHECK_NONE));
+	}
+	for (int k = 0; k < 3; k++) {
+		dirty_txg(spa);
+		txg_wait_synced(spa_get_dsl(spa), 0);
+	}
+	t2 = sh->sh_rdm[0].rdm_ent.rde_new_birth;
+	check(vdev_dtl_contains(cvd, DTL_MISSING, t2, 1), "child %d's "
+	    "DTL_MISSING holds the move's txg %llu", RS_CHILD,
+	    (u_longlong_t)t2);
+	b = rp_stat(spa, -1);
+	if (r5)
+		bm = rp_stat(spa, 1);
+	t0 = spa_last_synced_txg(spa);
+	VERIFY0(vdev_online(spa, cvd->vdev_guid, 0, &ns));
+	(void) printf("INFO child %d online (state %d)\n", RS_CHILD, (int)ns);
+
+	if ((r3 || r4) && walk) {
+		int n;
+
+		/* Until the walk has read a block and has more to read. */
+		for (n = 0; n < RS_TXGS; n++) {
+			txg_wait_synced(spa_get_dsl(spa), 0);
+			if (st->sps_issued >= (r3 ? 2 : 1) ||
+			    st->sps_done_txg != 0)
+				break;
+			if (n % 8 == 7)
+				dirty_txg(spa);
+		}
+		rp_print_walk("before the interruption");
+		check(st->sps_issued >= 1 && st->sps_done_txg == 0,
+		    "the walk has read a block and is not done after %d txgs",
+		    n);
+		if (st->sps_done_txg != 0) {
+			export_pool(spa);
+			kernel_fini();
+			return (1);
+		}
+	} else if (r3 || r4) {
+		/* No walk: interrupt the resilver itself. */
+		for (int n = 0; n < 6; n++)
+			txg_wait_synced(spa_get_dsl(spa), 0);
+		(void) printf("INFO no walk in this run; resilvering %d\n",
+		    dsl_scan_resilvering(spa_get_dsl(spa)));
+	}
+	if (r3) {
+		sh->sh_rp_window = walk ? st->sps_in_window : 0;
+		check(vdev_dtl_contains(cvd, DTL_MISSING, t2, 1) &&
+		    dsl_scan_resilvering(spa_get_dsl(spa)), "the resilver "
+		    "runs and child %d's DTL_MISSING still holds txg %llu",
+		    RS_CHILD, (u_longlong_t)t2);
+		(void) printf("INFO exporting in the middle of the resilver\n");
+		export_pool(spa);
+		kernel_fini();
+		return (failures == 0 ? 0 : 1);
+	}
+	if (r4)
+		rp_free_and_move(spa, ra->rp_policy, walk);
+
+	rs_wait(spa, rs_offline_done, &ps);
+	check(ps.pss_func == POOL_SCAN_RESILVER &&
+	    ps.pss_state == DSS_FINISHED && ps.pss_errors == (r6 ? 1 : 0) &&
+	    rs_offline_done(spa), "the resilver of child %d finished with %d "
+	    "error and cleared its DTL (%llu)", RS_CHILD, r6 ? 1 : 0,
+	    (u_longlong_t)ps.pss_errors);
+	a = rp_stat(spa, -1);
+	rp_measure(spa, "resilver", &ps, &b, &a,
+	    spa_last_synced_txg(spa) - t0);
+	rp_print_walk("resilver");
+	if (walk) {
+		check(st->sps_in_window == sh->sh_nmoves - (r4 ? 2 : 0) &&
+		    st->sps_done_txg != 0, "the walk found the %d moved "
+		    "blocks the traversal prunes (%llu)",
+		    sh->sh_nmoves - (r4 ? 2 : 0),
+		    (u_longlong_t)st->sps_in_window);
+	}
+	if (r6) {
+		/* A new extent with no column on child 2 needs no read. */
+		check(st != NULL && st->sps_damaged == 1 &&
+		    st->sps_in_window == sh->sh_nmoves &&
+		    !rp_walk_read(find_move("plain-A")), "the walk refused "
+		    "plain-A's damaged block pointer and went on to the %d "
+		    "other moved blocks (%llu read)", sh->sh_nmoves - 1,
+		    (u_longlong_t)(st != NULL ? st->sps_issued : 0));
+	}
+	if (r4) {
+		dsl_scan_t *scn = spa_get_dsl(spa)->dp_scan;
+		const raidz_redirect_ent_t *le =
+		    &sh->sh_rdm[sh->sh_nmoves - 1].rdm_ent;
+
+		check(!rp_walk_read(sh->sh_rp_freed), "the walk never read "
+		    "the freed %s", sh->sh_name[sh->sh_rp_freed]);
+		if (walk) {
+			check(st->sps_tombs == 1, "the walk met its "
+			    "tombstone and skipped it (%llu)",
+			    (u_longlong_t)st->sps_tombs);
+		}
+		if (st != NULL) {
+			check(st->sps_watch_hits == 0, "no scan read touched "
+			    "the extents the free released (%llu)",
+			    (u_longlong_t)st->sps_watch_hits);
+			memset(spike_scan_watch, 0, sizeof (spike_scan_watch));
+		}
+		check(le->rde_new_birth >= scn->scn_phys.scn_max_txg &&
+		    !rp_walk_read(sh->sh_nmoves - 1), "late-L, moved in txg "
+		    "%llu, is outside the window (max %llu) and not read",
+		    (u_longlong_t)le->rde_new_birth,
+		    (u_longlong_t)scn->scn_phys.scn_max_txg);
+	}
+	if (r5) {
+		am = rp_stat(spa, 1);
+		(void) printf("MEASURE mirror leaves during the resilver: "
+		    "read_bytes=%llu read_ops=%llu processed=%llu healed=%llu "
+		    "cksum=%llu\n",
+		    (u_longlong_t)(am.rl_rd_bytes - bm.rl_rd_bytes),
+		    (u_longlong_t)(am.rl_rd_ops - bm.rl_rd_ops),
+		    (u_longlong_t)am.rl_processed, (u_longlong_t)am.rl_healed,
+		    (u_longlong_t)(am.rl_cksum - bm.rl_cksum));
+		check(am.rl_processed == 0 && am.rl_healed == 0 &&
+		    am.rl_cksum == bm.rl_cksum && am.rl_rd_errors == 0,
+		    "the resilver repaired nothing on the mirror and found no "
+		    "error there");
+	}
+	export_pool(spa);
+	kernel_fini();
+	return (failures == 0 ? 0 : 1);
+}
+
+/* R3, phase 1b: import again; the resilver must resume its walk. */
+static int
+child_rp_resume(void *arg)
+{
+	rp_args_t *ra = arg;
+	spike_scan_pass_stat_t *st;
+	pool_scan_stat_t ps;
+	dsl_scan_t *scn;
+	spa_t *spa;
+
+	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+	rs_set_fix(ra->rp_fix);
+	st = rp_walk();
+	if (st != NULL)
+		rp_set_batch(1);
+	spa = import_pool();
+	sh->sh_watch = RS_CHILD;
+	scn = spa_get_dsl(spa)->dp_scan;
+	(void) printf("INFO imported: scan func %llu state %llu\n",
+	    (u_longlong_t)scn->scn_phys.scn_func,
+	    (u_longlong_t)scn->scn_phys.scn_state);
+	if (st != NULL) {
+		(void) printf("INFO walk state %llu cursor {%llu, %llx, "
+		    "%llu}\n", (u_longlong_t)scn->scn_spike_rdc[0],
+		    (u_longlong_t)scn->scn_spike_rdc[1],
+		    (u_longlong_t)scn->scn_spike_rdc[2],
+		    (u_longlong_t)scn->scn_spike_rdc[3]);
+	}
+	check(scn->scn_phys.scn_func == POOL_SCAN_RESILVER &&
+	    scn->scn_phys.scn_state == DSS_SCANNING &&
+	    vdev_dtl_contains(spa->spa_root_vdev->vdev_child[0]->
+	    vdev_child[RS_CHILD], DTL_MISSING,
+	    sh->sh_rdm[0].rdm_ent.rde_new_birth, 1), "the import finds the "
+	    "resilver running and child %d's DTL_MISSING holding the move's "
+	    "txg", RS_CHILD);
+	rs_wait(spa, rs_offline_done, &ps);
+	check(ps.pss_func == POOL_SCAN_RESILVER &&
+	    ps.pss_state == DSS_FINISHED && ps.pss_errors == 0 &&
+	    rs_offline_done(spa), "the resumed resilver of child %d finished "
+	    "with no error and cleared its DTL", RS_CHILD);
+	rp_print_walk("resumed resilver");
+	check(st != NULL && st->sps_resumed == 1 && st->sps_in_window >= 1 &&
+	    sh->sh_rp_window + st->sps_in_window == sh->sh_nmoves,
+	    "the walk resumed from its cursor and found the other %llu of "
+	    "the %d moved blocks (%llu)", (u_longlong_t)(sh->sh_nmoves -
+	    sh->sh_rp_window), sh->sh_nmoves,
+	    (u_longlong_t)(st != NULL ? st->sps_in_window : 0));
+	export_pool(spa);
+	kernel_fini();
+	return (failures == 0 ? 0 : 1);
+}
+
+/* R2, phase 1: move every block with every child online. */
+static int
+child_rp_move(void *arg)
+{
+	rp_args_t *ra = arg;
+	spa_t *spa;
+
+	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+	spa = import_pool();
+	move_fobjs(spa, ra->rp_policy);
+	for (int k = 0; k < 3; k++) {
+		dirty_txg(spa);
+		txg_wait_synced(spa_get_dsl(spa), 0);
+	}
+	export_pool(spa);
+	kernel_fini();
+	return (failures == 0 ? 0 : 1);
+}
+
+static uint64_t
+rp_hash(const uint8_t *b, uint64_t n)
+{
+	uint64_t h = 0xcbf29ce484222325ULL;
+
+	for (uint64_t i = 0; i < n; i++)
+		h = (h ^ b[i]) * 0x100000001b3ULL;
+	return (h);
+}
+
+/* Read or write <size> bytes at <offset> of child <c>'s file. */
+static void
+rp_child_io(int c, uint64_t offset, void *buf, uint64_t size,
+    boolean_t write)
+{
+	char path[PATH_BUF];
+	ssize_t n;
+	int fd;
+
+	child_file(path, sizeof (path), c);
+	fd = open(path, write ? O_RDWR : O_RDONLY);
+	VERIFY3S(fd, !=, -1);
+	n = write ? pwrite(fd, buf, size, offset + VDEV_LABEL_START_SIZE) :
+	    pread(fd, buf, size, offset + VDEV_LABEL_START_SIZE);
+	VERIFY3S(n, ==, size);
+	(void) close(fd);
+}
+
+/*
+ * R2, phase 2: damage one column of each new extent, on child 2 if it
+ * holds one, and keep a hash of what it held.
+ */
+static int
+child_rp_damage1(void *arg)
+{
+	(void) arg;
+	kernel_init(SPA_MODE_READ);
+	for (int i = 0; i < sh->sh_nmoves; i++) {
+		zio_t zio;
+		raidz_map_t *rm = rs_map(&zio,
+		    sh->sh_rdm[i].rdm_ent.rde_new_offset,
+		    sh->sh_rdm[i].rdm_psize, 2);
+		raidz_row_t *rr = rm->rm_row[0];
+		const raidz_col_t *rc = NULL;
+		uint8_t *buf;
+
+		for (int c = rr->rr_firstdatacol; c < rr->rr_cols; c++) {
+			if (rr->rr_col[c].rc_size != 0 && (rc == NULL ||
+			    rr->rr_col[c].rc_devidx == RS_CHILD))
+				rc = &rr->rr_col[c];
+		}
+		VERIFY3P(rc, !=, NULL);
+		buf = malloc(rc->rc_size);
+		rp_child_io(rc->rc_devidx, rc->rc_offset, buf, rc->rc_size,
+		    B_FALSE);
+		sh->sh_col_child[i] = rc->rc_devidx;
+		sh->sh_col_off[i] = rc->rc_offset;
+		sh->sh_col_size[i] = rc->rc_size;
+		sh->sh_col_hash[i] = rp_hash(buf, rc->rc_size);
+		for (uint64_t k = 0; k < rc->rc_size; k++)
+			buf[k] = ~buf[k];
+		rp_child_io(rc->rc_devidx, rc->rc_offset, buf, rc->rc_size,
+		    B_TRUE);
+		free(buf);
+		(void) printf("INFO %s: damaged its new extent's data column "
+		    "on child %d (%llu bytes)\n", sh->sh_name[i],
+		    rc->rc_devidx, (u_longlong_t)rc->rc_size);
+		rs_map_free(&zio, rm);
+	}
+	kernel_fini();
+	return (0);
+}
+
+/*
+ * R2, phase 3: a scrub of the txgs from the parity-2 epoch on, which
+ * covers every t2 and no t1, must read every new extent and repair it.
+ */
+static int
+child_rp_ranged(void *arg)
+{
+	rp_args_t *ra = arg;
+	spike_scan_pass_stat_t *st;
+	rp_leafstat_t b, a;
+	pool_scan_stat_t ps;
+	uint64_t t0;
+	spa_t *spa;
+	int err;
+
+	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+	rs_set_fix(ra->rp_fix);
+	st = rp_walk();
+	spa = import_pool();
+	txg_wait_synced(spa_get_dsl(spa), spa_first_txg(spa) + 5);
+	b = rp_stat(spa, -1);
+	t0 = spa_last_synced_txg(spa);
+	err = spa_scan_range(spa, POOL_SCAN_SCRUB, sh->sh_epoch_txg, 0, 0);
+	check(err == 0, "a scrub of txgs (%llu, now) starts (%d)",
+	    (u_longlong_t)sh->sh_epoch_txg, err);
+	for (int n = 0; n < RS_TXGS && dsl_scan_scrubbing(spa_get_dsl(spa));
+	    n++)
+		txg_wait_synced(spa_get_dsl(spa), 0);
+	VERIFY0(spa_scan_get_stats(spa, &ps));
+	a = rp_stat(spa, -1);
+	rp_measure(spa, "ranged scrub", &ps, &b, &a,
+	    spa_last_synced_txg(spa) - t0);
+	rp_print_walk("ranged scrub");
+	check(ps.pss_state == DSS_FINISHED && ps.pss_errors == 0,
+	    "the ranged scrub finished with no error");
+	check(a.rl_cksum - b.rl_cksum >= sh->sh_nmoves, "it found the %d "
+	    "damaged columns (%llu checksum errors)", sh->sh_nmoves,
+	    (u_longlong_t)(a.rl_cksum - b.rl_cksum));
+	if (st != NULL && ra->rp_fix != 2 && ra->rp_fix != 3) {
+		check(st->sps_in_window == sh->sh_nmoves &&
+		    st->sps_issued == sh->sh_nmoves, "the walk read the %d "
+		    "moved blocks (%llu in the window, %llu read)",
+		    sh->sh_nmoves, (u_longlong_t)st->sps_in_window,
+		    (u_longlong_t)st->sps_issued);
+	}
+	export_pool(spa);
+	kernel_fini();
+	return (failures == 0 ? 0 : 1);
+}
+
+/* R2, phase 4: every damaged column must hold what it held before. */
+static int
+child_rp_restored(void *arg)
+{
+	(void) arg;
+	int bad = 0;
+
+	for (int i = 0; i < sh->sh_nmoves; i++) {
+		uint8_t *buf = malloc(sh->sh_col_size[i]);
+		boolean_t ok;
+
+		rp_child_io(sh->sh_col_child[i], sh->sh_col_off[i], buf,
+		    sh->sh_col_size[i], B_FALSE);
+		ok = rp_hash(buf, sh->sh_col_size[i]) == sh->sh_col_hash[i];
+		(void) printf("INFO %s: column on child %d %s\n",
+		    sh->sh_name[i], sh->sh_col_child[i],
+		    ok ? "restored" : "still damaged");
+		bad += !ok;
+		free(buf);
+	}
+	check(bad == 0, "the scrub rebuilt every damaged column of the new "
+	    "extents (%d still damaged)", bad);
+	return (failures == 0 ? 0 : 1);
+}
+
+/* Phase 2 of R1, R3, R4, R5: a scrub must find nothing to repair. */
+static int
+child_rp_scrub(void *arg)
+{
+	(void) arg;
+	rp_leafstat_t b, a;
+	pool_scan_stat_t ps;
+	uint64_t t0;
+	spa_t *spa;
+
+	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+	spa = import_pool();
+	b = rp_stat(spa, -1);
+	t0 = spa_last_synced_txg(spa);
+	VERIFY0(spa_scan(spa, POOL_SCAN_SCRUB, 0));
+	for (int n = 0; n < RS_TXGS && dsl_scan_scrubbing(spa_get_dsl(spa));
+	    n++)
+		txg_wait_synced(spa_get_dsl(spa), 0);
+	VERIFY0(spa_scan_get_stats(spa, &ps));
+	a = rp_stat(spa, -1);
+	rp_measure(spa, "scrub", &ps, &b, &a, spa_last_synced_txg(spa) - t0);
+	check(ps.pss_func == POOL_SCAN_SCRUB && ps.pss_state == DSS_FINISHED &&
+	    ps.pss_errors == 0 && ps.pss_processed == 0 &&
+	    a.rl_cksum == b.rl_cksum && a.rl_processed == 0,
+	    "a scrub after the resilver finds nothing to repair (errors %llu, "
+	    "repaired %llu bytes, %llu checksum errors)",
+	    (u_longlong_t)ps.pss_errors, (u_longlong_t)ps.pss_processed,
+	    (u_longlong_t)(a.rl_cksum - b.rl_cksum));
+	export_pool(spa);
+	kernel_fini();
+	return (failures == 0 ? 0 : 1);
+}
+
+/*
+ * Phase 3 of R1, R3, R4, R5, on a copy of the pool's files taken after the
+ * resilver: damage one column of each live new extent on a child other
+ * than 2 and RP_X, take RP_X offline, and read every object.  Parity 2
+ * covers two lost columns; with a third, stale on child 2, a block whose
+ * new extent has columns on all three would not read back.
+ */
+static int
+child_rp_read(void *arg)
+{
+	(void) arg;
+	int damaged = 0;
+	spa_t *spa;
+	vdev_t *xvd;
+
+	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+	for (int i = 0; i < sh->sh_nmoves; i++) {
+		zio_t zio;
+		raidz_map_t *rm;
+		raidz_row_t *rr;
+		const raidz_col_t *rc = NULL;
+		uint8_t *buf;
+
+		if (sh->sh_rdm[i].rdm_error != 0 ||
+		    sh->sh_fobj[sh->sh_owner[i]].fo_gone)
+			continue;
+		rm = rs_map(&zio, sh->sh_rdm[i].rdm_ent.rde_new_offset,
+		    sh->sh_rdm[i].rdm_psize, 2);
+		rr = rm->rm_row[0];
+		for (int c = 0; c < rr->rr_cols && rc == NULL; c++) {
+			if (rr->rr_col[c].rc_size != 0 &&
+			    rr->rr_col[c].rc_devidx != RS_CHILD &&
+			    rr->rr_col[c].rc_devidx != RP_X)
+				rc = &rr->rr_col[c];
+		}
+		if (rc != NULL) {
+			buf = malloc(rc->rc_size);
+			rs_col_io(rc, buf, B_FALSE);
+			for (uint64_t k = 0; k < rc->rc_size; k++)
+				buf[k] = ~buf[k];
+			rs_col_io(rc, buf, B_TRUE);
+			free(buf);
+			damaged++;
+		}
+		rs_map_free(&zio, rm);
+	}
+	(void) printf("INFO damaged one column, not on child %d or %d, of %d "
+	    "new extents of the copy\n", RS_CHILD, RP_X, damaged);
+	spa = import_pool();
+	xvd = spa->spa_root_vdev->vdev_child[0]->vdev_child[RP_X];
+	VERIFY0(vdev_offline(spa, xvd->vdev_guid, 0));
+	(void) printf("INFO child %d of the copy offline (state %d)\n", RP_X,
+	    (int)xvd->vdev_state);
+	check_others_read();
+	export_pool(spa);
+	kernel_fini();
+	return (failures == 0 ? 0 : 1);
+}
+
+/* Copy the pool's files to rp_copy_dir, sparse. */
+static void
+rp_copy(void)
+{
+	char cmd[PATH_BUF * 3];
+	int st;
+
+	(void) snprintf(cmd, sizeof (cmd), "mkdir -p %s && for f in %s/v? "
+	    "%s/m?; do [ -e \"$f\" ] && cp --sparse=always \"$f\" %s/; "
+	    "done; du -sh %s | sed 's/^/INFO copy: /'", rp_copy_dir, dir, dir,
+	    rp_copy_dir, rp_copy_dir);
+	(void) fflush(stdout);
+	st = system(cmd);
+	VERIFY0(st);
+}
+
+static int
+run_rpass(const char *test, policy_t policy, int fix)
+{
+	rp_args_t ra = { test, policy, fix };
+	char copy[PATH_BUF];
+	const char *orig = dir;
+	int st;
+
+	(void) printf("INFO rpass %s, policy %s, ashift %llu, "
+	    "spike_resilver_redirects %d\n", test, policy_names[policy],
+	    (u_longlong_t)ashift, fix);
+	if (vdev_raidz_redirect_move == NULL)
+		return (2);
+	sh->sh_small = B_TRUE;
+	sh->sh_bulk = RP_BULK;
+	sh->sh_mirror = strcmp(test, "R5") == 0;
+	sh->sh_late = strcmp(test, "R4") == 0;
+	VERIFY0(phase("0 setup", setup_free_fn, NULL));
+
+	if (strcmp(test, "R2") == 0) {
+		st = phase("1 move", child_rp_move, &ra);
+		check(st == 0, "the move phase passes (status %d)", st);
+		VERIFY0(phase("2 damage", child_rp_damage1, NULL));
+		st = phase("3 ranged scrub", child_rp_ranged, &ra);
+		check(st == 0, "the ranged scrub phase passes (status %d)", st);
+		st = phase("4 restored", child_rp_restored, NULL);
+		check(st == 0, "the columns phase passes (status %d)", st);
+		run_zdb();
+		return (0);
+	}
+	st = phase("1 move and resilver", child_rp_resilver, &ra);
+	check(st == 0, "the move and resilver phase passes (status %d)", st);
+	if (strcmp(test, "R6") == 0) {
+		/* plain-A's new extent is not rebuilt: no scrub or read. */
+		run_zdb();
+		return (0);
+	}
+	if (strcmp(test, "R3") == 0) {
+		st = phase("1b resume", child_rp_resume, &ra);
+		check(st == 0, "the resume phase passes (status %d)", st);
+	}
+	run_zdb();
+	(void) snprintf(copy, sizeof (copy), "%s/copy", orig);
+	rp_copy_dir = copy;
+	rp_copy();
+	st = phase("2 scrub", child_rp_scrub, &ra);
+	check(st == 0, "the scrub phase passes (status %d)", st);
+	dir = copy;
+	st = phase("3 read with a second child offline", child_rp_read, &ra);
+	dir = orig;
+	check(st == 0, "the read phase passes (status %d)", st);
+	return (0);
+}
+
 static int
 parse_point(const char *s)
 {
@@ -3874,7 +4832,9 @@ usage(void)
 	    "       crash_probe <dir> <ashift> stalebp <P1|P2> [same] "
 	    "[nolive]\n"
 	    "       crash_probe <dir> <ashift> corrupt <kind> [P1|P2]\n"
-	    "       crash_probe <dir> <ashift> tomb <read|repair>\n");
+	    "       crash_probe <dir> <ashift> tomb <read|repair>\n"
+	    "       crash_probe <dir> <ashift> rpass <R1|R2|R3|R4|R5|R6> "
+	    "<P1|P2> [none|stopgap|pass|both|noverify]\n");
 	return (2);
 }
 
@@ -3962,6 +4922,32 @@ main(int argc, char **argv)
 	} else if (strcmp(mode, "tomb") == 0 && argc == 5 &&
 	    (strcmp(argv[4], "read") == 0 || strcmp(argv[4], "repair") == 0)) {
 		st = run_tomb(argv[4]);
+	} else if (strcmp(mode, "rpass") == 0 && argc >= 6 &&
+	    (strcmp(argv[4], "R1") == 0 || strcmp(argv[4], "R2") == 0 ||
+	    strcmp(argv[4], "R3") == 0 || strcmp(argv[4], "R4") == 0 ||
+	    strcmp(argv[4], "R5") == 0 || strcmp(argv[4], "R6") == 0)) {
+		/* Bits of spike_resilver_redirects, -1 to keep the default. */
+		static const char *const variants[] = { "none", "stopgap",
+		    "pass", "both" };
+		static const int bits[] = { 2, 3, 6, 7 };
+		int fix = -1;
+
+		policy = parse_policy(argv[5], B_FALSE);
+		if (policy == -1)
+			return (usage());
+		for (int v = 0; opt != NULL && v < 4; v++) {
+			if (strcmp(opt, variants[v]) == 0)
+				fix = bits[v];
+		}
+		/* R6: no check of the stored block pointer. */
+		if (opt != NULL && strcmp(opt, "noverify") == 0 &&
+		    &spike_scan_redirect_verify != NULL) {
+			spike_scan_redirect_verify = 0;
+			(void) printf("INFO spike_scan_redirect_verify=0\n");
+		} else if (opt != NULL && fix == -1) {
+			return (usage());
+		}
+		st = run_rpass(argv[4], policy, fix);
 	} else if (strcmp(mode, "stalebp") == 0) {
 		boolean_t same = B_FALSE, nolive = B_FALSE;
 

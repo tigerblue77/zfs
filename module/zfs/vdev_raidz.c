@@ -2575,14 +2575,61 @@ vdev_raidz_redirect_fits(vdev_t *vd, const raidz_redirect_ent_t *ent,
 }
 
 /*
- * SPIKE: the min txg a scan whose window is (min_txg, max_txg) needs to
- * reach the moved blocks whose new extent was written in that window.
- * Their block pointers keep the old birth, so the traversal would prune
- * them.  The other blocks this adds are traversed for nothing: raidz's
- * need_resilver skips them by their DTLs, a mirror only reads them.  A real
- * implementation would rather walk the table by new birth, with enough of
- * each block pointer in it to verify what it rebuilds.  Called in syncing
- * context.
+ * SPIKE: read the block pointer and bookmark stored with the entry *ent of
+ * vd.  ECKSUM if they cannot be used to read the block the entry moved:
+ * the block pointer must name the entry's key, a DVA of vd at its old
+ * offset with its birth, and pass zfs_blkptr_verify().
+ */
+static int
+vdev_raidz_redirect_stored_bp(vdev_t *vd, const raidz_redirect_ent_t *ent,
+    blkptr_t *bp, zbookmark_phys_t *zb)
+{
+	vdev_raidz_t *vdrz = vd->vdev_tsd;
+	spa_t *spa = vd->vdev_spa;
+	uint64_t key[2] = { ent->rde_offset, ent->rde_birth };
+	uint64_t val[RAIDZ_REDIRECT_VALUES];
+	const uint64_t *zbv = &val[RAIDZ_REDIRECT_ENT_VALUES +
+	    RAIDZ_REDIRECT_BP_VALUES];
+	boolean_t named = B_FALSE;
+	int err;
+
+	err = zap_lookup_uint64(spa->spa_meta_objset, vdrz->vd_redirect_obj,
+	    key, 2, sizeof (uint64_t), RAIDZ_REDIRECT_VALUES, val);
+	if (err != 0) {
+		zfs_dbgmsg("spike: %s: redirect {%llx, %llu}: no stored block "
+		    "pointer (%d)", spa_name(spa), (u_longlong_t)key[0],
+		    (u_longlong_t)key[1], err);
+		return (SET_ERROR(ECKSUM));
+	}
+	memcpy(bp, &val[RAIDZ_REDIRECT_ENT_VALUES], sizeof (blkptr_t));
+	SET_BOOKMARK(zb, zbv[0], zbv[1], (int64_t)zbv[2], zbv[3]);
+	if (!spike_scan_redirect_verify)
+		return (0);
+	for (int d = 0; d < BP_GET_NDVAS(bp) && !BP_IS_EMBEDDED(bp); d++) {
+		if (DVA_GET_VDEV(&bp->blk_dva[d]) == vd->vdev_id &&
+		    DVA_GET_OFFSET(&bp->blk_dva[d]) == ent->rde_offset)
+			named = B_TRUE;
+	}
+	if (!named || BP_IS_HOLE(bp) ||
+	    BP_GET_PHYSICAL_BIRTH(bp) != ent->rde_birth ||
+	    zfs_blkptr_verify(spa, bp, BLK_CONFIG_NEEDED, BLK_VERIFY_LOG) !=
+	    0) {
+		zfs_dbgmsg("spike: %s: redirect {%llx, %llu}: its stored block "
+		    "pointer does not name it", spa_name(spa),
+		    (u_longlong_t)key[0], (u_longlong_t)key[1]);
+		return (SET_ERROR(ECKSUM));
+	}
+	return (0);
+}
+
+/*
+ * SPIKE: the stopgap of the walk below, test-only since the walk replaced
+ * it (SPIKE_RESILVER_WIDEN): the min txg a scan whose window is (min_txg,
+ * max_txg) needs to reach the moved blocks whose new extent was written in
+ * that window.  Their block pointers keep the old birth, so the traversal
+ * would prune them.  The other blocks this adds are traversed for nothing:
+ * the need_resilver of their top-level vdev, raidz or mirror, skips them by
+ * their DTLs.  Called in syncing context.
  */
 uint64_t
 vdev_raidz_redirect_scan_min_txg(spa_t *spa, uint64_t min_txg,
@@ -2619,6 +2666,90 @@ vdev_raidz_redirect_scan_min_txg(spa_t *spa, uint64_t min_txg,
 		    (u_longlong_t)min, (u_longlong_t)max_txg);
 	}
 	return (min);
+}
+
+/*
+ * SPIKE: the scan's walk of the moved blocks its traversal cannot reach
+ * (dsl_scan_redirect_pass()).  The traversal prunes a block by the birth
+ * in its block pointer, t1, and reaches every block with t1 in the scan's
+ * window (min_txg, max_txg); a moved block whose new extent was written in
+ * the window, min_txg < t2 < max_txg, while t1 <= min_txg, is what it
+ * misses.  After the key cursor[0..2] = {vdev, offset, birth} (all 0 at
+ * the start; no entry has birth 0), find the next such live entry, raidz
+ * top-level vdevs in id order, then entries in key order.  Its key goes to
+ * the cursor, its entry to *ent, and the block pointer and bookmark stored
+ * with it to *bp and *zb.  Returns 0; EAGAIN after looking at
+ * SPIKE_SCAN_WALK_MAX entries without one, so that the caller can suspend;
+ * ENOENT past the last entry; or ECKSUM, the cursor past the entry, if its
+ * stored block pointer does not name it or does not pass
+ * zfs_blkptr_verify(), so that a damaged table cannot send a scan read
+ * elsewhere or to a panic.  Tombstones are skipped: their blocks are
+ * freed.  Syncing context, which no free or move runs beside.
+ */
+#define	SPIKE_SCAN_WALK_MAX	1024
+spike_scan_pass_stat_t spike_scan_pass_stats;
+uint64_t spike_scan_watch[2][3];
+int spike_scan_redirect_batch = 0;
+int spike_scan_redirect_verify = 1;
+
+int
+vdev_raidz_redirect_scan_next(spa_t *spa, uint64_t *cursor, uint64_t min_txg,
+    uint64_t max_txg, raidz_redirect_ent_t *ent, blkptr_t *bp,
+    zbookmark_phys_t *zb)
+{
+	spike_scan_pass_stat_t *st = &spike_scan_pass_stats;
+	vdev_t *rvd = spa->spa_root_vdev;
+	uint64_t walked = 0;
+
+	for (uint64_t v = cursor[0]; v < rvd->vdev_children; v++) {
+		vdev_t *vd = rvd->vdev_child[v];
+		vdev_raidz_t *vdrz;
+		raidz_redirect_node_t search;
+		raidz_redirect_node_t *rdn;
+		avl_index_t where;
+		boolean_t found = B_FALSE;
+
+		if (vd->vdev_ops != &vdev_raidz_ops)
+			continue;
+		vdrz = vd->vdev_tsd;
+		search.rdn_ent.rde_offset = v == cursor[0] ? cursor[1] : 0;
+		search.rdn_ent.rde_birth = v == cursor[0] ? cursor[2] : 0;
+		rw_enter(&vdrz->vd_redirect_lock, RW_READER);
+		rdn = avl_find(&vdrz->vd_redirects, &search, &where);
+		rdn = rdn != NULL ? AVL_NEXT(&vdrz->vd_redirects, rdn) :
+		    avl_nearest(&vdrz->vd_redirects, where, AVL_AFTER);
+		for (; rdn != NULL && walked < SPIKE_SCAN_WALK_MAX;
+		    rdn = AVL_NEXT(&vdrz->vd_redirects, rdn)) {
+			const raidz_redirect_ent_t *e = &rdn->rdn_ent;
+
+			walked++;
+			st->sps_walked++;
+			cursor[0] = v;
+			cursor[1] = e->rde_offset;
+			cursor[2] = e->rde_birth;
+			if (rdn->rdn_tomb) {
+				st->sps_tombs++;
+				continue;
+			}
+			if (e->rde_birth <= min_txg &&
+			    e->rde_new_birth > min_txg &&
+			    e->rde_new_birth < max_txg) {
+				*ent = *e;
+				found = B_TRUE;
+				break;
+			}
+		}
+		rw_exit(&vdrz->vd_redirect_lock);
+		if (found) {
+			st->sps_in_window++;
+			return (vdev_raidz_redirect_stored_bp(vd, ent, bp, zb));
+		}
+		if (walked >= SPIKE_SCAN_WALK_MAX)
+			return (SET_ERROR(EAGAIN));
+	}
+	cursor[0] = rvd->vdev_children;
+	cursor[1] = cursor[2] = 0;
+	return (SET_ERROR(ENOENT));
 }
 
 static void
@@ -2786,9 +2917,13 @@ vdev_raidz_redirect_load(vdev_t *vd)
 		memcpy(key, za->za_name, sizeof (key));
 		ent.rde_offset = key[0];
 		ent.rde_birth = key[1];
+		/*
+		 * The stored block pointer is only read by a scan, which
+		 * checks it before use (vdev_raidz_redirect_scan_next()).
+		 */
 		if (za->za_integer_length != sizeof (uint64_t) ||
 		    za->za_num_integers != RAIDZ_REDIRECT_VALUES) {
-			why = "its value is not five uint64s";
+			why = "its value is not 25 uint64s";
 		} else if ((err = zap_lookup_uint64(mos, obj, key, 2,
 		    sizeof (uint64_t), RAIDZ_REDIRECT_VALUES, val)) != 0) {
 			/* The cursor found it: only its key can be wrong. */
@@ -2845,10 +2980,13 @@ vdev_raidz_redirect_load(vdev_t *vd)
 	return (0);
 }
 
-/* Add an entry to the vdev's table, creating the table on first use. */
+/*
+ * Add an entry to the vdev's table, creating the table on first use, with
+ * the block pointer the move found live and the bookmark that named it.
+ */
 static void
 vdev_raidz_redirect_persist(vdev_t *vd, const raidz_redirect_ent_t *ent,
-    dmu_tx_t *tx)
+    const blkptr_t *bp, const zbookmark_phys_t *zb, dmu_tx_t *tx)
 {
 	vdev_raidz_t *vdrz = vd->vdev_tsd;
 	objset_t *mos = vd->vdev_spa->spa_meta_objset;
@@ -2856,7 +2994,16 @@ vdev_raidz_redirect_persist(vdev_t *vd, const raidz_redirect_ent_t *ent,
 	uint64_t val[RAIDZ_REDIRECT_VALUES] = { ent->rde_new_offset,
 	    ent->rde_new_birth, ent->rde_new_asize, ent->rde_old_reserved,
 	    ent->rde_old_asize };
+	uint64_t *zbv = &val[RAIDZ_REDIRECT_ENT_VALUES +
+	    RAIDZ_REDIRECT_BP_VALUES];
 
+	_Static_assert(sizeof (blkptr_t) % sizeof (uint64_t) == 0,
+	    "a block pointer is stored as uint64s");
+	memcpy(&val[RAIDZ_REDIRECT_ENT_VALUES], bp, sizeof (blkptr_t));
+	zbv[0] = zb->zb_objset;
+	zbv[1] = zb->zb_object;
+	zbv[2] = (uint64_t)zb->zb_level;
+	zbv[3] = zb->zb_blkid;
 	ASSERT(dmu_tx_is_syncing(tx));
 	VERIFY3U(vd->vdev_top_zap, !=, 0);
 	if (vdrz->vd_redirect_obj == 0) {
@@ -3567,6 +3714,19 @@ vdev_raidz_io_start(zio_t *zio)
 		zio->io_offset = rde.rde_new_offset;
 		zio->io_txg = rde.rde_new_birth;
 		birth = rde.rde_new_birth;
+	}
+	/* SPIKE: test-only, count scan reads at a watched extent. */
+	if ((zio->io_flags & ZIO_FLAG_SCAN_THREAD) &&
+	    zio->io_type == ZIO_TYPE_READ) {
+		for (int w = 0; w < 2; w++) {
+			const uint64_t *sw = spike_scan_watch[w];
+
+			if (sw[2] != 0 && sw[0] == tvd->vdev_id &&
+			    zio->io_offset < sw[1] + sw[2] &&
+			    sw[1] < zio->io_offset + zio->io_size)
+				atomic_inc_64(&spike_scan_pass_stats.
+				    sps_watch_hits);
+		}
 	}
 
 	vdev_raidz_layout_t layout = vdev_raidz_layout_for_alloc(vdrz, birth);
@@ -6652,9 +6812,11 @@ spike_redirect_stat_t spike_redirect_stats[SPIKE_REDIRECT_TXGS];
  * SPIKE, not for merge: test-only switches of the fixes that keep moved
  * blocks in reach of a resilver (SPIKE_RESILVER_* bits), and that make the
  * move check that a block is still alive; 0 shows what happens without.
+ * SPIKE_RESILVER_WIDEN, the stopgap the table pass replaces, is off by
+ * default and kept to compare the two.
  */
-int spike_resilver_redirects = SPIKE_RESILVER_WIDEN |
-    SPIKE_RESILVER_NEW_EXTENT;
+int spike_resilver_redirects = SPIKE_RESILVER_NEW_EXTENT |
+    SPIKE_RESILVER_TABLE_PASS;
 int spike_redirect_move_live = 1;
 
 /*
@@ -7005,8 +7167,10 @@ vdev_raidz_redirect_move_sync(void *arg, dmu_tx_t *tx)
 		    rdm->rdm_data, rdm->rdm_psize, NULL, NULL,
 		    ZIO_PRIORITY_SYNC_WRITE, ZIO_FLAG_CANFAIL, NULL)));
 
-		if (!spike_redirect_split_txg)
-			vdev_raidz_redirect_persist(vd, ent, tx);
+		if (!spike_redirect_split_txg) {
+			vdev_raidz_redirect_persist(vd, ent, bp, rdm->rdm_zb,
+			    tx);
+		}
 
 		/*
 		 * SPIKE: never checkpointed, which the check function makes
@@ -7034,9 +7198,11 @@ vdev_raidz_redirect_table_sync(void *arg, dmu_tx_t *tx)
 	if (rma->rma_arm && spike_crash_point != SPIKE_CRASH_POST_UB)
 		spike_crash_txg = dmu_tx_get_txg(tx);
 	for (int i = 0; i < rma->rma_n; i++) {
-		if (rma->rma_moves[i].rdm_error == 0) {
-			vdev_raidz_redirect_persist(vd,
-			    &rma->rma_moves[i].rdm_ent, tx);
+		raidz_redirect_move_t *rdm = &rma->rma_moves[i];
+
+		if (rdm->rdm_error == 0) {
+			vdev_raidz_redirect_persist(vd, &rdm->rdm_ent,
+			    rdm->rdm_bp, rdm->rdm_zb, tx);
 		}
 	}
 	spike_crash_check(spa, dmu_tx_get_txg(tx), SPIKE_CRASH_TABLE_DIRTY);

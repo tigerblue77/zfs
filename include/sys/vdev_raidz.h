@@ -211,10 +211,17 @@ extern int vdev_raidz_load(vdev_t *);
  * rde_old_reserved) of its old extent, rde_old_asize bytes long, is still
  * allocated.  The table is a ZAP in the MOS, keyed by {rde_offset,
  * rde_birth}, named in the vdev's top-level ZAP, whose values are the other
- * four fields in this order.
+ * five fields in this order, then the block pointer the move found live
+ * and the bookmark it was named by: what a scan needs to read the block
+ * and verify it without finding its block pointer.  Only the five fields
+ * are kept in memory.
  */
 #define	VDEV_TOP_ZAP_RAIDZ_REDIRECTS	"org.openzfs:spike_raidz_redirects"
-#define	RAIDZ_REDIRECT_VALUES		5
+#define	RAIDZ_REDIRECT_ENT_VALUES	5
+#define	RAIDZ_REDIRECT_BP_VALUES	(sizeof (blkptr_t) / sizeof (uint64_t))
+#define	RAIDZ_REDIRECT_ZB_VALUES	4
+#define	RAIDZ_REDIRECT_VALUES		(RAIDZ_REDIRECT_ENT_VALUES + \
+	RAIDZ_REDIRECT_BP_VALUES + RAIDZ_REDIRECT_ZB_VALUES)
 
 typedef struct raidz_redirect_ent {
 	uint64_t rde_offset;
@@ -272,6 +279,37 @@ extern boolean_t vdev_raidz_redirect_remove(vdev_t *, uint64_t, uint64_t,
 extern void vdev_raidz_redirect_sync(vdev_t *, dmu_tx_t *);
 extern uint64_t vdev_raidz_redirect_scan_min_txg(spa_t *, uint64_t,
     uint64_t);
+
+/*
+ * SPIKE: test-only, what the scan's walk of moved blocks did since the last
+ * scan started (dsl_scan_redirect_pass()), and the keys of its last reads.
+ * Written by the sync thread only.
+ */
+#define	SPIKE_SCAN_TRACE	64
+typedef struct spike_scan_pass_stat {
+	uint64_t sps_walked;	/* entries looked at */
+	uint64_t sps_tombs;	/* of them, tombstones */
+	uint64_t sps_in_window;	/* live, pruned by the traversal, t2 inside */
+	uint64_t sps_issued;	/* of them, read */
+	uint64_t sps_issued_bytes;
+	uint64_t sps_damaged;	/* of them, whose stored bp is unusable */
+	uint64_t sps_txgs;	/* txgs the walk ran in */
+	uint64_t sps_resumed;	/* walks resumed from a cursor read at load */
+	uint64_t sps_done_txg;	/* txg the walk finished in */
+	uint64_t sps_visited;	/* blocks the traversal visited */
+	uint64_t sps_watch_hits; /* scan reads at a watched extent */
+	uint64_t sps_ntrace;
+	uint64_t sps_trace[SPIKE_SCAN_TRACE][4]; /* vdev, offset, birth, txg */
+} spike_scan_pass_stat_t;
+extern spike_scan_pass_stat_t spike_scan_pass_stats;
+/* SPIKE: test-only, scan reads intersecting these extents are counted. */
+extern uint64_t spike_scan_watch[2][3];	/* vdev, offset, size */
+extern int spike_scan_redirect_batch;
+extern int spike_scan_redirect_verify;
+
+extern int vdev_raidz_redirect_scan_next(spa_t *, uint64_t *, uint64_t,
+    uint64_t, raidz_redirect_ent_t *, struct blkptr *,
+    struct zbookmark_phys *);
 extern uint64_t spike_redirect_claim_delta;
 extern int spike_redirect_claim_enable;
 extern int spike_redirect_split_txg;
@@ -282,6 +320,7 @@ extern int spike_crash_arm_free;
 /* SPIKE: test-only, what spike_resilver_redirects turns on. */
 #define	SPIKE_RESILVER_WIDEN		1	/* scan window to old births */
 #define	SPIKE_RESILVER_NEW_EXTENT	2	/* need_resilver at N, t2 */
+#define	SPIKE_RESILVER_TABLE_PASS	4	/* walk the table by t2 */
 extern int spike_resilver_redirects;
 extern int spike_redirect_move_live;
 extern int spike_redirect_keep_none;
