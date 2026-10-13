@@ -109,6 +109,12 @@ by_id() {
 	return 1
 }
 
+# Stable name for a disk already identified by its serial: its by-id link if
+# udev made one (this VM's did not), else the device node itself.
+disk_ref() {
+	by_id "$1" "$2" 2>/dev/null || printf '%s\n' "$1"
+}
+
 imported_pools() {
 	local z out=""
 	[ -e /dev/zfs ] || return 0
@@ -139,8 +145,6 @@ guard() {
 	    awk '$1=="ii" && $2 ~ /^(zfs|libzfs|libzpool|libnvpair|libuutil|spl)/ {print $2}' | tr '\n' ' ')
 	[ -z "$pk" ] || die "Debian ZFS packages installed: $pk"
 	dev=$(find_disk "$TESTS_SERIAL") || die "tests disk (serial $TESTS_SERIAL) not found"
-	by_id "$dev" "$TESTS_SERIAL" >/dev/null ||
-	    die "no /dev/disk/by-id link for serial $TESTS_SERIAL"
 }
 
 require_tmp_mount() {
@@ -200,9 +204,9 @@ prep_apt() {
 
 prep_disk() {
 	STEP=prepare:disk
-	local dev id src fs pt m
+	local dev id src fs pt m uuid
 	dev=$(find_disk "$TESTS_SERIAL")
-	id=$(by_id "$dev" "$TESTS_SERIAL")
+	id=$(disk_ref "$dev" "$TESTS_SERIAL")
 	src=$(findmnt -rno SOURCE -M /var/tmp 2>/dev/null || true)
 	if [ -z "$src" ]; then
 		while read -r m; do
@@ -219,7 +223,9 @@ prep_disk() {
 			die "$dev has existing content (fs='$fs' pt='$pt'); refusing to format"
 		fi
 		if ! grep -qE '[[:space:]]/var/tmp[[:space:]]' /etc/fstab; then
-			printf '%s /var/tmp xfs defaults,noatime,nofail 0 2\n' "$id" >>/etc/fstab
+			uuid=$(blkid -p -o value -s UUID "$dev")
+			[ -n "$uuid" ] || die "no filesystem UUID on $dev"
+			printf 'UUID=%s /var/tmp xfs defaults,noatime,nofail 0 2\n' "$uuid" >>/etc/fstab
 		fi
 		systemctl daemon-reload
 		mount /var/tmp
@@ -481,7 +487,7 @@ step_demo() {
 	DEMO_DEVS=""
 	for s in $DEMO_SERIALS; do
 		dev=$(find_disk "$s") || die "demo disk $s not found"
-		id=$(by_id "$dev" "$s") || die "no by-id link for $s"
+		id=$(disk_ref "$dev" "$s")
 		while read -r m; do
 			[ -z "$m" ] || die "$dev is mounted at $m"
 		done < <(lsblk -nr -o MOUNTPOINTS "$dev")
