@@ -126,6 +126,15 @@ typedef struct anyraid_tile {
 #define	VDEV_ANYRAID_HEADER_LENGTH	"length"
 #define	VDEV_ANYRAID_HEADER_CHECKPOINT	"checkpoint_txg"
 #define	VDEV_ANYRAID_HEADER_DISK_SIZES	"sizes"
+
+/*
+ * vd_checkpoint_tile holds the last tile mapped when the checkpoint was
+ * taken, and the tiles after it are dropped when the pool rewinds to it.
+ * A vdev with no checkpoint holds VDEV_ANYRAID_CHECKPOINT_NONE, and one
+ * that had no tile mapped yet VDEV_ANYRAID_CHECKPOINT_EMPTY.
+ */
+#define	VDEV_ANYRAID_CHECKPOINT_NONE	UINT32_MAX
+#define	VDEV_ANYRAID_CHECKPOINT_EMPTY	(UINT32_MAX - 1)
 /*
  * We store the pool guid to prevent disks being reused from an old pool from
  * causing any issues.
