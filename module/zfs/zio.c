@@ -4177,6 +4177,31 @@ zio_ddt_child_write_ready(zio_t *zio)
 	mutex_exit(&dde->dde_io->dde_io_lock);
 }
 
+static boolean_t
+zio_ddt_phys_noalloc(zio_t *zio, const ddt_univ_phys_t *ddp,
+    ddt_phys_variant_t v)
+{
+	blkptr_t blk = *zio->io_bp;
+
+	ddt_bp_fill(ddp, v, &blk, zio->io_txg);
+
+	/*
+	 * See zio_ddt_child_write_layout_matches() for the config lock.
+	 * A vdev being removed is left out: the removal copies its data
+	 * whatever references it, and these then reach the new copy.
+	 */
+	for (int d = 0; d < BP_GET_NDVAS(&blk); d++) {
+		vdev_t *vd = vdev_lookup_top(zio->io_spa,
+		    DVA_GET_VDEV(&blk.blk_dva[d]));
+
+		if (vd != NULL && vdev_is_concrete(vd) && vd->vdev_noalloc &&
+		    !vd->vdev_removing)
+			return (B_TRUE);
+	}
+
+	return (B_FALSE);
+}
+
 static zio_t *
 zio_ddt_write(zio_t *zio)
 {
@@ -4300,6 +4325,23 @@ zio_ddt_write(zio_t *zio)
 	int have_dvas = ddt_phys_dva_count(ddp, v, BP_IS_ENCRYPTED(bp));
 	IMPLY(have_dvas == 0, ddt_phys_birth(ddp, v) == 0);
 	boolean_t is_ganged = ddt_phys_is_gang(ddp, v);
+
+	/*
+	 * Every path below makes this block reference the DVAs already in
+	 * the entry.  Do not add a reference to a copy on a vdev with
+	 * allocating=off, which would keep it there: write a non-dedup
+	 * block instead, keeping an override block's own DVAs as above.
+	 */
+	if (have_dvas > 0 && zio_ddt_phys_noalloc(zio, ddp, v)) {
+		if (dde_io != NULL)
+			mutex_exit(&dde_io->dde_io_lock);
+		ddt_exit(ddt);
+		zp->zp_dedup = B_FALSE;
+		BP_SET_DEDUP(bp, B_FALSE);
+		if (zio->io_bp_override == NULL)
+			zio->io_pipeline = ZIO_WRITE_PIPELINE;
+		return (zio);
+	}
 
 	if (dde_io == NULL || dde_io->dde_lead_zio[p] == NULL) {
 		/*
