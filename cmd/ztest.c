@@ -1254,6 +1254,9 @@ process_options(int argc, char **argv)
 		zo->zo_raid_parity = MIN(zo->zo_raid_parity,
 		    zo->zo_raid_children - 1);
 
+		/* An AnyRAID vdev can only be a top-level vdev */
+		zo->zo_mirrors = 0;
+
 		(void) strlcpy(zo->zo_raid_type, VDEV_TYPE_ANYMIRROR,
 		    sizeof (zo->zo_raid_type));
 	} else if (strcmp(raid_kind, "anyraidz") == 0) {
@@ -1267,6 +1270,9 @@ process_options(int argc, char **argv)
 
 		zo->zo_raid_parity = MIN(zo->zo_raid_parity,
 		    zo->zo_raid_children - 1);
+
+		/* An AnyRAID vdev can only be a top-level vdev */
+		zo->zo_mirrors = 0;
 
 		(void) strlcpy(zo->zo_raid_type, VDEV_TYPE_ANYRAIDZ,
 		    sizeof (zo->zo_raid_type));
