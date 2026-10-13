@@ -60,6 +60,7 @@ STATE_DIR=/var/lib/zts-pr1
 STATE=$STATE_DIR/state
 RESULTS=$LOG/results.tsv
 FUNC=tests/functional
+FUNCDIR=tests/zfs-tests/tests/functional
 START=$(date +%s)
 STEP=init
 REBOOT_NEEDED=0
@@ -409,21 +410,21 @@ step_test() {
 	touch "$RESULTS"
 	chmod 0644 "$RESULTS"
 	for t in $NEW_TESTS; do
-		[ -f "$WORK/patched/$FUNC/$t.ksh" ] || die "missing in patched tree: $t.ksh"
-		install -d -o "$TEST_USER" -g "$TEST_USER" "$(dirname "$WORK/base/$FUNC/$t.ksh")"
-		as_zts cp -p "$WORK/patched/$FUNC/$t.ksh" "$WORK/base/$FUNC/$t.ksh"
-		[ -x "$WORK/base/$FUNC/$t.ksh" ] || die "copied test is not executable: $t.ksh"
+		[ -f "$WORK/patched/$FUNCDIR/$t.ksh" ] || die "missing in patched tree: $t.ksh"
+		install -d -o "$TEST_USER" -g "$TEST_USER" "$(dirname "$WORK/base/$FUNCDIR/$t.ksh")"
+		as_zts cp -p "$WORK/patched/$FUNCDIR/$t.ksh" "$WORK/base/$FUNCDIR/$t.ksh"
+		[ -x "$WORK/base/$FUNCDIR/$t.ksh" ] || die "copied test is not executable: $t.ksh"
 	done
 	base_list=$NEW_TESTS
 	for d in cli_root/zpool_remove cli_root/zpool_add; do
-		for f in "$WORK/patched/$FUNC/$d"/*.ksh; do
+		for f in "$WORK/patched/$FUNCDIR/$d"/*.ksh; do
 			case ${f##*/} in setup.ksh | cleanup.ksh) continue ;; esac
 			patched_list="$patched_list $d/$(basename "$f" .ksh)"
 		done
 	done
 	patched_list="$NEW_TESTS $NEIGHBOURS $patched_list"
 	for t in $patched_list; do
-		[ -f "$WORK/patched/$FUNC/$t.ksh" ] || die "missing in patched tree: $t.ksh"
+		[ -f "$WORK/patched/$FUNCDIR/$t.ksh" ] || die "missing in patched tree: $t.ksh"
 	done
 	test_tree base "$base_list"
 	test_tree patched "$patched_list"
