@@ -4069,6 +4069,13 @@ ztest_vdev_attach_detach(ztest_ds_t *zd, uint64_t id)
 	if (error == EOVERFLOW || error == EBUSY)
 		expected_error = error;
 
+	/*
+	 * An AnyRAID vdev refuses a device too small for one tile with
+	 * ENOLCK, and the new device has less room than its size.
+	 */
+	if (error == ENOLCK && anyraid)
+		expected_error = error;
+
 	if (error == ZFS_ERR_CHECKPOINT_EXISTS ||
 	    error == ZFS_ERR_DISCARDING_CHECKPOINT ||
 	    error == ZFS_ERR_RESILVER_IN_PROGRESS ||
