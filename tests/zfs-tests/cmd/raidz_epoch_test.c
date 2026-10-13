@@ -28,6 +28,11 @@
  *	hand-made config can, to pool creation, or add it to the pool that
  *	"create" made in <dir>.  Print the result and the number of top-level
  *	vdevs of the pool.
+ *   label <dir> <pool>
+ *	Give the raidz vdev of the pool a parity-epoch table that changes the
+ *	parity at a txg the pool never reaches, in core and in the config only,
+ *	so that the labels and the MOS config carry it and the vdev ZAP does
+ *	not: no table the setter stores looks like that.
  *   write <dir> <pool> <blocksize>
  *	Write one block of reproducible data to a new MOS object and print its
  *	object number, the offsets of its DVAs on vdev 0 and its birth txg.
@@ -89,6 +94,7 @@ usage(void)
 	    "[<marker-parity>]\n"
 	    "       raidz_epoch_test forge <dir> <pool> <children> <parity> "
 	    "create|add\n"
+	    "       raidz_epoch_test label <dir> <pool>\n"
 	    "       raidz_epoch_test write <dir> <pool> <blocksize>\n"
 	    "       raidz_epoch_test corrupt <dir> <offsets> <psize> <width> "
 	    "<parity> <ashift> <column>...\n"
@@ -411,6 +417,44 @@ do_forge(const char *dir, const char *pool, int children, int parity,
 	return (0);
 }
 
+static void
+label_table_sync(void *arg, dmu_tx_t *tx)
+{
+	table_arg_t *ta = arg;
+	vdev_t *vd = dmu_tx_pool(tx)->dp_spa->spa_root_vdev->vdev_child[0];
+
+	vdev_raidz_parity_epochs_install(vd, ta->ta_table, ta->ta_entries);
+	vdev_config_dirty(vd);
+}
+
+static int
+do_label(const char *dir, const char *pool)
+{
+	uint64_t tbl[6];
+	table_arg_t ta = { tbl, 2 };
+	vdev_raidz_t *vdrz;
+	spa_t *spa;
+	int err;
+
+	err = open_pool(dir, pool, B_FALSE, &spa);
+	if (err != 0) {
+		(void) printf("RESULT label rc=%d\n", err);
+		return (err);
+	}
+	vdrz = spa->spa_root_vdev->vdev_child[0]->vdev_tsd;
+	tbl[0] = 0;
+	tbl[1] = tbl[4] = vdrz->vd_physical_width;
+	tbl[2] = vdrz->vd_nparity;
+	tbl[3] = FORGED_EPOCH_START;
+	tbl[5] = vdrz->vd_nparity % 3 + 1;
+	VERIFY0(dsl_sync_task(pool, NULL, label_table_sync, &ta, 0,
+	    ZFS_SPACE_CHECK_NONE));
+	txg_wait_synced(spa_get_dsl(spa), 0);
+	(void) printf("RESULT label rc=0\n");
+	close_pool(spa, pool);
+	return (0);
+}
+
 static int
 do_write(const char *dir, const char *pool, uint64_t blksz)
 {
@@ -673,6 +717,8 @@ main(int argc, char **argv)
 	} else if (strcmp(argv[1], "forge") == 0 && argc == 7) {
 		rv = do_forge(argv[2], argv[3], atoi(argv[4]), atoi(argv[5]),
 		    argv[6]);
+	} else if (strcmp(argv[1], "label") == 0 && argc == 4) {
+		rv = do_label(argv[2], argv[3]);
 	} else if (strcmp(argv[1], "write") == 0 && argc == 5) {
 		rv = do_write(argv[2], argv[3], strtoull(argv[4], NULL, 10));
 	} else if (strcmp(argv[1], "read") == 0 && argc == 6) {
