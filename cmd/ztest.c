@@ -4013,9 +4013,7 @@ ztest_vdev_attach_detach(ztest_ds_t *zd, uint64_t id)
 	 * If newvd is a distributed spare and it's being attached to a
 	 * dRAID which is not its parent it should fail with ENOTSUP.
 	 */
-	if (anyraid)
-		expected_error = 0;
-	else if (pvd->vdev_ops != &vdev_mirror_ops &&
+	if (pvd->vdev_ops != &vdev_mirror_ops &&
 	    pvd->vdev_ops != &vdev_root_ops && (!replacing ||
 	    pvd->vdev_ops == &vdev_replacing_ops ||
 	    pvd->vdev_ops == &vdev_spare_ops))
