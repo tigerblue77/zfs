@@ -422,6 +422,9 @@ extern spike_redirect_stat_t spike_redirect_stats[SPIKE_REDIRECT_TXGS];
  * blocks, as one that forgot the frees of its txg would.
  * spike_redirect_load_lax makes the load skip a record of unknown type and
  * take a second ADD of a key, as a load without those checks would.
+ * spike_redirect_unsafe_readers makes a writer of the in-memory table move
+ * slots and free arrays without waiting for its lock-free readers, as a
+ * table without that protocol would.
  */
 #define	SPIKE_SYNTH_ADD		0
 #define	SPIKE_SYNTH_ADD_MEM	1
@@ -435,6 +438,7 @@ extern int spike_redirect_load_skip;
 extern int spike_redirect_condense;
 extern int spike_redirect_condense_tombs;
 extern int spike_redirect_load_lax;
+extern int spike_redirect_unsafe_readers;
 
 typedef struct spike_table_stat {
 	uint64_t sts_load_calls;	/* loads, tryimport's included */

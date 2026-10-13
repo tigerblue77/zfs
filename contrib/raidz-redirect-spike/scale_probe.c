@@ -42,11 +42,22 @@
  *                       raidz vdev's read count.
  *   ondisk              what the table's objects hold and take on disk.
  *   condense            condense the log now (the redesign's format).
+ *   stress <seconds> <readers> <churn>  while <readers> threads look up
+ *                       entries [0, n) and <churn> other keys in the same
+ *                       metaslabs, add those keys in one sync task, remove
+ *                       them in another and let their tombstones expire,
+ *                       again and again for <seconds>: the shards grow,
+ *                       shrink and move slots under the lock-free readers.
+ *                       Every lookup of an entry must find it, with its
+ *                       fields, and one of the other keys, when it finds
+ *                       it, must return that key's own fields.
+ *                       SCALE_UNSAFE sets spike_redirect_unsafe_readers.
  *   export
  *
  * Environment: SCALE_UNIVERSE sets U (see gen_entry()); SCALE_CONDENSE sets
  * spike_redirect_condense (-1: never condense the log);
- * SCALE_ARC_MB caps the ARC (1024 by default); SCALE_LOAD_SKIP
+ * SCALE_ARC_MB caps the ARC (1024 by default, with zfs_arc_min lowered so
+ * that userland's arc_init() does not ignore the cap); SCALE_LOAD_SKIP
  * sets spike_redirect_load_skip, so that the table loads empty.  Spike
  * symbols are weak: read works on a libzpool without the spike, to measure
  * the base commit.  Lines starting with MEASURE carry the numbers.
@@ -63,6 +74,7 @@
 #include <unistd.h>
 #include <sys/resource.h>
 #include <sys/zfs_context.h>
+#include <sys/arc_impl.h>
 #include <sys/spa.h>
 #include <sys/spa_impl.h>
 #include <sys/dmu.h>
@@ -96,6 +108,7 @@
 #define	PATH_BUF	512
 
 extern uint64_t zfs_arc_max;
+extern uint64_t zfs_arc_min;
 
 /* Weak: absent from the base commit's libzpool. */
 extern int vdev_raidz_redirect_synth(spa_t *, uint64_t,
@@ -112,6 +125,7 @@ extern uint64_t vdev_raidz_redirect_hits(void) __attribute__((weak));
 extern int spike_redirect_load_skip __attribute__((weak));
 extern spike_table_stat_t spike_table_stats __attribute__((weak));
 extern int spike_redirect_condense __attribute__((weak));
+extern int spike_redirect_unsafe_readers __attribute__((weak));
 
 typedef struct params {
 	uint64_t	p_ashift;
@@ -174,6 +188,23 @@ rss_bytes(void)
 		(void) fclose(f);
 	}
 	return ((uint64_t)rss * sysconf(_SC_PAGESIZE));
+}
+
+/* The "Cached:" line of /proc/meminfo: the host's page cache. */
+static uint64_t
+page_cache_bytes(void)
+{
+	char line[256];
+	unsigned long long kb = 0;
+	FILE *f = fopen("/proc/meminfo", "r");
+
+	while (f != NULL && fgets(line, sizeof (line), f) != NULL) {
+		if (sscanf(line, "Cached: %llu kB", &kb) == 1)
+			break;
+	}
+	if (f != NULL)
+		(void) fclose(f);
+	return ((uint64_t)kb << 10);
 }
 
 static uint64_t
@@ -502,6 +533,7 @@ cmd_import(const char *how, boolean_t cold)
 	int err;
 
 	if (cold) {
+		uint64_t c0 = page_cache_bytes();
 		int fd;
 
 		sync();
@@ -509,6 +541,9 @@ cmd_import(const char *how, boolean_t cold)
 		VERIFY3S(fd, >=, 0);
 		VERIFY3S(write(fd, "3", 1), ==, 1);
 		(void) close(fd);
+		(void) printf("INFO page cache %llu bytes, %llu after "
+		    "drop_caches\n", (u_longlong_t)c0,
+		    (u_longlong_t)page_cache_bytes());
 	}
 	rss0 = rss_bytes();
 	memset(&ia, 0, sizeof (ia));
@@ -947,6 +982,187 @@ cmd_sync(uint64_t n, int rounds)
 	free(e);
 }
 
+/*
+ * stress: lookups by reader threads while the sync thread changes the
+ * shards they read.  Entry j < live_n is stable; churn key k is the odd
+ * sector 2m sectors after entry j's, j = k mod live_n and m = 1 + k /
+ * live_n, in j's metaslab and so in its shard: with more churn keys than
+ * entries, each round grows every shard several times and shrinks it back.
+ */
+typedef struct srun {
+	uint64_t	s_seed;
+	uint64_t	s_churn;
+	uint64_t	s_lookups;
+	uint64_t	s_churn_found;
+	uint64_t	s_missing;	/* a stable entry not found */
+	uint64_t	s_wrong;	/* found, with other fields */
+	uint64_t	s_first_bad;	/* first stable j missing or wrong */
+} srun_t;
+
+static volatile int stress_stop;
+
+/* Whether e, as the table returned it, is x but for its new birth. */
+static boolean_t
+stress_same(const raidz_redirect_ent_t *e, const raidz_redirect_ent_t *x)
+{
+	return (e->rde_offset == x->rde_offset &&
+	    e->rde_birth == x->rde_birth &&
+	    e->rde_new_offset == x->rde_new_offset &&
+	    e->rde_new_asize == x->rde_new_asize &&
+	    e->rde_old_asize == x->rde_old_asize &&
+	    e->rde_old_reserved == x->rde_old_reserved &&
+	    e->rde_new_birth >= P.p_epoch && e->rde_new_birth > e->rde_birth);
+}
+
+static void
+stress_other(uint64_t k, raidz_redirect_ent_t *e)
+{
+	uint64_t m = 1 + k / live_n;
+
+	gen_entry(k % live_n, e);
+	e->rde_offset += (2 * m) << P.p_ashift;
+	e->rde_old_asize = 1ULL << P.p_ashift;
+	if (m >= slot_pairs() || (e->rde_offset >> P.p_ms_shift) !=
+	    ((e->rde_offset - ((2 * m) << P.p_ashift)) >> P.p_ms_shift))
+		e->rde_offset = 0;
+}
+
+static void *
+stress_thread(void *arg)
+{
+	srun_t *r = arg;
+	vdev_t *vd = spa->spa_root_vdev->vdev_child[0];
+	uint64_t s = r->s_seed;
+
+	r->s_first_bad = UINT64_MAX;
+	while (!stress_stop) {
+		for (int i = 0; i < 1024; i++) {
+			raidz_redirect_ent_t x, e;
+			uint64_t j = mix(s++);
+
+			if (j & 1) {
+				j = (j >> 1) % live_n;
+				gen_entry(j, &x);
+				if (!vdev_raidz_redirect_get(vd, x.rde_offset,
+				    x.rde_birth, &e)) {
+					r->s_missing++;
+				} else if (!stress_same(&e, &x)) {
+					r->s_wrong++;
+				} else {
+					continue;
+				}
+				r->s_first_bad = MIN(r->s_first_bad, j);
+			} else {
+				stress_other((j >> 1) % r->s_churn, &x);
+				if (x.rde_offset == 0 ||
+				    !vdev_raidz_redirect_get(vd, x.rde_offset,
+				    x.rde_birth, &e))
+					continue;
+				r->s_churn_found++;
+				if (!stress_same(&e, &x))
+					r->s_wrong++;
+			}
+		}
+		r->s_lookups += 1024;
+	}
+	return (NULL);
+}
+
+static void
+cmd_stress(int seconds, int readers, uint64_t churn)
+{
+	raidz_redirect_ent_t *e = malloc(churn * sizeof (*e));
+	srun_t r[16];
+	pthread_t tid[16];
+	uint64_t got = 0, done[2], rounds = 0, t0, lookups = 0, found = 0;
+	uint64_t missing = 0, wrong = 0, first = UINT64_MAX;
+	uint64_t count0 = vdev_raidz_redirect_count(spa, 0);
+	uint64_t add_ns = 0, remove_ns = 0, expire_ns = 0, t1;
+
+	VERIFY3U(live_n, >, 0);
+	VERIFY3S(readers, <=, 16);
+	if (getenv("SCALE_UNSAFE") != NULL) {
+		VERIFY3P(&spike_redirect_unsafe_readers, !=, NULL);
+		spike_redirect_unsafe_readers = 1;
+	}
+	for (uint64_t k = 0; k < churn; k++) {
+		stress_other(k, &e[got]);
+		if (e[got].rde_offset != 0)
+			got++;
+	}
+	(void) printf("INFO stress %d s, %d readers, %llu entries, %llu "
+	    "churn keys, unsafe_readers=%d\n", seconds, readers,
+	    (u_longlong_t)live_n, (u_longlong_t)got,
+	    &spike_redirect_unsafe_readers != NULL ?
+	    spike_redirect_unsafe_readers : -1);
+	(void) fflush(stdout);
+	stress_stop = 0;
+	for (int t = 0; t < readers; t++) {
+		memset(&r[t], 0, sizeof (r[t]));
+		r[t].s_seed = 7777 + 1000003ULL * t;
+		r[t].s_churn = churn;
+		VERIFY0(pthread_create(&tid[t], NULL, stress_thread, &r[t]));
+	}
+	t0 = now_ns();
+	while (now_ns() - t0 < seconds * 1000000000ULL) {
+		t1 = now_ns();
+		VERIFY0(vdev_raidz_redirect_synth(spa, 0, e, got,
+		    SPIKE_SYNTH_ADD_HOT, done));
+		txg_wait_synced(spa_get_dsl(spa), done[1]);
+		VERIFY3U(done[0], ==, got);
+		add_ns += now_ns() - t1;
+		t1 = now_ns();
+		VERIFY0(vdev_raidz_redirect_synth(spa, 0, e, got,
+		    SPIKE_SYNTH_REMOVE, done));
+		txg_wait_synced(spa_get_dsl(spa), done[1]);
+		VERIFY3U(done[0], ==, got);
+		remove_ns += now_ns() - t1;
+		/* Let the tombstones expire: their slots are deleted. */
+		t1 = now_ns();
+		for (int i = 0; i < TXG_DEFER_SIZE + 1; i++) {
+			VERIFY0(vdev_raidz_redirect_synth(spa, 0, e, 0,
+			    SPIKE_SYNTH_ADD, done));
+			txg_wait_synced(spa_get_dsl(spa), done[1]);
+		}
+		expire_ns += now_ns() - t1;
+		rounds++;
+	}
+	stress_stop = 1;
+	for (int t = 0; t < readers; t++) {
+		VERIFY0(pthread_join(tid[t], NULL));
+		lookups += r[t].s_lookups;
+		found += r[t].s_churn_found;
+		missing += r[t].s_missing;
+		wrong += r[t].s_wrong;
+		first = MIN(first, r[t].s_first_bad);
+	}
+	(void) printf("MEASURE stress rounds=%llu wall=%.1f s add=%.1f s "
+	    "remove=%.1f s expire=%.1f s lookups=%llu "
+	    "churn_found=%llu missing=%llu wrong=%llu table=%llu "
+	    "(%llu before) condenses=%llu\n", (u_longlong_t)rounds,
+	    (now_ns() - t0) / 1e9, add_ns / 1e9, remove_ns / 1e9,
+	    expire_ns / 1e9, (u_longlong_t)lookups,
+	    (u_longlong_t)found, (u_longlong_t)missing, (u_longlong_t)wrong,
+	    (u_longlong_t)vdev_raidz_redirect_count(spa, 0),
+	    (u_longlong_t)count0,
+	    (u_longlong_t)(&spike_table_stats != NULL ?
+	    spike_table_stats.sts_condense_calls : 0));
+	if (missing != 0 || wrong != 0 || rounds == 0 || found == 0) {
+		(void) printf("FAIL stress: %llu stable entries missed and "
+		    "%llu wrong in %llu lookups (first entry %lld), %llu "
+		    "rounds, %llu churn keys found\n",
+		    (u_longlong_t)missing, (u_longlong_t)wrong,
+		    (u_longlong_t)lookups,
+		    first == UINT64_MAX ? -1LL : (long long)first,
+		    (u_longlong_t)rounds, (u_longlong_t)found);
+		exit(1);
+	}
+	(void) printf("PASS stress\n");
+	if (&spike_redirect_unsafe_readers != NULL)
+		spike_redirect_unsafe_readers = 0;
+	free(e);
+}
+
 typedef struct rrun {
 	objset_t	*rr_os;
 	uint64_t	rr_obj;
@@ -1156,6 +1372,11 @@ main(int argc, char **argv)
 		file_size = strtoull(e, NULL, 0) << 30;
 	zfs_arc_max = (getenv("SCALE_ARC_MB") != NULL ?
 	    strtoull(getenv("SCALE_ARC_MB"), NULL, 0) : 1024) << 20;
+	/*
+	 * Userland's arc_init() sets arc_c_min to half the default
+	 * arc_c_max, and a zfs_arc_max no larger than arc_c_min is ignored.
+	 */
+	zfs_arc_min = MIN(zfs_arc_max / 2, 256ULL << 20);
 #ifdef	RAIDZ_REDIRECT_REC_ADD
 	if ((e = getenv("SCALE_CONDENSE")) != NULL) {
 		VERIFY3P(&spike_redirect_condense, !=, NULL);
@@ -1168,11 +1389,13 @@ main(int argc, char **argv)
 	}
 	(void) printf("INFO scale_probe dir=%s ashift=%llu file=%llu "
 	    "universe=%llu arc_max=%llu load_skip=%d spike=%d\n", dir,
-	    (u_longlong_t)ashift, (u_longlong_t)universe,
-	    (u_longlong_t)file_size, (u_longlong_t)zfs_arc_max,
+	    (u_longlong_t)ashift, (u_longlong_t)file_size,
+	    (u_longlong_t)universe, (u_longlong_t)zfs_arc_max,
 	    getenv("SCALE_LOAD_SKIP") != NULL,
 	    vdev_raidz_redirect_synth != NULL);
 	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+	(void) printf("INFO arc c_min=%llu c_max=%llu\n",
+	    (u_longlong_t)arc_c_min, (u_longlong_t)arc_c_max);
 	for (i = 3; i < argc; i++) {
 		const char *c = argv[i];
 
@@ -1216,6 +1439,10 @@ main(int argc, char **argv)
 		} else if (strcmp(c, "read") == 0 && i + 2 < argc) {
 			cmd_read(atoi(argv[i + 1]), atoi(argv[i + 2]));
 			i += 2;
+		} else if (strcmp(c, "stress") == 0 && i + 3 < argc) {
+			cmd_stress(atoi(argv[i + 1]), atoi(argv[i + 2]),
+			    strtoull(argv[i + 3], NULL, 0));
+			i += 3;
 		} else if (strcmp(c, "ondisk") == 0) {
 			cmd_ondisk();
 #ifdef	RAIDZ_REDIRECT_REC_ADD

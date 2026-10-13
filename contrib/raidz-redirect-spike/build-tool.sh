@@ -9,7 +9,15 @@
 # The tree's .libs/libzpool.so and friends must exist.  Nothing is written
 # inside the tree.  The result is a plain executable: run it with
 # LD_LIBRARY_PATH=<built-tree>/.libs so that it uses that tree's libzpool.
+# With BUILD_TOOL_RELEASE=1, for a tree configured without --enable-debug,
+# it is built as that tree's code is: -DNDEBUG and -O2.
 set -e
+DBG="-DDEBUG -UNDEBUG -DZFS_DEBUG"
+OPT=-O1
+if [ "${BUILD_TOOL_RELEASE:-0}" = 1 ]; then
+	DBG="-DNDEBUG -UDEBUG"
+	OPT=-O2
+fi
 T=$(cd "$1" && pwd -P)
 SRC=$(cd "$(dirname "$2")" && pwd -P)/$(basename "$2")
 OUT=$(cd "$(dirname "$3")" && pwd -P)/$(basename "$3")
@@ -19,13 +27,13 @@ gcc -DHAVE_CONFIG_H -I"$T" -include "$T/zfs_config.h" \
     -I"$T/include" -I"$T/lib/libspl/include" \
     -I"$T/lib/libspl/include/os/linux" -I"$T/lib/libzpool/include" \
     -D_GNU_SOURCE -D_REENTRANT -D_FILE_OFFSET_BITS=64 \
-    -D_LARGEFILE64_SOURCE -DDEBUG -UNDEBUG -DZFS_DEBUG \
+    -D_LARGEFILE64_SOURCE $DBG \
     -DTEXT_DOMAIN=\"zfs-linux-user\" \
     -std=gnu99 -Wall -Wextra -Wstrict-prototypes -Wmissing-prototypes \
     -Wwrite-strings -Wno-sign-compare -Wno-missing-field-initializers \
     -fno-strict-aliasing -fno-omit-frame-pointer -Wimplicit-fallthrough \
     -Werror -pthread -Wno-format-zero-length -Wno-format-truncation \
-    -g -O1 -c -o "$OBJ" "$SRC"
-gcc -g -O1 -pthread -o "$OUT" "$OBJ" -L"$T/.libs" \
+    -g $OPT -c -o "$OBJ" "$SRC"
+gcc -g $OPT -pthread -o "$OUT" "$OBJ" -L"$T/.libs" \
     -lzpool -lzfs_core -lnvpair "$T/.libs/librange_tree.a" -lm
 rm -f "$OBJ"

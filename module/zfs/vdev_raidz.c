@@ -2498,6 +2498,7 @@ int spike_redirect_load_skip = 0;
 int spike_redirect_condense = 0;
 int spike_redirect_condense_tombs = 0;
 int spike_redirect_load_lax = 0;
+int spike_redirect_unsafe_readers = 0;
 static uint64_t spike_redirect_condense_txg;
 
 uint64_t
@@ -2571,6 +2572,9 @@ static void
 rdt_write_enter(raidz_redirect_table_t *t)
 {
 	rw_enter(&t->rdt_lock, RW_WRITER);
+	/* SPIKE: test-only, a writer that ignores the readers. */
+	if (spike_redirect_unsafe_readers)
+		return;
 	t->rdt_writer = 1;
 	membar_sync();
 	for (int r = 0; r < RDT_READERS; r++) {
