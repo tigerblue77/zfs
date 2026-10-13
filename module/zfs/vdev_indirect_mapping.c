@@ -405,6 +405,7 @@ vdev_indirect_mapping_add_entries(vdev_indirect_mapping_t *vim,
 	old_size = vdev_indirect_mapping_size(vim);
 	old_entries = vim->vim_entries;
 	old_count = vim->vim_phys->vimp_num_entries;
+	vim->vim_counts_sum_valid = B_FALSE;
 
 	dmu_buf_will_dirty(vim->vim_dbuf, tx);
 
@@ -596,10 +597,40 @@ vdev_indirect_mapping_free_obsolete_counts(vdev_indirect_mapping_t *vim,
 	vmem_free(counts, vim->vim_phys->vimp_num_entries * sizeof (uint32_t));
 }
 
+/*
+ * Return the number of bytes that the counts object records as obsolete,
+ * that is, the bytes that were already unreferenced when the entries were
+ * written.  Only syncing context adds entries, so callers from syncing
+ * context may rely on the cached sum.
+ */
+uint64_t
+vdev_indirect_mapping_counts_sum(vdev_indirect_mapping_t *vim)
+{
+	ASSERT(vdev_indirect_mapping_verify(vim));
+
+	if (!vim->vim_counts_sum_valid) {
+		uint64_t num_entries = vim->vim_phys->vimp_num_entries;
+		uint64_t sum = 0;
+
+		if (vim->vim_havecounts && num_entries > 0) {
+			uint32_t *counts =
+			    vdev_indirect_mapping_load_obsolete_counts(vim);
+			for (uint64_t i = 0; i < num_entries; i++)
+				sum += counts[i];
+			vdev_indirect_mapping_free_obsolete_counts(vim,
+			    counts);
+		}
+		vim->vim_counts_sum = sum;
+		vim->vim_counts_sum_valid = B_TRUE;
+	}
+	return (vim->vim_counts_sum);
+}
+
 EXPORT_SYMBOL(vdev_indirect_mapping_add_entries);
 EXPORT_SYMBOL(vdev_indirect_mapping_alloc);
 EXPORT_SYMBOL(vdev_indirect_mapping_bytes_mapped);
 EXPORT_SYMBOL(vdev_indirect_mapping_close);
+EXPORT_SYMBOL(vdev_indirect_mapping_counts_sum);
 EXPORT_SYMBOL(vdev_indirect_mapping_entry_for_offset);
 EXPORT_SYMBOL(vdev_indirect_mapping_entry_for_offset_or_next);
 EXPORT_SYMBOL(vdev_indirect_mapping_free);

@@ -453,6 +453,22 @@ vdev_indirect_should_condense(vdev_t *vd)
 	}
 
 	/*
+	 * A mapping too small for the rule above is still worth condensing
+	 * once all of it is obsolete, counting what was already unreferenced
+	 * when the entries were written: the condensed mapping is empty, and
+	 * the vdev can then be retired (see spa_vdev_retire_indirect()).
+	 * The counts are read only for such small mappings, once.
+	 */
+	if (mapping_size <= zfs_condense_min_mapping_bytes &&
+	    bytes_obsolete + vdev_indirect_mapping_counts_sum(vim) >=
+	    bytes_mapped) {
+		zfs_dbgmsg("should condense vdev %llu because all of its "
+		    "%llu-byte mapping is obsolete",
+		    (u_longlong_t)vd->vdev_id, (u_longlong_t)mapping_size);
+		return (B_TRUE);
+	}
+
+	/*
 	 * If the obsolete space map takes up too much space on disk,
 	 * condense in order to free up this disk space.
 	 */
