@@ -420,6 +420,7 @@ ztest_func_t ztest_dmu_object_next_chunk;
 ztest_func_t ztest_dmu_commit_callbacks;
 ztest_func_t ztest_zap;
 ztest_func_t ztest_zap_parallel;
+ztest_func_t ztest_zap_rewrite;
 ztest_func_t ztest_zil_commit;
 ztest_func_t ztest_zil_remount;
 ztest_func_t ztest_dmu_read_write_zcopy;
@@ -475,6 +476,7 @@ static ztest_info_t ztest_info[] = {
 	ZTI_INIT(ztest_dmu_commit_callbacks, 1, &zopt_always),
 	ZTI_INIT(ztest_zap, 30, &zopt_always),
 	ZTI_INIT(ztest_zap_parallel, 100, &zopt_always),
+	ZTI_INIT(ztest_zap_rewrite, 10, &zopt_always),
 	ZTI_INIT(ztest_split_pool, 1, &zopt_sometimes),
 	ZTI_INIT(ztest_zil_commit, 1, &zopt_incessant),
 	ZTI_INIT(ztest_zil_remount, 1, &zopt_sometimes),
@@ -5965,6 +5967,17 @@ out:
 	kmem_free(od, sizeof (ztest_od_t));
 }
 
+/*
+ * Set up od for the ZAP objects that ztest_zap_parallel() updates from all
+ * threads: one that stays a micro ZAP if micro is set, one that turns fat.
+ */
+static void
+ztest_zap_parallel_od_init(ztest_od_t *od, int micro)
+{
+	ztest_od_init(od, ID_PARALLEL, "ztest_zap_parallel", micro,
+	    DMU_OT_ZAP_OTHER, 0, 0, 0);
+}
+
 void
 ztest_zap_parallel(ztest_ds_t *zd, uint64_t id)
 {
@@ -5979,7 +5992,7 @@ ztest_zap_parallel(ztest_ds_t *zd, uint64_t id)
 	void *data;
 
 	od = kmem_alloc(sizeof (ztest_od_t), KM_SLEEP);
-	ztest_od_init(od, ID_PARALLEL, FTAG, micro, DMU_OT_ZAP_OTHER, 0, 0, 0);
+	ztest_zap_parallel_od_init(od, micro);
 
 	if (ztest_object_init(zd, od, sizeof (ztest_od_t), B_FALSE) != 0) {
 		kmem_free(od, sizeof (ztest_od_t));
@@ -6079,6 +6092,50 @@ ztest_zap_parallel(ztest_ds_t *zd, uint64_t id)
 		dmu_tx_commit(tx);
 
 	kmem_free(od, sizeof (ztest_od_t));
+}
+
+/*
+ * Rewrite, with random ZFS_REWRITE_* flags, a ZAP object that other threads
+ * update meanwhile: one of those of ztest_zap_parallel(), which grow, shrink
+ * and turn fat, or the directory of the objects of the tests.  The pool is
+ * then checked as after any other test, the kills of ztest included.
+ */
+void
+ztest_zap_rewrite(ztest_ds_t *zd, uint64_t id)
+{
+	(void) id;
+	objset_t *os = zd->zd_os;
+	ztest_od_t *od;
+	uint64_t object;
+	uint64_t flags;
+	dnode_t *dn;
+	int error;
+
+	if (ztest_random(3) == 0) {
+		object = ZTEST_DIROBJ;
+	} else {
+		od = kmem_alloc(sizeof (ztest_od_t), KM_SLEEP);
+		ztest_zap_parallel_od_init(od, ztest_random(2));
+		if (ztest_object_init(zd, od, sizeof (ztest_od_t),
+		    B_FALSE) != 0) {
+			kmem_free(od, sizeof (ztest_od_t));
+			return;
+		}
+		object = od->od_object;
+		kmem_free(od, sizeof (ztest_od_t));
+	}
+
+	flags = ztest_random(ZFS_REWRITE_VALID_FLAGS + 1) &
+	    ZFS_REWRITE_VALID_FLAGS;
+
+	VERIFY0(dnode_hold(os, object, FTAG, &dn));
+	error = zap_rewrite_by_dnode(dn, flags, NULL, NULL);
+	dnode_rele(dn, FTAG);
+
+	if (error == ENOSPC)
+		ztest_record_enospc(FTAG);
+	else
+		ASSERT(error == 0 || error == EDQUOT || error == EIO);
 }
 
 /*
