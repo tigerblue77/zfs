@@ -506,17 +506,24 @@ child_read_done(zio_t *zio)
 	}
 }
 
+/*
+ * Read [offset, offset + size) of map copy 'copy' on every readable leaf
+ * under vd.  The copies at the end of a disk are placed from the size of the
+ * leaf itself: a replacing or spare vdev has no size of its own, and its
+ * leaves may differ.
+ */
 static void
-child_read(zio_t *zio, vdev_t *vd, uint64_t offset, uint64_t size,
+child_read(zio_t *zio, vdev_t *vd, int copy, uint64_t offset, uint64_t size,
     int checksum, void *private, int flags)
 {
 	for (int c = 0; c < vd->vdev_children; c++) {
-		child_read(zio, vd->vdev_child[c], offset, size, checksum,
+		child_read(zio, vd->vdev_child[c], copy, offset, size, checksum,
 		    private, flags);
 	}
 
 	if (vd->vdev_ops->vdev_op_leaf && vdev_readable(vd)) {
-		zio_nowait(zio_read_phys(zio, vd, offset, size,
+		zio_nowait(zio_read_phys(zio, vd,
+		    vdev_anyraid_header_offset(vd, copy) + offset, size,
 		    abd_alloc_linear(size, B_TRUE), checksum,
 		    child_read_done, private, ZIO_PRIORITY_SYNC_READ, flags,
 		    B_FALSE));
@@ -533,14 +540,13 @@ vdev_anyraid_open_header(vdev_t *cvd, int header, anyraid_header_t *out_header)
 {
 	spa_t *spa = cvd->vdev_spa;
 	uint64_t ashift = cvd->vdev_ashift;
-	uint64_t header_offset = vdev_anyraid_header_offset(cvd, header);
 	uint64_t header_size = VDEV_ANYRAID_MAP_HEADER_SIZE(ashift);
 	int flags = ZIO_FLAG_CONFIG_WRITER | ZIO_FLAG_CANFAIL |
 	    ZIO_FLAG_SPECULATIVE;
 
 	abd_t *header_abd = NULL;
 	zio_t *rio = zio_root(spa, NULL, &header_abd, flags);
-	child_read(rio, cvd, header_offset, header_size, ZIO_CHECKSUM_LABEL,
+	child_read(rio, cvd, header, 0, header_size, ZIO_CHECKSUM_LABEL,
 	    NULL, flags);
 
 	int error;
@@ -880,8 +886,6 @@ anyraid_open_existing(vdev_t *vd, uint64_t child, int32_t **child_capacities)
 	 */
 	zio_t *rio = zio_root(spa, NULL, NULL, flags);
 	abd_t *map_abds[VDEV_ANYRAID_MAP_SIZE / SPA_MAXBLOCKSIZE] = {0};
-	uint64_t header_offset = vdev_anyraid_header_offset(cvd, mapping);
-	uint64_t map_offset = header_offset + header_size;
 	int i;
 	uint_t num_maps = (((int64_t)map_length - 1) / SPA_MAXBLOCKSIZE) + 1;
 	for (i = 0; i < num_maps; i++) {
@@ -889,8 +893,9 @@ anyraid_open_existing(vdev_t *vd, uint64_t child, int32_t **child_capacities)
 		    &header.ah_buf[VDEV_ANYRAID_NVL_BYTES(ashift) +
 		    i * sizeof (*cksum)];
 		zio_t *nio = zio_null(rio, spa, cvd, NULL, &map_abds[i], flags);
-		child_read(nio, cvd, map_offset + i * SPA_MAXBLOCKSIZE,
-		    SPA_MAXBLOCKSIZE, ZIO_CHECKSUM_SHA256, cksum, flags);
+		child_read(nio, cvd, mapping, header_size +
+		    i * SPA_MAXBLOCKSIZE, SPA_MAXBLOCKSIZE, ZIO_CHECKSUM_SHA256,
+		    cksum, flags);
 		zio_nowait(nio);
 	}
 	i--;
