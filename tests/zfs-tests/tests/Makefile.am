@@ -508,8 +508,8 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/anyraid/anyraid_contract_invalid_neg.ksh \
 	functional/anyraid/anyraid_contract_noop_neg.ksh \
 	functional/anyraid/anyraid_contract_offline_pos.ksh \
-	functional/anyraid/anyraid_contract_raidz_below_width_neg.ksh \
 	functional/anyraid/anyraid_contract_raidz2_pos.ksh \
+	functional/anyraid/anyraid_contract_raidz_below_width_neg.ksh \
 	functional/anyraid/anyraid_contract_scrub_pos.ksh \
 	functional/anyraid/anyraid_contract_write_verify_001_pos.ksh \
 	functional/anyraid/anyraid_contract_write_verify_002_pos.ksh \
@@ -530,6 +530,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/anyraid/anyraid_offline_anyraidz_002_neg.ksh \
 	functional/anyraid/anyraid_offline_write_online_resilver.ksh \
 	functional/anyraid/anyraid_open_map_fallback_rebalance.ksh \
+	functional/anyraid/anyraid_properties_001_pos.ksh \
 	functional/anyraid/anyraid_rebalance_001.ksh \
 	functional/anyraid/anyraid_rebalance_002.ksh \
 	functional/anyraid/anyraid_rebalance_003.ksh \
@@ -541,6 +542,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/anyraid/anyraid_rebalance_009.ksh \
 	functional/anyraid/anyraid_rebalance_noop_neg.ksh \
 	functional/anyraid/anyraid_scrub_001_pos.ksh \
+	functional/anyraid/anyraid_send_recv_001_pos.ksh \
 	functional/anyraid/anyraid_snapshot_001_pos.ksh \
 	functional/anyraid/anyraid_special_vdev_001_pos.ksh \
 	functional/anyraid/anyraid_special_vdev_002_pos.ksh \
