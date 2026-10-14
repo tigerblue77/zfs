@@ -14,13 +14,16 @@
 # DESCRIPTION:
 #	Verify that deduplicated writes add no reference to copies on a
 #	vdev with allocating=off, so that zfs rewrite moves deduplicated
-#	blocks off that vdev.
+#	blocks off that vdev, and that a block whose entry has no other
+#	reference stays deduplicated.
 #
 # STRATEGY:
-#	1. Create a pool with a raidz vdev and a special mirror, and three
+#	1. Create a pool with a raidz vdev and a special mirror, and five
 #	   datasets with dedup=on whose data blocks go to the special mirror.
-#	2. In each dataset, write a file and a copy of it with dd, so that
-#	   every DDT entry has two references.
+#	2. In three datasets, write a file and a copy of it with dd, so that
+#	   every DDT entry has two references.  In the other two, write a
+#	   file alone, so that every entry has one reference, and snapshot
+#	   one of them.
 #	3. Set allocating=off on the special mirror.
 #	4. Write a new copy in the third dataset, and verify that it was
 #	   written to the raidz vdev, not deduplicated.  Set allocating=on,
@@ -29,9 +32,14 @@
 #	5. Rewrite the first dataset, then the second one with -P, and verify
 #	   after each rewrite that the special mirror freed the data, and
 #	   that -P kept the logical birth times.
-#	6. Verify the data after an export and import, and that zdb finds no
-#	   leak.
-#	7. Repeat with a legacy dedup table (fast_dedup disabled).
+#	6. Rewrite the two datasets whose entries have one reference, and
+#	   verify that a copy of their file is deduplicated, so that their
+#	   entries now describe the new blocks.  Verify that a scrub finds
+#	   no error and zdb no leak while the snapshot holds the old blocks,
+#	   and that destroying it frees them from the special mirror.
+#	7. Verify the data after an export and import, that a scrub finds no
+#	   error, and that zdb finds no leak.
+#	8. Repeat with a legacy dedup table (fast_dedup disabled).
 
 . $STF_SUITE/include/libtest.shlib
 
@@ -60,24 +68,26 @@ function raidz_alloc
 }
 
 #
-# Copy file a to file $1 in the dataset "newdup", and check that the raidz
-# vdev grew by at least the size of the data if $2 is "unique", or by
-# less than an eighth of it if $2 is "dedup".  The special mirror must
-# grow by less than an eighth of it in both cases.
+# Copy file a to file $2 in dataset $1, and check that the raidz vdev grew
+# by at least the size of the data if $3 is "unique", or by less than an
+# eighth of it if $3 is "dedup".  The special mirror must grow by less
+# than an eighth of it in both cases.
 #
-function copy_and_check # file unique|dedup
+function copy_and_check # dataset file unique|dedup
 {
+	typeset fs=$1
 	typeset dir
 	typeset -i special_before raidz_before special_grew raidz_grew
 
-	dir=$(get_prop mountpoint $TESTPOOL1/newdup)
+	shift
+	dir=$(get_prop mountpoint $TESTPOOL1/$fs)
 	special_before=$(special_alloc)
 	raidz_before=$(raidz_alloc)
 	log_must dd if=$dir/a of=$dir/$1 bs=128k
 	sync_pool $TESTPOOL1
 	special_grew=$(($(special_alloc) - special_before))
 	raidz_grew=$(($(raidz_alloc) - raidz_before))
-	log_note "Copy $1 grew $SPECIAL by $special_grew and $RAIDZ by" \
+	log_note "Copy $fs/$1 grew $SPECIAL by $special_grew and $RAIDZ by" \
 	    "$raidz_grew bytes"
 	((special_grew < DATA_SIZE / 8)) || \
 	    log_fail "Copy $1 was written to $SPECIAL"
@@ -88,7 +98,7 @@ function copy_and_check # file unique|dedup
 		((raidz_grew < DATA_SIZE / 8)) || \
 		    log_fail "Copy $1 was not deduplicated"
 	fi
-	log_must [ "$(xxh128digest $dir/$1)" = "${hash[newdup]}" ]
+	log_must [ "$(xxh128digest $dir/$1)" = "${hash[$fs]}" ]
 }
 
 # Print the logical birth time of each L0 block of file $2 in dataset $1.
@@ -130,7 +140,7 @@ function rewrite_and_check # dataset options
 }
 
 log_assert "Deduplicated writes add no reference to copies on a vdev" \
-    "with allocating=off"
+    "with allocating=off, and keep an entry with one reference"
 
 log_onexit cleanup
 
@@ -151,29 +161,31 @@ for fast_dedup in enabled disabled; do
 	RAIDZ=$(zpool status $TESTPOOL1 | awk '/raidz1-/ { print $1; exit }')
 	[[ -n "$RAIDZ" ]] || log_fail "Could not find the raidz vdev"
 
-	for fs in default physical newdup; do
+	for fs in default physical newdup single snap; do
 		log_must zfs create -o dedup=on -o recordsize=128k \
 		    -o special_small_blocks=128k $TESTPOOL1/$fs
 		dir=$(get_prop mountpoint $TESTPOOL1/$fs)
 		log_must dd if=/dev/urandom of=$dir/a bs=128k \
 		    count=$((DATA_SIZE / (128 * 1024)))
-		log_must dd if=$dir/a of=$dir/b bs=128k
 		hash[$fs]=$(xxh128digest $dir/a)
+		[[ $fs == single || $fs == snap ]] && continue
+		log_must dd if=$dir/a of=$dir/b bs=128k
 		log_must [ "$(xxh128digest $dir/b)" = "${hash[$fs]}" ]
 	done
+	log_must zfs snapshot $TESTPOOL1/snap@old
 	sync_pool $TESTPOOL1
 
 	# The data of the datasets is on the special mirror, deduplicated.
 	alloc=$(special_alloc)
 	log_note "$SPECIAL allocated $alloc bytes"
-	((alloc >= 3 * DATA_SIZE && alloc < 4 * DATA_SIZE)) || \
+	((alloc >= 5 * DATA_SIZE && alloc < 6 * DATA_SIZE)) || \
 	    log_fail "$SPECIAL allocated $alloc bytes, expected about" \
-	    "$((3 * DATA_SIZE))"
+	    "$((5 * DATA_SIZE))"
 
 	log_must zpool set allocating=off $TESTPOOL1 $SPECIAL
-	copy_and_check c unique
+	copy_and_check newdup c unique
 	log_must zpool set allocating=on $TESTPOOL1 $SPECIAL
-	copy_and_check d dedup
+	copy_and_check newdup d dedup
 	log_must zpool set allocating=off $TESTPOOL1 $SPECIAL
 
 	rewrite_and_check default ""
@@ -183,18 +195,41 @@ for fast_dedup in enabled disabled; do
 	rewrite_and_check physical "-P"
 	log_must [ "$(l0_births $TESTPOOL1/physical a)" = "$births" ]
 
+	# Entries with one reference take the new copies.
+	rewrite_and_check single ""
+	copy_and_check single c dedup
+	log_must zfs rewrite -r "$(get_prop mountpoint $TESTPOOL1/snap)"
+	sync_pool $TESTPOOL1
+	copy_and_check snap c dedup
+	log_must zpool scrub -w $TESTPOOL1
+	log_must check_pool_status $TESTPOOL1 "errors" "No known data errors"
+	log_must zdb -b $TESTPOOL1
+	before=$(special_alloc)
+	log_must zfs destroy $TESTPOOL1/snap@old
+	for i in {1..30}; do
+		sync_pool $TESTPOOL1
+		freed=$((before - $(special_alloc)))
+		((freed >= DATA_SIZE * 7 / 8)) && break
+		sleep 1
+	done
+	log_note "Destroying snap@old freed $freed bytes on $SPECIAL"
+	((freed >= DATA_SIZE * 7 / 8)) || \
+	    log_fail "Destroying snap@old left its blocks on $SPECIAL"
+
 	log_must zpool export $TESTPOOL1
 	log_must zpool import -d $VDIR $TESTPOOL1
-	for fs in default physical newdup; do
+	for fs in default physical newdup single snap; do
 		dir=$(get_prop mountpoint $TESTPOOL1/$fs)
 		for f in "$dir"/*; do
 			log_must [ "$(xxh128digest $f)" = "${hash[$fs]}" ]
 		done
 	done
+	log_must zpool scrub -w $TESTPOOL1
+	log_must check_pool_status $TESTPOOL1 "errors" "No known data errors"
 	log_must zdb -b $TESTPOOL1
 
 	destroy_pool $TESTPOOL1
 done
 
 log_pass "Deduplicated writes add no reference to copies on a vdev" \
-    "with allocating=off"
+    "with allocating=off, and keep an entry with one reference"
