@@ -49,12 +49,24 @@
 #include <zfeature_common.h>
 #include <libzutil.h>
 #include <sys/metaslab_impl.h>
+#include <sys/dbuf.h>
+#include <sys/dnode.h>
+#include <sys/dsl_dataset.h>
+#include <sys/sa.h>
+#include <sys/sa_impl.h>
+#include <sys/zfs_sa.h>
+#include <sys/zfs_project.h>
 #include <libzpool.h>
 
 static importargs_t g_importargs;
 static char *g_pool;
 static boolean_t g_readonly;
 static boolean_t g_dump_dbgmsg;
+/*
+ * Set by drain when there is no /dev/zfs: the active-pool check of the
+ * import needs it, and no kernel here can have the pool imported.
+ */
+static boolean_t g_no_kernel;
 
 /*
  * In readonly imports, metaslab space maps are not opened unless this is set.
@@ -129,7 +141,23 @@ usage(void)
 	    "        create leaked MOS objects for testing\n"
 	    "        -c <count> leaked DSL clone maps to create (default 1)\n"
 	    "        -s <count> leaked SPA space maps to create (default 1)\n"
-	    "        dry-run unless -w\n");
+	    "        dry-run unless -w\n"
+	    "\n"
+	    "    drain [-cDKlMOSUvz] [-b KiB] [-n rounds] <pool>\n"
+	    "        PROTOTYPE: rewrite every block with a copy on a\n"
+	    "        top-level vdev with allocating=off, in all filesystems\n"
+	    "        and volumes and in the MOS, until its allocated space\n"
+	    "        stops decreasing\n"
+	    "        -b <KiB> dirtied MOS bytes per txg (default 16384)\n"
+	    "        -n <rounds> maximum number of rounds (default 8)\n"
+	    "        -l logical rewrite (default: physical when enabled)\n"
+	    "        -S skip blocks shared with a snapshot\n"
+	    "        -D -U -M skip the dataset, used-object, MOS pass\n"
+	    "        -v list the MOS objects touched\n"
+	    "        -O account DMU_OST_OTHER objsets as ZPL ones (tests)\n"
+	    "        -K do not dirty the MOS with the used objects (tests)\n"
+	    "        -c walk the MOS during the dataset pass too (tests)\n"
+	    "        -z start a scrub first (tests)\n");
 	exit(1);
 }
 
@@ -219,7 +247,7 @@ zhack_import(char *target, boolean_t readonly)
 	dmu_objset_register_type(DMU_OST_ZFS, space_delta_cb);
 
 	g_readonly = readonly;
-	g_importargs.can_be_active = readonly;
+	g_importargs.can_be_active = readonly || g_no_kernel;
 	g_pool = strdup(target);
 
 	libpc_handle_t lpch = {
@@ -1627,6 +1655,1137 @@ zhack_do_metaslab(int argc, char **argv)
 	return (0);
 }
 
+/*
+ * zhack drain: PROTOTYPE, never meant to be merged as is.
+ *
+ * Try to empty every top-level vdev with allocating=off (vdev_noalloc) by
+ * writing every block that has a copy on one of them again, through the
+ * DMU, so that the new copy is allocated elsewhere and the old one freed:
+ *
+ *  - every filesystem and volume (not snapshots) is owned, and each of its
+ *    objects is walked: an L0 block with a DVA on such a vdev is marked for
+ *    rewrite (dmu_rewrite_by_dnode()), an indirect block on such a vdev
+ *    with no marked L0 under it is dirtied on its own, a dnode block on
+ *    such a vdev is moved by dnode_setdirty() of an object in it (or by
+ *    dirtying the block when it holds no allocated dnode), the spill block
+ *    is dirtied, and an objset whose root block is there is dirtied;
+ *  - the user/group/project used objects, which only syncing context may
+ *    touch, are walked from a sync task per dataset;
+ *  - the MOS is walked from sync tasks, at most dr_mos_budget bytes of
+ *    dirtied blocks per txg, and every block on such a vdev is dirtied.
+ *
+ * Rounds repeat until the allocated space of those vdevs stops decreasing.
+ * Snapshots and the blocks they share keep their copies: nothing here can
+ * move them.
+ */
+
+#define	DRAIN_NO_L1	UINT64_MAX
+#define	DRAIN_NTYPES	(DMU_OT_NUMTYPES + 128)
+#define	DRAIN_RUN	16
+
+typedef struct drain_unit {
+	uint64_t	du_l1;		/* L1 block id, DRAIN_NO_L1 if none */
+	boolean_t	du_hit;		/* L1 or an ancestor is to move */
+	size_t		du_first;	/* index of its first L0 in sel_blk */
+	size_t		du_count;	/* number of its L0s in sel_blk */
+} drain_unit_t;
+
+typedef struct drain_sel {
+	uint64_t	*sel_blk;
+	size_t		sel_nblk;
+	size_t		sel_maxblk;
+	drain_unit_t	*sel_unit;
+	size_t		sel_nunit;
+	size_t		sel_maxunit;
+	uint64_t	sel_errors;
+} drain_sel_t;
+
+typedef struct drain_cnt {
+	uint64_t	dc_objsets;
+	uint64_t	dc_objects;
+	uint64_t	dc_l0;
+	uint64_t	dc_l0_bytes;
+	uint64_t	dc_l1;
+	uint64_t	dc_dnode;
+	uint64_t	dc_mdn;
+	uint64_t	dc_spill;
+	uint64_t	dc_root;
+	uint64_t	dc_used;
+	uint64_t	dc_used_objs;
+	uint64_t	dc_bytes;
+	uint64_t	dc_errors;
+	uint64_t	dc_txgs;
+	uint64_t	dc_type_blocks[DRAIN_NTYPES];
+	uint64_t	dc_type_bytes[DRAIN_NTYPES];
+} drain_cnt_t;
+
+typedef struct drain_ctx {
+	spa_t		*dr_spa;
+	uint8_t		*dr_noalloc;
+	uint64_t	dr_nvdevs;
+	uint64_t	dr_rwflags;
+	uint64_t	dr_mos_budget;
+	boolean_t	dr_verbose;
+	boolean_t	dr_no_mos_kick;
+} drain_ctx_t;
+
+static drain_ctx_t g_drain;
+
+typedef struct drain_mos {
+	uint64_t	dm_cursor;
+	boolean_t	dm_done;
+	drain_cnt_t	*dm_cnt;
+} drain_mos_t;
+
+typedef struct drain_used {
+	const char	*du_name;
+	drain_cnt_t	*du_cnt;
+} drain_used_t;
+
+typedef struct drain_names {
+	char		**dn_name;
+	int		dn_n;
+	int		dn_max;
+} drain_names_t;
+
+/*
+ * The user/group/project accounting callback for ZPL objsets, a copy of
+ * zpl_get_file_info(), which libzpool does not build.  zhack's own
+ * callback aborts, and none at all would leave the accounting stale.
+ */
+static int
+drain_get_file_info(dmu_object_type_t bonustype, const void *data,
+    zfs_file_info_t *zoi)
+{
+	if (bonustype != DMU_OT_ZNODE && bonustype != DMU_OT_SA)
+		return (SET_ERROR(ENOENT));
+
+	zoi->zfi_project = ZFS_DEFAULT_PROJID;
+	if (data == NULL)
+		return (SET_ERROR(EEXIST));
+
+	if (bonustype == DMU_OT_ZNODE) {
+		const znode_phys_t *znp = data;
+		zoi->zfi_user = znp->zp_uid;
+		zoi->zfi_group = znp->zp_gid;
+		zoi->zfi_generation = znp->zp_gen;
+		return (0);
+	}
+
+	const sa_hdr_phys_t *sap = data;
+	if (sap->sa_magic == 0) {
+		zoi->zfi_user = 0;
+		zoi->zfi_group = 0;
+		zoi->zfi_generation = 0;
+		return (0);
+	}
+
+	sa_hdr_phys_t sa = *sap;
+	boolean_t swap = B_FALSE;
+	if (sa.sa_magic == BSWAP_32(SA_MAGIC)) {
+		sa.sa_magic = SA_MAGIC;
+		sa.sa_layout_info = BSWAP_16(sa.sa_layout_info);
+		swap = B_TRUE;
+	}
+	if (sa.sa_magic != SA_MAGIC)
+		return (SET_ERROR(EINVAL));
+
+	int hdrsize = sa_hdrsize(&sa);
+	if (hdrsize < (int)sizeof (sa_hdr_phys_t))
+		return (SET_ERROR(EINVAL));
+
+	uintptr_t p = (uintptr_t)data + hdrsize;
+	zoi->zfi_user = *((uint64_t *)(p + SA_UID_OFFSET));
+	zoi->zfi_group = *((uint64_t *)(p + SA_GID_OFFSET));
+	zoi->zfi_generation = *((uint64_t *)(p + SA_GEN_OFFSET));
+	uint64_t flags = *((uint64_t *)(p + SA_FLAGS_OFFSET));
+	if (swap)
+		flags = BSWAP_64(flags);
+	if (flags & ZFS_PROJID)
+		zoi->zfi_project = *((uint64_t *)(p + SA_PROJID_OFFSET));
+	if (swap) {
+		zoi->zfi_user = BSWAP_64(zoi->zfi_user);
+		zoi->zfi_group = BSWAP_64(zoi->zfi_group);
+		zoi->zfi_project = BSWAP_64(zoi->zfi_project);
+		zoi->zfi_generation = BSWAP_64(zoi->zfi_generation);
+	}
+	return (0);
+}
+
+static boolean_t
+drain_bp_hit(const blkptr_t *bp)
+{
+	if (BP_IS_HOLE(bp) || BP_IS_EMBEDDED(bp))
+		return (B_FALSE);
+	for (int d = 0; d < BP_GET_NDVAS(bp); d++) {
+		uint64_t id = DVA_GET_VDEV(&bp->blk_dva[d]);
+		if (id < g_drain.dr_nvdevs && g_drain.dr_noalloc[id])
+			return (B_TRUE);
+	}
+	return (B_FALSE);
+}
+
+static int
+drain_type_index(dmu_object_type_t t)
+{
+	if (t < DMU_OT_NUMTYPES)
+		return (t);
+	return (DMU_OT_NUMTYPES + (t & 0x7f));
+}
+
+static void
+drain_type_name(int i, char *buf, size_t len)
+{
+	if (i < DMU_OT_NUMTYPES) {
+		(void) strlcpy(buf, dmu_ot[i].ot_name, len);
+	} else {
+		int t = i - DMU_OT_NUMTYPES;
+		(void) snprintf(buf, len, "newtype %s%s",
+		    dmu_ot_byteswap[t & DMU_OT_BYTESWAP_MASK].ob_name,
+		    (t & DMU_OT_METADATA) ? " metadata" : "");
+	}
+}
+
+static void
+drain_count_type(drain_cnt_t *cnt, dmu_object_type_t t, uint64_t blocks,
+    uint64_t bytes)
+{
+	int i = drain_type_index(t);
+
+	cnt->dc_type_blocks[i] += blocks;
+	cnt->dc_type_bytes[i] += bytes;
+	cnt->dc_bytes += bytes;
+}
+
+static size_t
+drain_sel_unit(drain_sel_t *sel, uint64_t l1, boolean_t hit)
+{
+	if (sel->sel_nunit == sel->sel_maxunit) {
+		sel->sel_maxunit = MAX(16, sel->sel_maxunit * 2);
+		sel->sel_unit = realloc(sel->sel_unit,
+		    sel->sel_maxunit * sizeof (drain_unit_t));
+		VERIFY3P(sel->sel_unit, !=, NULL);
+	}
+	drain_unit_t *u = &sel->sel_unit[sel->sel_nunit];
+	u->du_l1 = l1;
+	u->du_hit = hit;
+	u->du_first = sel->sel_nblk;
+	u->du_count = 0;
+	return (sel->sel_nunit++);
+}
+
+static void
+drain_sel_blk(drain_sel_t *sel, size_t u, uint64_t blkid)
+{
+	if (sel->sel_nblk == sel->sel_maxblk) {
+		sel->sel_maxblk = MAX(64, sel->sel_maxblk * 2);
+		sel->sel_blk = realloc(sel->sel_blk,
+		    sel->sel_maxblk * sizeof (uint64_t));
+		VERIFY3P(sel->sel_blk, !=, NULL);
+	}
+	sel->sel_blk[sel->sel_nblk++] = blkid;
+	sel->sel_unit[u].du_count++;
+}
+
+static void
+drain_sel_fini(drain_sel_t *sel)
+{
+	free(sel->sel_blk);
+	free(sel->sel_unit);
+	memset(sel, 0, sizeof (*sel));
+}
+
+/*
+ * Walk the indirect block (level, blkid) of dn.  hit is true when this
+ * block or one of its ancestors has a DVA on a noalloc vdev.  The caller
+ * holds dn_struct_rwlock as reader.
+ */
+static void
+drain_walk_ind(dnode_t *dn, int level, uint64_t blkid, boolean_t hit,
+    drain_sel_t *sel)
+{
+	int epbs = dn->dn_indblkshift - SPA_BLKPTRSHIFT;
+	dmu_buf_impl_t *db = dbuf_hold_level(dn, level, blkid, FTAG);
+
+	if (db == NULL) {
+		sel->sel_errors++;
+		return;
+	}
+	if (dbuf_read(db, NULL, DB_RF_CANFAIL | DB_RF_HAVESTRUCT |
+	    DMU_READ_NO_PREFETCH) != 0) {
+		sel->sel_errors++;
+		dbuf_rele(db, FTAG);
+		return;
+	}
+
+	const blkptr_t *bps = db->db.db_data;
+	if (level == 1) {
+		size_t u = drain_sel_unit(sel, blkid, hit);
+		for (uint64_t i = 0; i < (1ULL << epbs); i++) {
+			if (drain_bp_hit(&bps[i]))
+				drain_sel_blk(sel, u, (blkid << epbs) + i);
+		}
+	} else {
+		for (uint64_t i = 0; i < (1ULL << epbs); i++) {
+			if (BP_IS_HOLE(&bps[i]))
+				continue;
+			drain_walk_ind(dn, level - 1, (blkid << epbs) + i,
+			    hit || drain_bp_hit(&bps[i]), sel);
+		}
+	}
+	dbuf_rele(db, FTAG);
+}
+
+/*
+ * Select the L0 blocks of dn that have a DVA on a noalloc vdev, grouped by
+ * their L1, and note which L1s are on such a vdev or under one.
+ */
+static void
+drain_walk(dnode_t *dn, drain_sel_t *sel)
+{
+	rw_enter(&dn->dn_struct_rwlock, RW_READER);
+	int nlevels = dn->dn_nlevels;
+	int nblkptr = dn->dn_nblkptr;
+	const blkptr_t *bps = dn->dn_phys->dn_blkptr;
+
+	if (nlevels == 1) {
+		size_t u = drain_sel_unit(sel, DRAIN_NO_L1, B_FALSE);
+		for (int i = 0; i < nblkptr; i++) {
+			if (drain_bp_hit(&bps[i]))
+				drain_sel_blk(sel, u, i);
+		}
+	} else {
+		for (int i = 0; i < nblkptr; i++) {
+			if (BP_IS_HOLE(&bps[i]))
+				continue;
+			drain_walk_ind(dn, nlevels - 1, i,
+			    drain_bp_hit(&bps[i]), sel);
+		}
+	}
+	rw_exit(&dn->dn_struct_rwlock);
+}
+
+/*
+ * Dirty block (level, blkid) of dn on its own.  In open context the caller
+ * assigned tx with a hold that covers it.
+ */
+static int
+drain_dirty_level(dnode_t *dn, int level, uint64_t blkid, dmu_tx_t *tx,
+    uint64_t *sizep)
+{
+	rw_enter(&dn->dn_struct_rwlock, RW_READER);
+	dmu_buf_impl_t *db = dbuf_hold_level(dn, level, blkid, FTAG);
+	rw_exit(&dn->dn_struct_rwlock);
+	if (db == NULL)
+		return (SET_ERROR(ENOENT));
+	dmu_buf_will_dirty(&db->db, tx);
+	if (sizep != NULL)
+		*sizep = db->db.db_size;
+	dbuf_rele(db, FTAG);
+	return (0);
+}
+
+/*
+ * Open context: mark the selected L0s of dn for rewrite, a few per
+ * transaction, then dirty on its own each L1 that is on a noalloc vdev (or
+ * under one) and got no L0 marked.  Returns true if anything was dirtied.
+ */
+static boolean_t
+drain_mark(objset_t *os, dnode_t *dn, drain_sel_t *sel, drain_cnt_t *cnt)
+{
+	boolean_t dirtied = B_FALSE;
+	uint64_t bs = dn->dn_datablksz;
+	int epbs = dn->dn_indblkshift - SPA_BLKPTRSHIFT;
+
+	for (size_t u = 0; u < sel->sel_nunit; u++) {
+		drain_unit_t *du = &sel->sel_unit[u];
+		uint64_t marked = 0;
+
+		for (size_t i = 0; i < du->du_count; ) {
+			uint64_t *blk = &sel->sel_blk[du->du_first];
+			uint64_t start = blk[i];
+			size_t n = 1;
+
+			while (i + n < du->du_count && n < DRAIN_RUN &&
+			    blk[i + n] == start + n)
+				n++;
+
+			dmu_tx_t *tx = dmu_tx_create(os);
+			dmu_tx_hold_write_by_dnode(tx, dn, start * bs, n * bs);
+			int err = dmu_tx_assign(tx, DMU_TX_WAIT);
+			if (err != 0) {
+				dmu_tx_abort(tx);
+				cnt->dc_errors++;
+				break;
+			}
+			uint64_t nw = 0;
+			err = dmu_rewrite_by_dnode(dn, start * bs, n * bs,
+			    g_drain.dr_rwflags, tx, NULL, &nw);
+			dmu_tx_commit(tx);
+			if (err != 0)
+				cnt->dc_errors++;
+			if (nw != 0) {
+				cnt->dc_l0 += nw / bs;
+				cnt->dc_l0_bytes += nw;
+				drain_count_type(cnt, dn->dn_type, nw / bs, nw);
+				marked += nw;
+				dirtied = B_TRUE;
+			}
+			i += n;
+		}
+
+		if (du->du_hit && marked == 0 && du->du_l1 != DRAIN_NO_L1) {
+			dmu_tx_t *tx = dmu_tx_create(os);
+			dmu_tx_hold_write_by_dnode(tx, dn,
+			    (du->du_l1 << epbs) * bs, 1);
+			if (dmu_tx_assign(tx, DMU_TX_WAIT) != 0) {
+				dmu_tx_abort(tx);
+				cnt->dc_errors++;
+				continue;
+			}
+			uint64_t sz = 0;
+			if (drain_dirty_level(dn, 1, du->du_l1, tx, &sz) == 0) {
+				cnt->dc_l1++;
+				drain_count_type(cnt, dn->dn_type, 1, sz);
+				dirtied = B_TRUE;
+			} else {
+				cnt->dc_errors++;
+			}
+			dmu_tx_commit(tx);
+		}
+	}
+	return (dirtied);
+}
+
+static boolean_t
+drain_spill(objset_t *os, dnode_t *dn, drain_cnt_t *cnt)
+{
+	boolean_t hit;
+
+	rw_enter(&dn->dn_struct_rwlock, RW_READER);
+	hit = (dn->dn_phys->dn_flags & DNODE_FLAG_SPILL_BLKPTR) &&
+	    drain_bp_hit(DN_SPILL_BLKPTR(dn->dn_phys));
+	rw_exit(&dn->dn_struct_rwlock);
+	if (!hit)
+		return (B_FALSE);
+
+	dmu_tx_t *tx = dmu_tx_create(os);
+	dmu_tx_hold_spill(tx, dn->dn_object);
+	if (dmu_tx_assign(tx, DMU_TX_WAIT) != 0) {
+		dmu_tx_abort(tx);
+		cnt->dc_errors++;
+		return (B_FALSE);
+	}
+	dmu_buf_t *bonus, *spill;
+	boolean_t done = B_FALSE;
+	if (dmu_bonus_hold_by_dnode(dn, FTAG, &bonus,
+	    DMU_READ_NO_PREFETCH) == 0) {
+		if (dmu_spill_hold_existing(bonus, FTAG, &spill) == 0) {
+			dmu_buf_will_dirty(spill, tx);
+			drain_count_type(cnt, DMU_OT_SA, 1, spill->db_size);
+			dmu_buf_rele(spill, FTAG);
+			cnt->dc_spill++;
+			done = B_TRUE;
+		}
+		dmu_buf_rele(bonus, FTAG);
+	}
+	if (!done)
+		cnt->dc_errors++;
+	dmu_tx_commit(tx);
+	return (done);
+}
+
+static ssize_t
+drain_find_blk(const drain_sel_t *sel, uint64_t blkid)
+{
+	ssize_t lo = 0, hi = (ssize_t)sel->sel_nblk - 1;
+
+	while (lo <= hi) {
+		ssize_t mid = (lo + hi) / 2;
+		if (sel->sel_blk[mid] == blkid)
+			return (mid);
+		if (sel->sel_blk[mid] < blkid)
+			lo = mid + 1;
+		else
+			hi = mid - 1;
+	}
+	return (-1);
+}
+
+/*
+ * Open context: one filesystem or volume, owned for the whole pass.
+ */
+static void
+drain_objset(const char *name, drain_cnt_t *cnt)
+{
+	objset_t *os;
+	int err;
+
+	err = dmu_objset_own(name, DMU_OST_ANY, B_FALSE, B_TRUE, FTAG, &os);
+	if (err != 0) {
+		(void) printf("DRAIN_SKIP %s: %s\n", name, err == EACCES ?
+		    "encrypted, key not loaded" : strerror(err));
+		cnt->dc_errors++;
+		return;
+	}
+	cnt->dc_objsets++;
+
+	dnode_t *mdn = DMU_META_DNODE(os);
+	drain_sel_t msel = { 0 };
+	drain_walk(mdn, &msel);
+	boolean_t *covered = calloc(MAX(msel.sel_nblk, 1),
+	    sizeof (boolean_t));
+	VERIFY3P(covered, !=, NULL);
+	boolean_t dirtied = B_FALSE;
+
+	uint64_t obj = 0;
+	while (dmu_object_next(os, &obj, B_FALSE, 0) == 0) {
+		dnode_t *dn;
+
+		if (dnode_hold(os, obj, FTAG, &dn) != 0) {
+			cnt->dc_errors++;
+			continue;
+		}
+		cnt->dc_objects++;
+
+		drain_sel_t sel = { 0 };
+		drain_walk(dn, &sel);
+		cnt->dc_errors += sel.sel_errors;
+		if (drain_mark(os, dn, &sel, cnt))
+			dirtied = B_TRUE;
+		drain_sel_fini(&sel);
+
+		if (drain_spill(os, dn, cnt))
+			dirtied = B_TRUE;
+
+		ssize_t idx = drain_find_blk(&msel,
+		    obj >> DNODES_PER_BLOCK_SHIFT);
+		if (idx >= 0) {
+			dmu_tx_t *tx = dmu_tx_create(os);
+			dmu_tx_hold_bonus(tx, obj);
+			if (dmu_tx_assign(tx, DMU_TX_WAIT) == 0) {
+				dnode_setdirty(dn, tx);
+				dmu_tx_commit(tx);
+				if (!covered[idx]) {
+					drain_count_type(cnt, DMU_OT_DNODE, 1,
+					    DNODE_BLOCK_SIZE);
+				}
+				covered[idx] = B_TRUE;
+				cnt->dc_dnode++;
+				dirtied = B_TRUE;
+			} else {
+				dmu_tx_abort(tx);
+				cnt->dc_errors++;
+			}
+		}
+		dnode_rele(dn, FTAG);
+	}
+
+	/* Dnode blocks with no allocated dnode, and meta-dnode indirects. */
+	for (size_t u = 0; u < msel.sel_nunit; u++) {
+		drain_unit_t *du = &msel.sel_unit[u];
+		boolean_t any = B_FALSE;
+
+		for (size_t i = du->du_first; i < du->du_first + du->du_count;
+		    i++) {
+			any = B_TRUE;
+			if (covered[i])
+				continue;
+			dmu_tx_t *tx = dmu_tx_create(os);
+			dmu_tx_hold_space(tx, DNODE_BLOCK_SIZE);
+			if (dmu_tx_assign(tx, DMU_TX_WAIT) != 0) {
+				dmu_tx_abort(tx);
+				cnt->dc_errors++;
+				continue;
+			}
+			if (drain_dirty_level(mdn, 0, msel.sel_blk[i], tx,
+			    NULL) == 0) {
+				cnt->dc_mdn++;
+				drain_count_type(cnt, DMU_OT_DNODE, 1,
+				    DNODE_BLOCK_SIZE);
+				dirtied = B_TRUE;
+			} else {
+				cnt->dc_errors++;
+			}
+			dmu_tx_commit(tx);
+		}
+		if (du->du_hit && !any && du->du_l1 != DRAIN_NO_L1) {
+			dmu_tx_t *tx = dmu_tx_create(os);
+			dmu_tx_hold_space(tx, 1ULL << mdn->dn_indblkshift);
+			if (dmu_tx_assign(tx, DMU_TX_WAIT) != 0) {
+				dmu_tx_abort(tx);
+				cnt->dc_errors++;
+				continue;
+			}
+			uint64_t sz = 0;
+			if (drain_dirty_level(mdn, 1, du->du_l1, tx, &sz) ==
+			    0) {
+				cnt->dc_l1++;
+				drain_count_type(cnt, DMU_OT_DNODE, 1, sz);
+				dirtied = B_TRUE;
+			} else {
+				cnt->dc_errors++;
+			}
+			dmu_tx_commit(tx);
+		}
+	}
+	free(covered);
+	drain_sel_fini(&msel);
+
+	/* Nothing else made the objset dirty: rewrite its root block. */
+	dsl_dataset_t *ds = dmu_objset_ds(os);
+	rrw_enter(&ds->ds_bp_rwlock, RW_READER, FTAG);
+	boolean_t root_hit = drain_bp_hit(os->os_rootbp);
+	rrw_exit(&ds->ds_bp_rwlock, FTAG);
+	if (!dirtied && root_hit) {
+		dmu_tx_t *tx = dmu_tx_create(os);
+		dmu_tx_hold_space(tx, SPA_MINBLOCKSIZE);
+		if (dmu_tx_assign(tx, DMU_TX_WAIT) == 0) {
+			dsl_dataset_dirty(ds, tx);
+			dmu_tx_commit(tx);
+			cnt->dc_root++;
+			drain_count_type(cnt, DMU_OT_OBJSET, 1, 0);
+		} else {
+			dmu_tx_abort(tx);
+			cnt->dc_errors++;
+		}
+	}
+
+	dmu_objset_disown(os, B_TRUE, FTAG);
+}
+
+/*
+ * Syncing context: dirty the selected blocks of dn, which belongs to the
+ * MOS or is one of the user/group/project used objects.
+ */
+static uint64_t
+drain_dirty_sync(dnode_t *dn, drain_sel_t *sel, drain_cnt_t *cnt,
+    dmu_tx_t *tx, uint64_t *nblocks)
+{
+	uint64_t bytes = 0;
+
+	for (size_t u = 0; u < sel->sel_nunit; u++) {
+		drain_unit_t *du = &sel->sel_unit[u];
+		uint64_t marked = 0;
+
+		for (size_t i = du->du_first; i < du->du_first + du->du_count;
+		    i++) {
+			uint64_t blkid = sel->sel_blk[i];
+			dmu_buf_t *db;
+
+			if (dnode_block_freed(dn, blkid))
+				continue;
+			if (dmu_buf_hold_by_dnode(dn, blkid * dn->dn_datablksz,
+			    FTAG, &db, DMU_READ_NO_PREFETCH) != 0) {
+				cnt->dc_errors++;
+				continue;
+			}
+			dmu_buf_will_dirty(db, tx);
+			bytes += db->db_size;
+			drain_count_type(cnt, dn->dn_type, 1, db->db_size);
+			dmu_buf_rele(db, FTAG);
+			(*nblocks)++;
+			marked++;
+		}
+		if (du->du_hit && marked == 0 && du->du_l1 != DRAIN_NO_L1) {
+			uint64_t sz = 0;
+			if (drain_dirty_level(dn, 1, du->du_l1, tx, &sz) == 0) {
+				cnt->dc_l1++;
+				bytes += sz;
+				drain_count_type(cnt, dn->dn_type, 1, sz);
+			} else {
+				cnt->dc_errors++;
+			}
+		}
+	}
+	return (bytes);
+}
+
+static void
+drain_mos_sync(void *arg, dmu_tx_t *tx)
+{
+	drain_mos_t *dm = arg;
+	drain_cnt_t *cnt = dm->dm_cnt;
+	objset_t *mos = dmu_tx_pool(tx)->dp_meta_objset;
+	uint64_t bytes = 0;
+
+	cnt->dc_txgs++;
+	if (dm->dm_cursor == 0) {
+		dnode_t *mdn = DMU_META_DNODE(mos);
+		drain_sel_t sel = { 0 };
+
+		drain_walk(mdn, &sel);
+		cnt->dc_errors += sel.sel_errors;
+		for (size_t u = 0; u < sel.sel_nunit; u++) {
+			drain_unit_t *du = &sel.sel_unit[u];
+			for (size_t i = du->du_first;
+			    i < du->du_first + du->du_count; i++) {
+				if (drain_dirty_level(mdn, 0, sel.sel_blk[i],
+				    tx, NULL) == 0) {
+					cnt->dc_mdn++;
+					bytes += DNODE_BLOCK_SIZE;
+					drain_count_type(cnt, DMU_OT_DNODE, 1,
+					    DNODE_BLOCK_SIZE);
+				} else {
+					cnt->dc_errors++;
+				}
+			}
+			if (du->du_hit && du->du_count == 0 &&
+			    du->du_l1 != DRAIN_NO_L1) {
+				uint64_t sz = 0;
+				if (drain_dirty_level(mdn, 1, du->du_l1, tx,
+				    &sz) == 0) {
+					cnt->dc_l1++;
+					bytes += sz;
+					drain_count_type(cnt, DMU_OT_DNODE, 1,
+					    sz);
+				} else {
+					cnt->dc_errors++;
+				}
+			}
+		}
+		drain_sel_fini(&sel);
+	}
+
+	uint64_t obj = dm->dm_cursor;
+	while (bytes < g_drain.dr_mos_budget) {
+		dnode_t *dn;
+
+		if (dmu_object_next(mos, &obj, B_FALSE, 0) != 0) {
+			dm->dm_done = B_TRUE;
+			break;
+		}
+		/* Objects being freed fail to be held: skip them. */
+		if (dnode_hold(mos, obj, FTAG, &dn) != 0) {
+			cnt->dc_errors++;
+			continue;
+		}
+		cnt->dc_objects++;
+
+		drain_sel_t sel = { 0 };
+		uint64_t nblocks = 0;
+		drain_walk(dn, &sel);
+		cnt->dc_errors += sel.sel_errors;
+		uint64_t b = drain_dirty_sync(dn, &sel, cnt, tx, &nblocks);
+		cnt->dc_l0 += nblocks;
+		cnt->dc_l0_bytes += b;
+		bytes += b;
+		if (g_drain.dr_verbose && (nblocks != 0 || b != 0)) {
+			char tn[64];
+			drain_type_name(drain_type_index(dn->dn_type), tn,
+			    sizeof (tn));
+			(void) printf("  MOS_OBJ txg=%llu obj=%llu type=%s "
+			    "nlevels=%u blocks=%llu bytes=%llu\n",
+			    (u_longlong_t)tx->tx_txg, (u_longlong_t)obj, tn,
+			    dn->dn_nlevels, (u_longlong_t)nblocks,
+			    (u_longlong_t)b);
+		}
+		drain_sel_fini(&sel);
+		dnode_rele(dn, FTAG);
+	}
+	dm->dm_cursor = obj;
+}
+
+/*
+ * One full walk of the MOS, in as many sync tasks as the budget needs.
+ */
+static void
+drain_mos_scan(const char *pool, drain_cnt_t *cnt)
+{
+	drain_mos_t dm = { 0 };
+
+	dm.dm_cnt = cnt;
+	while (!dm.dm_done) {
+		int err = dsl_sync_task(pool, NULL, drain_mos_sync, &dm,
+		    (int)MAX(g_drain.dr_mos_budget >> 14, 16),
+		    ZFS_SPACE_CHECK_EXTRA_RESERVED);
+		if (err != 0) {
+			(void) printf("DRAIN_ERROR mos sync task: %d\n", err);
+			cnt->dc_errors++;
+			break;
+		}
+	}
+}
+
+typedef struct drain_bg {
+	const char	*db_pool;
+	volatile boolean_t db_stop;
+	uint64_t	db_scans;
+	drain_cnt_t	db_cnt;
+} drain_bg_t;
+
+/*
+ * -c: walk the MOS over and over while the dataset pass runs, to have MOS
+ * blocks dirtied in syncing context while open context reads them.
+ */
+static void *
+drain_mos_bg(void *arg)
+{
+	drain_bg_t *bg = arg;
+
+	while (!bg->db_stop) {
+		drain_mos_scan(bg->db_pool, &bg->db_cnt);
+		bg->db_scans++;
+	}
+	return (NULL);
+}
+
+static void
+drain_used_sync(void *arg, dmu_tx_t *tx)
+{
+	drain_used_t *du = arg;
+	drain_cnt_t *cnt = du->du_cnt;
+	dsl_dataset_t *ds;
+	objset_t *os;
+	uint64_t dirtied = 0;
+
+	if (dsl_dataset_hold(dmu_tx_pool(tx), du->du_name, FTAG, &ds) != 0) {
+		cnt->dc_errors++;
+		return;
+	}
+	if (dmu_objset_from_ds(ds, &os) != 0) {
+		cnt->dc_errors++;
+		dsl_dataset_rele(ds, FTAG);
+		return;
+	}
+
+	/* dnode_hold() takes the hold that dbuf_create() asserts. */
+	static const uint64_t used[3] = { DMU_USERUSED_OBJECT,
+	    DMU_GROUPUSED_OBJECT, DMU_PROJECTUSED_OBJECT };
+	for (int i = 0; i < 3; i++) {
+		dnode_t *dn;
+		uint64_t nblocks = 0;
+
+		if (dnode_hold(os, used[i], FTAG, &dn) != 0)
+			continue;
+		cnt->dc_used_objs++;
+		drain_sel_t sel = { 0 };
+		drain_walk(dn, &sel);
+		cnt->dc_errors += sel.sel_errors;
+		(void) drain_dirty_sync(dn, &sel, cnt, tx, &nblocks);
+		cnt->dc_used += nblocks;
+		dirtied += nblocks;
+		drain_sel_fini(&sel);
+		dnode_rele(dn, FTAG);
+	}
+
+	/*
+	 * Dirtying these blocks puts the dataset on dp_dirty_datasets, to be
+	 * synced in pass 2, but a sync task runs after the MOS was synced in
+	 * pass 1: if nothing else dirtied the MOS, spa_sync() takes the txg
+	 * for a no-op and stops with the dataset still dirty (an ASSERT in
+	 * debug builds).  Dirty the dataset's own MOS buffer so that the
+	 * pool syncs another pass.  Workaround for the prototype only.
+	 */
+	if (dirtied != 0 && !g_drain.dr_no_mos_kick)
+		dmu_buf_will_dirty(ds->ds_dbuf, tx);
+	dsl_dataset_rele(ds, FTAG);
+}
+
+static int
+drain_find_cb(const char *name, void *arg)
+{
+	drain_names_t *dn = arg;
+
+	if (dn->dn_n == dn->dn_max) {
+		dn->dn_max = MAX(16, dn->dn_max * 2);
+		dn->dn_name = realloc(dn->dn_name,
+		    dn->dn_max * sizeof (char *));
+		VERIFY3P(dn->dn_name, !=, NULL);
+	}
+	dn->dn_name[dn->dn_n++] = strdup(name);
+	return (0);
+}
+
+static uint64_t
+drain_alloc(spa_t *spa, boolean_t print, const char *what)
+{
+	uint64_t total = 0;
+	vdev_t *rvd = spa->spa_root_vdev;
+
+	spa_config_enter(spa, SCL_VDEV, FTAG, RW_READER);
+	for (uint64_t id = 0; id < rvd->vdev_children; id++) {
+		vdev_t *vd = rvd->vdev_child[id];
+		vdev_stat_t vs;
+
+		if (id >= g_drain.dr_nvdevs || !g_drain.dr_noalloc[id])
+			continue;
+		vdev_get_stats(vd, &vs);
+		total += vs.vs_alloc;
+		if (!print)
+			continue;
+
+		uint64_t sm_alloc = 0, ms_used = 0;
+		for (uint64_t m = 0; m < vd->vdev_ms_count; m++) {
+			metaslab_t *ms = vd->vdev_ms[m];
+			if (ms->ms_sm != NULL)
+				sm_alloc += space_map_allocated(ms->ms_sm);
+			if (ms->ms_allocated_space != 0)
+				ms_used++;
+		}
+		const char *cls =
+		    vd->vdev_mg->mg_class == spa_special_class(spa) ?
+		    "special" : vd->vdev_mg->mg_class == spa_dedup_class(spa) ?
+		    "dedup" : vd->vdev_mg->mg_class == spa_normal_class(spa) ?
+		    "normal" : "other";
+		(void) printf("DRAIN_VDEV %s id=%llu type=%s class=%s "
+		    "vs_alloc=%llu sm_alloc=%lld metaslabs_in_use=%llu/%llu "
+		    "log_sms=%llu txg=%llu\n", what, (u_longlong_t)id,
+		    vd->vdev_ops->vdev_op_type, cls,
+		    (u_longlong_t)vs.vs_alloc, (longlong_t)sm_alloc,
+		    (u_longlong_t)ms_used, (u_longlong_t)vd->vdev_ms_count,
+		    (u_longlong_t)avl_numnodes(&spa->spa_sm_logs_by_txg),
+		    (u_longlong_t)spa_last_synced_txg(spa));
+	}
+	spa_config_exit(spa, SCL_VDEV, FTAG);
+	return (total);
+}
+
+static void
+drain_print_cnt(const char *what, int round, const drain_cnt_t *cnt)
+{
+	(void) printf("DRAIN_PASS round=%d pass=%s objsets=%llu "
+	    "objects=%llu l0=%llu l0_bytes=%llu l1=%llu dnode_setdirty=%llu "
+	    "dnode_blocks_direct=%llu spill=%llu root_only=%llu "
+	    "used_objs=%llu used_blocks=%llu txgs=%llu errors=%llu\n",
+	    round, what, (u_longlong_t)cnt->dc_objsets,
+	    (u_longlong_t)cnt->dc_objects, (u_longlong_t)cnt->dc_l0,
+	    (u_longlong_t)cnt->dc_l0_bytes, (u_longlong_t)cnt->dc_l1,
+	    (u_longlong_t)cnt->dc_dnode, (u_longlong_t)cnt->dc_mdn,
+	    (u_longlong_t)cnt->dc_spill, (u_longlong_t)cnt->dc_root,
+	    (u_longlong_t)cnt->dc_used_objs, (u_longlong_t)cnt->dc_used,
+	    (u_longlong_t)cnt->dc_txgs, (u_longlong_t)cnt->dc_errors);
+	for (int i = 0; i < DRAIN_NTYPES; i++) {
+		char tn[64];
+
+		if (cnt->dc_type_blocks[i] == 0)
+			continue;
+		drain_type_name(i, tn, sizeof (tn));
+		(void) printf("  DRAIN_TYPE round=%d pass=%s type=\"%s\" "
+		    "blocks=%llu bytes=%llu\n", round, what, tn,
+		    (u_longlong_t)cnt->dc_type_blocks[i],
+		    (u_longlong_t)cnt->dc_type_bytes[i]);
+	}
+}
+
+static void
+drain_wait(dsl_pool_t *dp)
+{
+	/* Frees are deferred: let TXG_DEFER_SIZE + 2 txgs sync. */
+	for (int i = 0; i < TXG_DEFER_SIZE + 2; i++)
+		txg_wait_synced(dp, spa_last_synced_txg(dp->dp_spa) + 1);
+}
+
+static int
+zhack_do_drain(int argc, char **argv)
+{
+	spa_t *spa;
+	char *target;
+	int c, maxrounds = 8;
+	boolean_t logical = B_FALSE, no_ds = B_FALSE, no_mos = B_FALSE;
+	boolean_t no_used = B_FALSE, other_acct = B_FALSE;
+	boolean_t concurrent = B_FALSE, scrub = B_FALSE;
+
+	/* Keep the output of a run that dies on an assertion. */
+	(void) setvbuf(stdout, NULL, _IOLBF, 0);
+	g_drain.dr_mos_budget = 16ULL << 20;
+	optind = 1;
+	while ((c = getopt(argc, argv, "+b:cDKlMn:OSUvz")) != -1) {
+		switch (c) {
+		case 'O':
+			other_acct = B_TRUE;
+			break;
+		case 'K':
+			g_drain.dr_no_mos_kick = B_TRUE;
+			break;
+		case 'c':
+			concurrent = B_TRUE;
+			break;
+		case 'z':
+			scrub = B_TRUE;
+			break;
+		case 'b':
+			g_drain.dr_mos_budget = MAX(1,
+			    strtoull(optarg, NULL, 0) << 10);
+			break;
+		case 'D':
+			no_ds = B_TRUE;
+			break;
+		case 'l':
+			logical = B_TRUE;
+			break;
+		case 'M':
+			no_mos = B_TRUE;
+			break;
+		case 'n':
+			maxrounds = atoi(optarg);
+			break;
+		case 'S':
+			g_drain.dr_rwflags |= ZFS_REWRITE_SKIP_SNAPSHOT;
+			break;
+		case 'U':
+			no_used = B_TRUE;
+			break;
+		case 'v':
+			g_drain.dr_verbose = B_TRUE;
+			break;
+		default:
+			usage();
+		}
+	}
+	argc -= optind;
+	argv += optind;
+	if (argc < 1) {
+		(void) fprintf(stderr, "error: missing pool name\n");
+		usage();
+	}
+	target = argv[0];
+
+	g_no_kernel = (access(ZFS_DEV, F_OK) != 0);
+	zhack_spa_open(target, B_FALSE, FTAG, &spa);
+	dmu_objset_register_type(DMU_OST_ZFS, drain_get_file_info);
+	if (other_acct)
+		dmu_objset_register_type(DMU_OST_OTHER, drain_get_file_info);
+	dsl_pool_t *dp = spa_get_dsl(spa);
+	g_drain.dr_spa = spa;
+
+	if (spa_has_checkpoint(spa))
+		fatal(spa, FTAG, "pool has a checkpoint");
+
+	if (!logical && spa_feature_is_enabled(spa,
+	    SPA_FEATURE_PHYSICAL_REWRITE))
+		g_drain.dr_rwflags |= ZFS_REWRITE_PHYSICAL;
+
+	vdev_t *rvd = spa->spa_root_vdev;
+	uint64_t nnoalloc = 0;
+	g_drain.dr_nvdevs = rvd->vdev_children;
+	g_drain.dr_noalloc = calloc(MAX(rvd->vdev_children, 1), 1);
+	VERIFY3P(g_drain.dr_noalloc, !=, NULL);
+	for (uint64_t id = 0; id < rvd->vdev_children; id++) {
+		vdev_t *vd = rvd->vdev_child[id];
+		if (vdev_is_concrete(vd) && vd->vdev_noalloc &&
+		    !vd->vdev_islog) {
+			g_drain.dr_noalloc[id] = 1;
+			nnoalloc++;
+		}
+	}
+	(void) printf("DRAIN_START pool=%s noalloc_vdevs=%llu rwflags=%#llx "
+	    "mos_budget=%llu\n", target, (u_longlong_t)nnoalloc,
+	    (u_longlong_t)g_drain.dr_rwflags,
+	    (u_longlong_t)g_drain.dr_mos_budget);
+	if (nnoalloc == 0) {
+		spa_close(spa, FTAG);
+		return (1);
+	}
+
+	uint64_t *vbefore = calloc(MAX(g_drain.dr_nvdevs, 1),
+	    sizeof (uint64_t));
+	VERIFY3P(vbefore, !=, NULL);
+	spa_config_enter(spa, SCL_VDEV, FTAG, RW_READER);
+	for (uint64_t id = 0; id < g_drain.dr_nvdevs; id++) {
+		vdev_stat_t vs;
+		if (!g_drain.dr_noalloc[id])
+			continue;
+		vdev_get_stats(rvd->vdev_child[id], &vs);
+		vbefore[id] = vs.vs_alloc;
+	}
+	spa_config_exit(spa, SCL_VDEV, FTAG);
+	uint64_t before = drain_alloc(spa, B_TRUE, "before");
+	if (scrub) {
+		int err = spa_scan(spa, POOL_SCAN_SCRUB, 0);
+		(void) printf("DRAIN_SCRUB start -> %d\n", err);
+	}
+	uint64_t prev = before, cur = before;
+	int round;
+
+	for (round = 1; round <= maxrounds; round++) {
+		drain_names_t names = { 0 };
+		drain_cnt_t *cnt = calloc(1, sizeof (drain_cnt_t));
+		VERIFY3P(cnt, !=, NULL);
+
+		VERIFY0(dmu_objset_find(target, drain_find_cb, &names,
+		    DS_FIND_CHILDREN));
+
+		if (!no_ds) {
+			drain_bg_t bg = { 0 };
+			pthread_t tid;
+
+			bg.db_pool = target;
+			if (concurrent)
+				VERIFY0(pthread_create(&tid, NULL,
+				    drain_mos_bg, &bg));
+			for (int i = 0; i < names.dn_n; i++)
+				drain_objset(names.dn_name[i], cnt);
+			if (concurrent) {
+				bg.db_stop = B_TRUE;
+				VERIFY0(pthread_join(tid, NULL));
+				(void) printf("DRAIN_BG round=%d scans=%llu\n",
+				    round, (u_longlong_t)bg.db_scans);
+				drain_print_cnt("mos-concurrent", round,
+				    &bg.db_cnt);
+			}
+			txg_wait_synced(dp, 0);
+			drain_print_cnt("datasets", round, cnt);
+		}
+
+		if (!no_used) {
+			memset(cnt, 0, sizeof (*cnt));
+			for (int i = 0; i < names.dn_n; i++) {
+				drain_used_t du = { names.dn_name[i], cnt };
+				int err = dsl_sync_task(target, NULL,
+				    drain_used_sync, &du, 16,
+				    ZFS_SPACE_CHECK_EXTRA_RESERVED);
+				cnt->dc_txgs++;
+				if (err != 0) {
+					(void) printf("DRAIN_ERROR used sync "
+					    "task %s: %d\n", names.dn_name[i],
+					    err);
+					cnt->dc_errors++;
+				}
+			}
+			drain_print_cnt("used", round, cnt);
+		}
+
+		if (!no_mos) {
+			memset(cnt, 0, sizeof (*cnt));
+			drain_mos_scan(target, cnt);
+			drain_print_cnt("mos", round, cnt);
+		}
+
+		for (int i = 0; i < names.dn_n; i++)
+			free(names.dn_name[i]);
+		free(names.dn_name);
+		free(cnt);
+
+		drain_wait(dp);
+		cur = drain_alloc(spa, B_TRUE, "round");
+		(void) printf("DRAIN_ROUND round=%d alloc=%llu\n", round,
+		    (u_longlong_t)cur);
+		if (cur == 0 || cur >= prev)
+			break;
+		prev = cur;
+	}
+
+	for (uint64_t id = 0; id < g_drain.dr_nvdevs; id++) {
+		if (!g_drain.dr_noalloc[id])
+			continue;
+		vdev_t *vd = rvd->vdev_child[id];
+		vdev_stat_t vs;
+		spa_config_enter(spa, SCL_VDEV, FTAG, RW_READER);
+		vdev_get_stats(vd, &vs);
+		spa_config_exit(spa, SCL_VDEV, FTAG);
+		(void) printf("DRAIN vdev=%llu alloc_before=%llu "
+		    "alloc_after=%llu rounds=%d\n", (u_longlong_t)id,
+		    (u_longlong_t)vbefore[id], (u_longlong_t)vs.vs_alloc,
+		    MIN(round, maxrounds));
+	}
+
+	free(vbefore);
+	free(g_drain.dr_noalloc);
+	spa_close(spa, FTAG);
+	return (cur == 0 ? 0 : 2);
+}
+
 #define	ASHIFT_UBERBLOCK_SHIFT(ashift)	\
 	MIN(MAX(ashift, UBERBLOCK_SHIFT), \
 	MAX_UBERBLOCK_SHIFT)
@@ -2197,6 +3356,8 @@ main(int argc, char **argv)
 		return (zhack_do_label(argc, argv));
 	} else if (strcmp(subcommand, "metaslab") == 0) {
 		rv = zhack_do_metaslab(argc, argv);
+	} else if (strcmp(subcommand, "drain") == 0) {
+		rv = zhack_do_drain(argc, argv);
 	} else {
 		(void) fprintf(stderr, "error: unknown subcommand: %s\n",
 		    subcommand);
