@@ -179,8 +179,8 @@ nodist_%C%_test_indirect_mapping_SOURCES = \
 	%D%/test_indirect_mapping.c
 
 %C%_test_indirect_mapping_LDADD = \
-	libspl.la \
-	libunit.la
+	libunit.la \
+	libspl.la
 
 
 # test run and coverage targets below
