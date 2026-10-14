@@ -381,13 +381,14 @@ zfs_ioctl(vnode_t *vp, ulong_t com, intptr_t data, int flag, cred_t *cred,
 	}
 	case ZFS_IOC_REWRITE: {
 		zfs_rewrite_args_t *args = (zfs_rewrite_args_t *)data;
-		if ((flag & FWRITE) == 0)
+		/* A directory is not open for writing: see zfs_rewrite(). */
+		if ((flag & FWRITE) == 0 && vp->v_type != VDIR)
 			return (SET_ERROR(EBADF));
 		error = vn_lock(vp, LK_SHARED);
 		if (error)
 			return (error);
 		error = zfs_rewrite(VTOZ(vp), args->off, args->len,
-		    args->flags, args->arg);
+		    args->flags, args->arg, cred);
 		VOP_UNLOCK(vp);
 		return (error);
 	}
