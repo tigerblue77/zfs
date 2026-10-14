@@ -9114,6 +9114,36 @@ zfs_rewrite_volume(const char *name, boolean_t verbose,
 	return (ret);
 }
 
+/*
+ * Rewrite the directory open as dir itself, unless a range is given, which
+ * only applies to files.
+ */
+static int
+zfs_rewrite_dir_self(const char *path, DIR *dir, boolean_t verbose,
+    zfs_rewrite_args_t *args)
+{
+	int ret = 0;
+
+	if (args->off != 0 || args->len != 0)
+		return (0);
+
+	if (ioctl(dirfd(dir), ZFS_IOC_REWRITE, args) < 0) {
+		/*
+		 * Not a ZFS directory, or a kernel module that does not
+		 * rewrite directories: leave it.
+		 */
+		if (errno == ENOTTY || errno == EBADF)
+			return (0);
+		ret = errno;
+		(void) fprintf(stderr, "failed to rewrite %s: %s\n",
+		    path, strerror(errno));
+	} else if (verbose) {
+		printf("%s\n", path);
+	}
+
+	return (ret);
+}
+
 static int
 zfs_rewrite_dir(const char *path, boolean_t verbose, boolean_t xdev, dev_t dev,
     zfs_rewrite_args_t *args, nvlist_t *dirs)
@@ -9131,6 +9161,8 @@ zfs_rewrite_dir(const char *path, boolean_t verbose, boolean_t xdev, dev_t dev,
 		    path, strerror(errno));
 		return (ret);
 	}
+
+	ret = zfs_rewrite_dir_self(path, dir, verbose, args);
 
 	size_t plen = strlen(path) + 1;
 	while ((ent = readdir(dir)) != NULL) {

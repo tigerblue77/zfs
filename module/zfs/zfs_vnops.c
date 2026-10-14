@@ -50,6 +50,7 @@
 #include <sys/dbuf.h>
 #include <sys/policy.h>
 #include <sys/zfeature.h>
+#include <sys/zap.h>
 #include <sys/zfs_vnops.h>
 #include <sys/zfs_quota.h>
 #include <sys/zfs_vfsops.h>
@@ -1115,9 +1116,9 @@ zfs_write(znode_t *zp, zfs_uio_t *uio, int ioflag, cred_t *cr)
 }
 
 /*
- * Rewrite the spill block of a file and the block of its dnode, for a rewrite
- * of the whole file.  A data block marked for rewrite dirtied the dnode
- * already.
+ * Rewrite the spill block of a file or directory and the block of its dnode,
+ * for a rewrite of the whole of it.  A block marked for rewrite before dirtied
+ * the dnode already.
  */
 static int
 zfs_rewrite_meta(znode_t *zp, uint64_t flags)
@@ -1146,21 +1147,43 @@ zfs_rewrite_meta(znode_t *zp, uint64_t flags)
 }
 
 /*
+ * Rewrite a directory: the blocks of its ZAP object, which hold its entries,
+ * and as for a whole file, its spill block and the block of its dnode.
+ */
+static int
+zfs_rewrite_dir(znode_t *zp, uint64_t flags)
+{
+	dmu_buf_impl_t *db = (dmu_buf_impl_t *)sa_get_db(zp->z_sa_hdl);
+	int error;
+
+	DB_DNODE_ENTER(db);
+	error = zap_rewrite_by_dnode(DB_DNODE(db), flags, NULL, NULL);
+	DB_DNODE_EXIT(db);
+
+	if (error == 0)
+		error = zfs_rewrite_meta(zp, flags);
+	return (error);
+}
+
+/*
  * Rewrite a range of file as-is without modification.  A rewrite of the whole
- * file includes its spill block and the block of its dnode.
+ * file includes its spill block and the block of its dnode.  A directory has
+ * no range: it is rewritten whole, with off and len 0, and the caller needs
+ * the permission to add entries to it, since it can not be open for writing.
  *
- *	IN:	zp	- znode of file to be rewritten.
+ *	IN:	zp	- znode of file or directory to be rewritten.
  *		off	- Offset of the range to rewrite.
  *		len	- Length of the range to rewrite.
  *		flags	- Random rewrite parameters.
  *		arg	- flags-specific argument.
+ *		cr	- credentials of caller.
  *
  *	RETURN:	0 if success
  *		error code if failure
  */
 int
 zfs_rewrite(znode_t *zp, uint64_t off, uint64_t len, uint64_t flags,
-    uint64_t arg)
+    uint64_t arg, cred_t *cr)
 {
 	int error;
 
@@ -1182,6 +1205,17 @@ zfs_rewrite(znode_t *zp, uint64_t off, uint64_t len, uint64_t flags,
 	if (zfs_is_readonly(zfsvfs)) {
 		zfs_exit(zfsvfs, FTAG);
 		return (SET_ERROR(EROFS));
+	}
+
+	if (Z_ISDIR(ZTOTYPE(zp))) {
+		if (off != 0 || len != 0)
+			error = SET_ERROR(EINVAL);
+		else
+			error = zfs_zaccess(zp, ACE_ADD_FILE, 0, B_FALSE, cr);
+		if (error == 0)
+			error = zfs_rewrite_dir(zp, flags);
+		zfs_exit(zfsvfs, FTAG);
+		return (error);
 	}
 
 	const boolean_t whole = (off == 0 && (len == 0 || len >= zp->z_size));
