@@ -213,9 +213,10 @@ If this device should perform new allocations, used to disable a device
 when it is scheduled for later removal.
 While it is
 .Sy off ,
-a deduplicated write whose existing copies are on this device is written
-as a new block that is not deduplicated, so that it adds no reference to
-those copies.
+a deduplicated write adds no reference to existing copies on this device.
+If it replaces the only block that references them, its new copies take
+their place in the deduplication table; otherwise it is written as a new
+block that is not deduplicated.
 This does not apply while the device is being removed by
 .Nm zpool Cm remove ,
 which moves those copies itself.
