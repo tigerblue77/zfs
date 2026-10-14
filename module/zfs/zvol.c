@@ -513,6 +513,8 @@ zvol_rewrite_chunk(objset_t *os, dnode_t *dn, uint64_t off, uint64_t len,
 	char name[ZFS_MAX_DATASET_NAME_LEN];
 	zvol_state_t *zv;
 	zfs_locked_range_t *lr = NULL;
+	uint64_t lo;
+	uint64_t hi;
 	uint64_t nr = 0;
 	uint64_t nw = 0;
 	dmu_tx_t *tx;
@@ -534,21 +536,20 @@ zvol_rewrite_chunk(objset_t *os, dnode_t *dn, uint64_t off, uint64_t len,
 	if (error != 0)
 		return (error);
 
+	/*
+	 * The DMU rewrites whole blocks.  Writes lock the extent they write,
+	 * so lock whole blocks.  Hold whole blocks too: the hold of a part of
+	 * a block reads the block, which the rewrite may skip.
+	 */
+	lo = P2ALIGN_TYPED(off, dn->dn_datablksz, uint64_t);
+	hi = P2ROUNDUP_TYPED(off + len, dn->dn_datablksz, uint64_t);
 	if (zv != NULL) {
-		/*
-		 * Writes lock the extent they write.  The DMU rewrites whole
-		 * blocks, so lock whole blocks.
-		 */
-		uint64_t lo = P2ALIGN_TYPED(off, dn->dn_datablksz, uint64_t);
-		uint64_t hi = P2ROUNDUP_TYPED(off + len, dn->dn_datablksz,
-		    uint64_t);
-
 		lr = zfs_rangelock_enter(&zv->zv_rangelock, lo, hi - lo,
 		    RL_WRITER);
 	}
 
 	tx = dmu_tx_create(os);
-	dmu_tx_hold_write_by_dnode(tx, dn, off, len);
+	dmu_tx_hold_write_by_dnode(tx, dn, lo, hi - lo);
 	error = dmu_tx_assign(tx, DMU_TX_WAIT);
 	if (error != 0) {
 		dmu_tx_abort(tx);
