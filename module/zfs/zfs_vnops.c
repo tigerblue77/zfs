@@ -1212,8 +1212,22 @@ zfs_rewrite(znode_t *zp, uint64_t off, uint64_t len, uint64_t flags,
 		n = MIN(MIN(len, noff - off),
 		    DMU_MAX_ACCESS / 2 - P2PHASE(off, zp->z_blksz));
 
+		/*
+		 * The DMU rewrites whole blocks.  Hold whole blocks: the hold
+		 * of a part of a block reads the block, which the rewrite may
+		 * skip.  A block size that is not a power of two is that of
+		 * the only block of the file.
+		 */
+		uint64_t hoff = 0;
+		uint64_t hlen = zp->z_blksz;
+		if (ISP2(zp->z_blksz)) {
+			hoff = P2ALIGN_TYPED(off, zp->z_blksz, uint64_t);
+			hlen = P2ROUNDUP_TYPED(off + n, zp->z_blksz,
+			    uint64_t) - hoff;
+		}
+
 		dmu_tx_t *tx = dmu_tx_create(zfsvfs->z_os);
-		dmu_tx_hold_write_by_dnode(tx, dn, off, n);
+		dmu_tx_hold_write_by_dnode(tx, dn, hoff, hlen);
 		error = dmu_tx_assign(tx, DMU_TX_WAIT);
 		if (error) {
 			dmu_tx_abort(tx);
