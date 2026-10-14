@@ -12,7 +12,7 @@
 .\" Copyright (c) 2025 iXsystems, Inc.
 .\" Copyright (c) 2025, Klara, Inc.
 .\"
-.Dd October 13, 2026
+.Dd October 14, 2026
 .Dt ZFS-REWRITE 8
 .Os
 .
@@ -22,7 +22,7 @@
 .Sh SYNOPSIS
 .Nm zfs
 .Cm rewrite
-.Oo Fl CPSWrvx Ns Oc
+.Oo Fl ACPSWrvx Ns Oc
 .Op Fl l Ar length
 .Op Fl o Ar offset
 .Ar file Ns | Ns Ar directory Ns | Ns Ar volume Ns …
@@ -38,6 +38,20 @@ given by its dataset name or the path of its device, is rewritten the same way.
 .No See Sx NOTES .
 for more information about property changes that may be applied during rewrite.
 .Bl -tag -width "-r"
+.It Fl A
+Rewrite only the blocks that have a copy on a top-level vdev whose
+.Sy allocating
+property is
+.Sy off ,
+see
+.Xr vdevprops 7 ,
+so that they move to vdevs that allocate.
+The indirect blocks that have a copy on such a vdev are rewritten too, even
+when none of the blocks under them is.
+With
+.Fl W ,
+these blocks are rewritten whatever their size.
+.No See Sx NOTES .
 .It Fl C
 Skip blocks that are shared via block cloning (BRT).
 Cloned blocks are referenced by multiple files or datasets.
@@ -157,8 +171,32 @@ If the device of the volume is removed meanwhile, for example because its
 property is changed, the command may stop with an error, and can then be run
 again.
 The volume block size is not changed.
+.Pp
+The
+.Fl A
+flag helps to empty a top-level vdev before it is removed with
+.Nm zpool Cm remove :
+once its
+.Sy allocating
+property is set to
+.Sy off ,
+rewriting the files and volumes with
+.Fl A
+moves their blocks off it, data and indirect blocks, without reading or
+writing the blocks that are elsewhere already.
+A gang block is always rewritten, since the vdevs of its parts are not looked
+at.
+A vdev that is being removed does not count, since the removal copies its data
+anyway.
+The blocks that other flags skip stay where they are, and so do the old copies
+that snapshots, or other files that a block was cloned to, still refer to,
+until these are destroyed or rewritten as well.
+Only the blocks of the files and volumes themselves are rewritten: other
+metadata, such as directories, may remain on the vdev.
 .
 .Sh SEE ALSO
+.Xr vdevprops 7 ,
 .Xr zfsprops 7 ,
 .Xr zpool-features 7 ,
-.Xr zpool-attach 8
+.Xr zpool-attach 8 ,
+.Xr zpool-remove 8
