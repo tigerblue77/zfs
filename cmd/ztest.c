@@ -3262,9 +3262,10 @@ ztest_spa_upgrade(ztest_ds_t *zd, uint64_t id)
 	if (ztest_opts.zo_mmp_test)
 		return;
 
-	/* dRAID added after feature flags, skip upgrade test. */
+	/* dRAID and AnyRAID came after feature flags, skip upgrade test. */
 	if (strcmp(ztest_opts.zo_raid_type, VDEV_TYPE_DRAID) == 0 ||
-	    strcmp(ztest_opts.zo_raid_type, VDEV_TYPE_ANYMIRROR) == 0)
+	    strcmp(ztest_opts.zo_raid_type, VDEV_TYPE_ANYMIRROR) == 0 ||
+	    strcmp(ztest_opts.zo_raid_type, VDEV_TYPE_ANYRAIDZ) == 0)
 		return;
 
 	mutex_enter(&ztest_vdev_lock);
