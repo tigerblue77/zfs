@@ -919,6 +919,10 @@ int dmu_write_by_dnode(dnode_t *dn, uint64_t offset, uint64_t size,
     const void *buf, dmu_tx_t *tx, dmu_flags_t flags);
 int dmu_rewrite_by_dnode(dnode_t *dn, uint64_t offset, uint64_t size,
     uint64_t rewrite_flags, dmu_tx_t *tx, uint64_t *readp, uint64_t *writtenp);
+boolean_t dmu_rewrite_spill_by_dnode(dnode_t *dn, uint64_t rewrite_flags,
+    dmu_tx_t *tx);
+boolean_t dmu_rewrite_dnode(dnode_t *dn, uint64_t rewrite_flags,
+    dmu_tx_t *tx);
 #ifdef _KERNEL
 int dmu_read_uio(objset_t *os, uint64_t object, zfs_uio_t *uio, uint64_t size,
     dmu_flags_t flags);

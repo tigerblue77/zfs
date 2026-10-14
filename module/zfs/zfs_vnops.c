@@ -1122,7 +1122,39 @@ zfs_write(znode_t *zp, zfs_uio_t *uio, int ioflag, cred_t *cr)
 }
 
 /*
- * Rewrite a range of file as-is without modification.
+ * Rewrite the spill block of a file and the block of its dnode, for a rewrite
+ * of the whole file.  A data block marked for rewrite dirtied the dnode
+ * already.
+ */
+static int
+zfs_rewrite_meta(znode_t *zp, uint64_t flags)
+{
+	zfsvfs_t *zfsvfs = ZTOZSB(zp);
+	dmu_buf_impl_t *db = (dmu_buf_impl_t *)sa_get_db(zp->z_sa_hdl);
+	dmu_tx_t *tx;
+	int error;
+
+	tx = dmu_tx_create(zfsvfs->z_os);
+	dmu_tx_hold_bonus(tx, zp->z_id);
+	dmu_tx_hold_spill(tx, zp->z_id);
+	error = dmu_tx_assign(tx, DMU_TX_WAIT);
+	if (error != 0) {
+		dmu_tx_abort(tx);
+		return (error);
+	}
+
+	(void) sa_rewrite_spill(zp->z_sa_hdl, flags, tx);
+	DB_DNODE_ENTER(db);
+	(void) dmu_rewrite_dnode(DB_DNODE(db), flags, tx);
+	DB_DNODE_EXIT(db);
+
+	dmu_tx_commit(tx);
+	return (0);
+}
+
+/*
+ * Rewrite a range of file as-is without modification.  A rewrite of the whole
+ * file includes its spill block and the block of its dnode.
  *
  *	IN:	zp	- znode of file to be rewritten.
  *		off	- Offset of the range to rewrite.
@@ -1159,9 +1191,14 @@ zfs_rewrite(znode_t *zp, uint64_t off, uint64_t len, uint64_t flags,
 		return (SET_ERROR(EROFS));
 	}
 
+	const boolean_t whole = (off == 0 && (len == 0 || len >= zp->z_size));
+
 	if (off >= zp->z_size) {
+		/* An empty file still has a dnode, and may have a spill. */
+		if (whole)
+			error = zfs_rewrite_meta(zp, flags);
 		zfs_exit(zfsvfs, FTAG);
-		return (0);
+		return (error);
 	}
 	if (len == 0 || len > zp->z_size - off)
 		len = zp->z_size - off;
@@ -1263,6 +1300,9 @@ zfs_rewrite(znode_t *zp, uint64_t off, uint64_t len, uint64_t flags,
 
 	dataset_kstats_update_read_kstats(&zfsvfs->z_kstat, nr);
 	dataset_kstats_update_write_kstats(&zfsvfs->z_kstat, nw);
+
+	if (error == 0 && whole)
+		error = zfs_rewrite_meta(zp, flags);
 
 	zfs_rangelock_exit(lr);
 	zfs_exit(zfsvfs, FTAG);
