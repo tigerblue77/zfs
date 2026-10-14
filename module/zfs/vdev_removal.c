@@ -72,7 +72,13 @@
  *      the sync thread to destroy the space maps and finish the removal
  *      (spa_finish_removal).
  *
- *   The following constraints currently apply primary device removal:
+ * 4) Top-level vdevs other than draid that have no allocated space, in the
+ *    pools where 3) is not possible because they contain a raidz or draid
+ *    top-level vdev, are turned into a hole vdev like log vdevs, without
+ *    copying any data (spa_vdev_remove_empty).
+ *
+ *   The following constraints currently apply to primary device removal,
+ *   as described by 3):
  *
  *     - All vdevs must be online, healthy, and not be missing any data
  *       according to the DTLs.
@@ -103,7 +109,8 @@
  * the pool capacity and expense (cost, complexity, time) of creating a new
  * pool and copying all of the data to correct the configuration.
  *
- * Furthermore, while not currently supported it should be possible to allow
+ * Furthermore, 4) is deliberately limited to the pools where 3) is not
+ * possible, and does not cover draid vdevs.  It should be possible to allow
  * vdevs of any type to be removed as long as they've never been written to.
  */
 
@@ -2244,6 +2251,13 @@ spa_vdev_remove_top_check(vdev_t *vd)
 	if (vd->vdev_removing)
 		return (SET_ERROR(EALREADY));
 
+	/*
+	 * spa_vdev_add() drops the namespace lock before spa_config_update()
+	 * gives the new top-level vdev its metaslab group.
+	 */
+	if (vd->vdev_mg == NULL)
+		return (SET_ERROR(ZFS_ERR_VDEV_NOTSUP));
+
 	metaslab_class_t *mc = vd->vdev_mg->mg_class;
 	metaslab_class_t *normal = spa_normal_class(spa);
 	if (mc != normal) {
@@ -2345,15 +2359,177 @@ spa_vdev_remove_top_check(vdev_t *vd)
 }
 
 /*
+ * Can this vdev be removed by turning it into a hole?  It is only tried
+ * where spa_vdev_remove_top_check() refuses to evacuate the vdev because
+ * the pool has a raidz or draid top-level vdev, which may be this one.
+ * A draid vdev is excluded, its distributed spares would be left behind.
+ * This has no side effects.
+ */
+static boolean_t
+vdev_remove_empty_candidate(vdev_t *vd)
+{
+	vdev_t *rvd = vd->vdev_spa->spa_root_vdev;
+
+	if (vd->vdev_islog || vd->vdev_ops == &vdev_draid_ops ||
+	    vd->vdev_stat.vs_alloc != 0)
+		return (B_FALSE);
+
+	for (uint64_t id = 0; id < rvd->vdev_children; id++) {
+		vdev_t *cvd = rvd->vdev_child[id];
+
+		if (vdev_is_concrete(cvd) && vdev_get_nparity(cvd) != 0)
+			return (B_TRUE);
+	}
+
+	return (B_FALSE);
+}
+
+/*
+ * Wipe the label of each leaf on its own, ignoring errors.  Stopping at the
+ * first leaf that fails, as vdev_label_init() does, would leave stale labels
+ * behind that the importers prefer to the hole in the config.
+ */
+static void
+vdev_remove_empty_label_remove(vdev_t *vd)
+{
+	for (int c = 0; c < vd->vdev_children; c++)
+		vdev_remove_empty_label_remove(vd->vdev_child[c]);
+
+	if (vd->vdev_ops->vdev_op_leaf)
+		(void) vdev_label_init(vd, 0, VDEV_LABEL_REMOVE);
+}
+
+/*
+ * Remove an empty top-level vdev by turning it into a hole, the way a log
+ * vdev is removed.  Nothing is copied, so this works for the vdevs that
+ * spa_vdev_remove_top() cannot evacuate.  The config lock is held for the
+ * specified TXG.  On failure everything is undone and the error is returned.
+ */
+static int
+spa_vdev_remove_empty(vdev_t *vd, uint64_t *txg)
+{
+	spa_t *spa = vd->vdev_spa;
+	boolean_t set_noalloc = B_FALSE;
+	int error;
+
+	ASSERT(vd == vd->vdev_top);
+	ASSERT(!vd->vdev_islog);
+	ASSERT(spa_namespace_held());
+
+	/*
+	 * Making the hole reopens the root vdev, which a running raidz
+	 * expansion does not tolerate.
+	 */
+	if (spa->spa_raidz_expand != NULL)
+		return (SET_ERROR(ZFS_ERR_RAIDZ_EXPAND_IN_PROGRESS));
+
+	if (!vd->vdev_noalloc) {
+		set_noalloc = B_TRUE;
+		error = vdev_passivate(vd, txg);
+		if (error != 0)
+			return (error);
+	}
+
+	/*
+	 * Stop any initializing and TRIM in progress, but leave the state
+	 * as "active" so that it can resume if we back out.
+	 */
+	spa_vdev_config_exit(spa, NULL, *txg, 0, FTAG);
+
+	vdev_initialize_stop_all(vd, VDEV_INITIALIZE_ACTIVE);
+	vdev_trim_stop_all(vd, VDEV_TRIM_ACTIVE);
+	vdev_autotrim_stop_wait(vd);
+	vdev_rebuild_stop_wait(vd);
+
+	*txg = spa_vdev_config_enter(spa);
+
+	/*
+	 * Things might have changed while the config lock was dropped.
+	 * Check again, and make sure that the vdev is still empty: the
+	 * vdev_sync() of the final txg relies on it.
+	 */
+	error = spa_vdev_remove_top_check(vd);
+	if (error == EINVAL && vdev_remove_empty_candidate(vd)) {
+		if (spa->spa_raidz_expand != NULL)
+			error = SET_ERROR(ZFS_ERR_RAIDZ_EXPAND_IN_PROGRESS);
+		else
+			error = 0;
+	} else if (error == 0) {
+		error = SET_ERROR(EINVAL);
+	}
+
+	if (error != 0) {
+		if (set_noalloc)
+			vdev_activate(vd);
+		spa_async_request(spa, SPA_ASYNC_INITIALIZE_RESTART);
+		spa_async_request(spa, SPA_ASYNC_TRIM_RESTART);
+		spa_async_request(spa, SPA_ASYNC_AUTOTRIM_RESTART);
+		return (error);
+	}
+
+	/*
+	 * From here on nothing can fail.  Take the vdev out of the pool's
+	 * space, as vdev_remove_complete() does.  It stays non-allocating,
+	 * which also keeps it out of the rotor if we crash before the hole
+	 * is written.
+	 */
+	vdev_update_nonallocating_space(vd, B_FALSE);
+
+	vd->vdev_removing = B_TRUE;
+	vd->vdev_removing_empty = B_TRUE;
+
+	vdev_dirty_leaves(vd, VDD_DTL, *txg);
+	vdev_config_dirty(vd);
+
+	/*
+	 * As for a log vdev, call vdev_metaslab_fini() before the top ZAP
+	 * is destroyed, and leave the metaslab groups to vdev_free().
+	 */
+	vdev_metaslab_fini(vd);
+
+	spa_vdev_config_exit(spa, NULL, *txg, 0, FTAG);
+	*txg = spa_vdev_config_enter(spa);
+
+	sysevent_t *ev = spa_event_create(spa, vd, NULL,
+	    ESC_ZFS_VDEV_REMOVE_DEV);
+	ASSERT(spa_namespace_held());
+	ASSERT(spa_config_held(spa, SCL_ALL, RW_WRITER) == SCL_ALL);
+
+	/* The top ZAP should have been destroyed by vdev_remove_empty. */
+	ASSERT0(vd->vdev_top_zap);
+	/* The leaf ZAPs should have been destroyed by vdev_dtl_sync. */
+	ASSERT0(vd->vdev_leaf_zap);
+
+	vdev_remove_empty_label_remove(vd);
+
+	if (list_link_active(&vd->vdev_state_dirty_node))
+		vdev_state_clean(vd);
+	if (list_link_active(&vd->vdev_config_dirty_node))
+		vdev_config_clean(vd);
+
+	ASSERT0(vd->vdev_stat.vs_alloc);
+
+	vdev_remove_make_hole_and_free(vd);
+
+	if (ev != NULL)
+		spa_event_post(ev);
+
+	return (0);
+}
+
+/*
  * Initiate removal of a top-level vdev, reducing the total space in the pool.
  * The config lock is held for the specified TXG.  Once initiated,
  * evacuation of all allocated space (copying it to other vdevs) happens
  * in the background (see spa_vdev_remove_thread()), and can be canceled
  * (see spa_vdev_remove_cancel()).  If successful, the vdev will
  * be transformed to an indirect vdev (see spa_vdev_remove_complete()).
+ * A vdev that cannot be evacuated but holds no data is turned into a hole
+ * instead (see spa_vdev_remove_empty()), and is freed by the time we return
+ * with *emptied set.
  */
 static int
-spa_vdev_remove_top(vdev_t *vd, uint64_t *txg)
+spa_vdev_remove_top(vdev_t *vd, uint64_t *txg, boolean_t *emptied)
 {
 	spa_t *spa = vd->vdev_spa;
 	boolean_t set_noalloc = B_FALSE;
@@ -2365,6 +2541,12 @@ spa_vdev_remove_top(vdev_t *vd, uint64_t *txg)
 	 * are errors.
 	 */
 	error = spa_vdev_remove_top_check(vd);
+
+	if (error == EINVAL && vdev_remove_empty_candidate(vd)) {
+		error = spa_vdev_remove_empty(vd, txg);
+		*emptied = (error == 0);
+		return (error);
+	}
 
 	/*
 	 * Stop allocating from this vdev.  Note that we must check
@@ -2444,6 +2626,7 @@ spa_vdev_remove(spa_t *spa, uint64_t guid, boolean_t unspare)
 	sysevent_t *ev = NULL;
 	const char *vd_type = NULL;
 	char *vd_path = NULL;
+	boolean_t emptied = B_FALSE;
 
 	ASSERT(spa_writeable(spa));
 
@@ -2537,7 +2720,18 @@ spa_vdev_remove(spa_t *spa, uint64_t guid, boolean_t unspare)
 		error = spa_vdev_remove_log(vd, &txg);
 	} else if (vd != NULL) {
 		ASSERT(!locked);
-		error = spa_vdev_remove_top(vd, &txg);
+		/*
+		 * An empty vdev is freed by spa_vdev_remove_top(), so save
+		 * what the history record needs beforehand.
+		 */
+		vd_type = vd->vdev_ops->vdev_op_type;
+		vd_path = spa_strdup((vd->vdev_path != NULL) ?
+		    vd->vdev_path : "-");
+		error = spa_vdev_remove_top(vd, &txg, &emptied);
+		if (!emptied) {
+			spa_strfree(vd_path);
+			vd_path = NULL;
+		}
 	} else {
 		/*
 		 * There is no vdev of any kind with the specified guid.
