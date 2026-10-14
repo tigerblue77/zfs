@@ -579,7 +579,8 @@ zvol_rewrite_chunk(objset_t *os, dnode_t *dn, uint64_t off, uint64_t len,
  * held and the pool referenced meanwhile, so the volume can not be destroyed,
  * rolled back, received into, shrunk or sent itself, nor the pool exported,
  * until the rewrite is done.  It does not return before the rewritten data is
- * on stable storage.
+ * on stable storage.  A rewrite of the whole volume includes the block of its
+ * dnode.
  */
 int
 zvol_rewrite(const char *name, uint64_t off, uint64_t len, uint64_t flags)
@@ -590,10 +591,11 @@ zvol_rewrite(const char *name, uint64_t off, uint64_t len, uint64_t flags)
 	spa_t *spa;
 	dnode_t *dn = NULL;
 	uint64_t readonly = 0;
-	uint64_t volsize;
+	uint64_t volsize = 0;
 	uint64_t end;
 	uint64_t chunk;
 	uint64_t last_txg = 0;
+	boolean_t whole = (off == 0);
 	int error;
 
 	if ((flags & ~ZFS_REWRITE_VALID_FLAGS) != 0)
@@ -721,6 +723,24 @@ zvol_rewrite(const char *name, uint64_t off, uint64_t len, uint64_t flags)
 		if (issig()) {
 			error = SET_ERROR(EINTR);
 			break;
+		}
+	}
+
+	/*
+	 * The block of the dnode, after the data: a data block marked for
+	 * rewrite dirtied the dnode already.
+	 */
+	if (error == 0 && whole && end >= volsize) {
+		dmu_tx_t *tx = dmu_tx_create(os);
+
+		dmu_tx_hold_bonus(tx, ZVOL_OBJ);
+		error = dmu_tx_assign(tx, DMU_TX_WAIT);
+		if (error != 0) {
+			dmu_tx_abort(tx);
+		} else {
+			if (dmu_rewrite_dnode(dn, flags, tx))
+				last_txg = MAX(last_txg, dmu_tx_get_txg(tx));
+			dmu_tx_commit(tx);
 		}
 	}
 
