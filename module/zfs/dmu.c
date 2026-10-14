@@ -50,6 +50,7 @@
 #include <sys/trace_zfs.h>
 #include <sys/zfs_racct.h>
 #include <sys/zfs_rlock.h>
+#include <sys/vdev.h>
 #ifdef _KERNEL
 #include <sys/vmsystm.h>
 #include <sys/zfs_znode.h>
@@ -1535,11 +1536,12 @@ dmu_write_by_dnode(dnode_t *dn, uint64_t offset, uint64_t size,
 }
 
 /*
- * Decide from its block pointer whether a rewrite leaves a block alone.  The
- * pointer may be slightly stale, but that is OK for the advisory use.
+ * Decide from its block pointer whether a rewrite leaves a block of the given
+ * level alone.  The pointer may be slightly stale, but that is OK for the
+ * advisory use.
  */
 static boolean_t
-dmu_rewrite_skip(objset_t *os, const blkptr_t *bp, uint64_t flags,
+dmu_rewrite_skip(objset_t *os, const blkptr_t *bp, int level, uint64_t flags,
     uint64_t txg)
 {
 	if (BP_IS_HOLE(bp))
@@ -1550,12 +1552,25 @@ dmu_rewrite_skip(objset_t *os, const blkptr_t *bp, uint64_t flags,
 			return (B_TRUE);
 	}
 
-	if (flags & ZFS_REWRITE_SKIP_BRT) {
+	/* Only data blocks are cloned. */
+	if ((flags & ZFS_REWRITE_SKIP_BRT) && level == 0) {
 		if (brt_maybe_exists(os->os_spa, bp))
 			return (B_TRUE);
 	}
 
-	if (flags & ZFS_REWRITE_SKIP_CURRENT_ASIZE) {
+	/* The parts of a gang block may be anywhere: rewrite it. */
+	if (flags & ZFS_REWRITE_SKIP_ALLOCATING) {
+		if (!BP_IS_GANG(bp) &&
+		    !vdev_bp_has_noalloc_dva(os->os_spa, bp))
+			return (B_TRUE);
+	}
+
+	/*
+	 * A block on a non-allocating vdev has to move whatever its size, so
+	 * -A takes precedence over -W.
+	 */
+	if ((flags & ZFS_REWRITE_SKIP_CURRENT_ASIZE) &&
+	    !(flags & ZFS_REWRITE_SKIP_ALLOCATING)) {
 		if (bp_asize_is_current(os->os_spa, bp, txg))
 			return (B_TRUE);
 	}
@@ -1599,10 +1614,56 @@ dmu_rewrite_get_bp(dnode_t *dn, dmu_buf_impl_t *l1, uint64_t blkid,
 }
 
 /*
+ * Return, held, the lowest block among the indirect block db and its ancestors
+ * that the rewrite does not leave alone, with flags that include
+ * ZFS_REWRITE_SKIP_ALLOCATING, or NULL if there is none.  A block dirty in the
+ * transaction group ends the search: it is written anyway, and so are the
+ * blocks above it.  Holding dn_struct_rwlock keeps the parents the same.
+ */
+static dmu_buf_impl_t *
+dmu_rewrite_find_ind(dnode_t *dn, dmu_buf_impl_t *db, uint64_t flags,
+    dmu_tx_t *tx)
+{
+	ASSERT(RW_LOCK_HELD(&dn->dn_struct_rwlock));
+	ASSERT(flags & ZFS_REWRITE_SKIP_ALLOCATING);
+
+	for (;;) {
+		db_lock_type_t dblt;
+		boolean_t have_bp;
+		blkptr_t bp;
+
+		ASSERT3U(db->db_level, >, 0);
+		if (dmu_buf_is_dirty(&db->db, tx))
+			return (NULL);
+
+		dblt = dmu_buf_lock_parent(db, RW_READER, FTAG);
+		have_bp = (db->db_blkptr != NULL);
+		if (have_bp)
+			bp = *db->db_blkptr;
+		dmu_buf_unlock_parent(db, dblt, FTAG);
+		if (have_bp && !dmu_rewrite_skip(dn->dn_objset, &bp,
+		    db->db_level, flags, dmu_tx_get_txg(tx))) {
+			dbuf_add_ref(db, FTAG);
+			return (db);
+		}
+
+		if (db->db_level + 1 >= dn->dn_phys->dn_nlevels ||
+		    db->db_parent == NULL)
+			return (NULL);
+		db = db->db_parent;
+	}
+}
+
+/*
  * Mark for rewrite the level 0 blocks [start, end) of dn, which are under the
  * same level 1 block, or under the dnode itself if it has no indirect block.
  * The blocks to rewrite are selected from the block pointers there, and only
  * those are then read, all at once, and marked.
+ *
+ * With ZFS_REWRITE_SKIP_ALLOCATING, the indirect blocks above are moved off
+ * the vdevs that do not allocate too: those above a block marked are written
+ * anyway, so if none is marked, the lowest one to move is dirtied on its own,
+ * which dirties those above it.
  */
 static int
 dmu_rewrite_l1(dnode_t *dn, uint64_t start, uint64_t end,
@@ -1610,6 +1671,7 @@ dmu_rewrite_l1(dnode_t *dn, uint64_t start, uint64_t end,
 {
 	objset_t *os = dn->dn_objset;
 	dmu_buf_impl_t *l1 = NULL;
+	dmu_buf_impl_t *ind = NULL;
 	dmu_buf_impl_t **dbs;
 	uint64_t nmax;
 	uint64_t n = 0;
@@ -1653,7 +1715,7 @@ dmu_rewrite_l1(dnode_t *dn, uint64_t start, uint64_t end,
 		blkptr_t bp;
 
 		dmu_rewrite_get_bp(dn, l1, blkid, &bp);
-		if (dmu_rewrite_skip(os, &bp, rewrite_flags,
+		if (dmu_rewrite_skip(os, &bp, 0, rewrite_flags,
 		    dmu_tx_get_txg(tx)))
 			continue;
 
@@ -1677,6 +1739,9 @@ dmu_rewrite_l1(dnode_t *dn, uint64_t start, uint64_t end,
 		    DB_RF_HAVESTRUCT | DMU_READ_NO_PREFETCH | DMU_UNCACHEDIO);
 		dbs[n++] = db;
 	}
+	if (error == 0 && n == 0 && l1 != NULL && dn->dn_free_txg == 0 &&
+	    (rewrite_flags & ZFS_REWRITE_SKIP_ALLOCATING))
+		ind = dmu_rewrite_find_ind(dn, l1, rewrite_flags, tx);
 	rw_exit(&dn->dn_struct_rwlock);
 
 	werror = zio_wait(zio);
@@ -1707,6 +1772,10 @@ dmu_rewrite_l1(dnode_t *dn, uint64_t start, uint64_t end,
 		dbuf_rele(dbs[i], FTAG);
 	}
 	kmem_free(dbs, sizeof (dmu_buf_impl_t *) * nmax);
+	if (ind != NULL) {
+		dmu_buf_will_dirty(&ind->db, tx);
+		dbuf_rele(ind, FTAG);
+	}
 	if (l1 != NULL)
 		dbuf_rele(l1, FTAG);
 
@@ -1720,7 +1789,9 @@ dmu_rewrite_l1(dnode_t *dn, uint64_t start, uint64_t end,
  * holes, blocks that are being freed, since rewriting those would only
  * allocate zeroes, and blocks already dirty in the transaction group, which
  * are written anyway.  This is decided from the block pointers in the level 1
- * blocks, or in the dnode, so that the blocks left alone are not read.
+ * blocks, or in the dnode, so that the blocks left alone are not read.  With
+ * ZFS_REWRITE_SKIP_ALLOCATING, the indirect blocks above the range are moved
+ * off the vdevs that do not allocate as well.
  *
  * The transaction must already be assigned and hold the range for writing,
  * best as whole blocks: the hold of a part of a block reads the block.  The
