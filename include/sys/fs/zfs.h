@@ -1778,10 +1778,11 @@ typedef struct zfs_rewrite_args {
 #define	ZFS_REWRITE_PHYSICAL		0x1 /* Preserve logical birth time. */
 #define	ZFS_REWRITE_SKIP_SNAPSHOT	0x2 /* Skip snapshot-shared blocks. */
 #define	ZFS_REWRITE_SKIP_BRT		0x4 /* Skip BRT-cloned blocks. */
+#define	ZFS_REWRITE_SKIP_ALLOCATING	0x10 /* Only blocks on noalloc vdevs. */
 
 #define	ZFS_REWRITE_VALID_FLAGS \
 	(ZFS_REWRITE_PHYSICAL | ZFS_REWRITE_SKIP_SNAPSHOT | \
-	ZFS_REWRITE_SKIP_BRT)
+	ZFS_REWRITE_SKIP_BRT | ZFS_REWRITE_SKIP_ALLOCATING)
 
 #define	ZFS_IOC_REWRITE		_IOW(0x83, 3, zfs_rewrite_args_t)
 

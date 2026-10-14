@@ -412,7 +412,7 @@ get_usage(zfs_help_t idx)
 		return ("\tredact <snapshot> <bookmark> "
 		    "<redaction_snapshot> ...\n");
 	case HELP_REWRITE:
-		return ("\trewrite [-CPSrvx] [-o <offset>] "
+		return ("\trewrite [-ACPSrvx] [-o <offset>] "
 		    "[-l <length>] <directory|file|volume ...>\n");
 	case HELP_JAIL:
 		return ("\tjail <jailid|jailname> <filesystem>\n");
@@ -9248,8 +9248,11 @@ zfs_do_rewrite(int argc, char **argv)
 	zfs_rewrite_args_t args;
 	memset(&args, 0, sizeof (args));
 
-	while ((c = getopt(argc, argv, "CPSl:o:rvx")) != -1) {
+	while ((c = getopt(argc, argv, "ACPSl:o:rvx")) != -1) {
 		switch (c) {
+		case 'A':
+			args.flags |= ZFS_REWRITE_SKIP_ALLOCATING;
+			break;
 		case 'C':
 			args.flags |= ZFS_REWRITE_SKIP_BRT;
 			break;
