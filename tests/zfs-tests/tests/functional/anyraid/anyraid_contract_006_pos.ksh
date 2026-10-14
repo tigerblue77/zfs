@@ -43,6 +43,16 @@
 # 7. Attempt to contract disk 1 (2 -> 1, below width), expect failure
 # 8. Verify all checksums still intact after 4 successful contractions
 #
+# Sizes, in tiles of 64 MiB:
+# - A disk gives up a little over 260 MiB to its labels and the 4 copies of
+#   the tile map, which leaves room for 16 tiles on a 1300 MiB disk.
+# - The last contraction leaves 2 disks, and a tile takes a slot on both, so it
+#   needs every mapped tile to fit in 16. How many tiles the writes map is not
+#   a constant of the test: every allocator fills metaslabs, and so maps tiles,
+#   of its own, and a metaslab is no larger than a tile here. 10 MiB of data
+#   mapped 6 tiles at 2 allocators and 9 or 10 at 4, which would not fit on the
+#   7 slots that 768 MiB disks have.
+#
 
 verify_runnable "global"
 
@@ -56,7 +66,7 @@ cleanup() {
 log_onexit cleanup
 
 log_note "DEBUG: creating sparse files"
-log_must truncate -s 768M $TEST_BASE_DIR/vdev_file.{0,1,2,3,4,5}
+log_must truncate -s 1300M $TEST_BASE_DIR/vdev_file.{0,1,2,3,4,5}
 
 log_note "DEBUG: setting tile size to 64MiB"
 set_tunable64 ANYRAID_MIN_TILE_SIZE 67108864
