@@ -126,6 +126,28 @@ When the
 flag is used, rewritten blocks preserve their logical birth time, since
 there are no user data changes.
 .Pp
+A rewrite of the whole of a file, which is the default when neither
+.Fl l
+nor
+.Fl o
+is given, also rewrites its spill block, which holds the system attributes that
+do not fit in its dnode, such as extended attributes stored with
+.Sy xattr Ns = Ns Sy sa ,
+and the block that holds its dnode, with the other dnodes in that block.
+A rewrite of the whole of a volume also rewrites the block that holds its dnode.
+The
+.Fl A
+and
+.Fl S
+flags apply to these blocks as to the others.
+The
+.Fl P
+flag does not: as they are metadata, they are rewritten with a new birth time,
+and incremental
+.Nm zfs Cm send
+streams then include the dnodes in the rewritten dnode blocks and the spill
+blocks, but no data.
+.Pp
 A volume is given by its dataset name, such as
 .Ar pool/volume ,
 or by the path
@@ -161,8 +183,9 @@ property is set to
 .Sy off ,
 rewriting the files and volumes with
 .Fl A
-moves their blocks off it, data and indirect blocks, without reading or
-writing the blocks that are elsewhere already.
+moves their blocks off it, data, indirect and spill blocks, and the blocks that
+hold their dnodes, without reading or writing the blocks that are elsewhere
+already.
 A gang block is always rewritten, since the vdevs of its parts are not looked
 at.
 A vdev that is being removed does not count, since the removal copies its data
