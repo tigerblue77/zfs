@@ -115,6 +115,16 @@ expansion has completed, see
 Blocks rewritten while the expansion is in progress keep their old width.
 Blocks that are already deduplicated stay where they are, and keep their width.
 .Pp
+A deduplicated block with a copy on a vdev whose
+.Sy allocating
+vdev property is
+.Sy off
+is rewritten as a new block that is not deduplicated, so that it leaves
+that vdev.
+It then no longer shares space with its duplicates, and neither does any
+other write of the same data while the property is
+.Sy off .
+.Pp
 If a
 .Fl l
 or
@@ -157,6 +167,7 @@ again.
 The volume block size is not changed.
 .
 .Sh SEE ALSO
+.Xr vdevprops 7 ,
 .Xr zfsprops 7 ,
 .Xr zpool-features 7 ,
 .Xr zpool-attach 8
