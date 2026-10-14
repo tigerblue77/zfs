@@ -754,10 +754,41 @@ sector still damaged.  With this commit it found and repaired all of them
 (25 or 21 checksum errors on m0), and with `nofix` none again.  `nomove`
 passes on all three.  In every run, moved or not, the scrub repaired none
 of the 8 damaged gang header copies: a sorted scrub issues a gang block
-whole and reads only its DVA 0.  That is the code path of a block nothing
-moved (the gang branch of `dsl_scan_enqueue()` and the root map's `c = 1`
-are not the spike's), so this spike neither causes nor fixes it; it was
-not run on a libzpool without the spike, which crash_probe cannot load.
+whole, the header's read inherits `ZIO_FLAG_SCRUB`, and the root map of a
+sorted scrub's read keeps only DVA 0 (`c = 1` in `vdev_mirror_map_init()`),
+since it expects each other DVA to come as an I/O of its own, and a gang
+block's never do.  None of that is the spike's, and the base and upstream
+behave the same:
+
+    gang_scrub_probe <dir> <ashift> setup <rzmirror|single> [c2gang]
+    gang_scrub_probe <dir> <ashift> damage <others|first>
+    gang_scrub_probe <dir> <ashift> scrub <sorted|legacy>
+    gang_scrub_probe <dir> <ashift> check
+
+`gang_scrub_probe.c` uses nothing of the spike, so `build-tool.sh` builds
+it against any tree of this era, crash_probe's included.  `rzmirror` is
+dva2's layout without the parity-2 epoch, `single` one file vdev; it
+writes dva2's objects (with `c2gang`, 8 gang objects with `copies=2` as
+well: three header copies, two per child), inverts the first sector of
+each DVA but DVA 0 of a block with several (`others`, or DVA 0 with
+`first`) where a file can reach it, scrubs, sorted or with
+`zfs_scan_legacy=1`, and `check` exits 1 unless every sector is restored.
+
+On 94407d4 (no spike code), 65e6ce5 and upstream master c27dff0, at
+ashift 12 and 9 on `rzmirror` and 12 on `single`, and on 1d9eb6d,
+84c3d6b, fd0cdf8 and 3223bef at ashift 12 on `rzmirror`, a sorted scrub
+restored every plain block's damaged copy (25 on `rzmirror` at ashift 12,
+21 at ashift 9, 32 on `single`) and none of the 8 gang header copies.  A
+legacy scrub restored all of them on the first three, and on master after
+a sorted scrub of the same pool had left the header copies damaged.  On
+master with `c2gang`, the header copies (16 on `rzmirror`, 24 on `single`)
+and the children's second copies (6 and 16) behave the same, and with
+`first` a sorted scrub restores the damaged DVA 0 of every header and
+child (16 and 16 on `single`): their other copies are read only once DVA
+0 fails.  zdb shows each damaged sector to be DVA 1 of a gang block
+pointer (`G`), in this probe's `rzmirror` pool and in crash_probe's
+dva2scrub pool.  The gap is upstream's: neither a regression of the spike
+nor a fault of the probe.
 
 Neither fix changes the table, its lookup, its memory or its load, so
 step 7's measurements were not run again.  Fix 1 adds a lookup, skipped
