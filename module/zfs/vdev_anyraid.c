@@ -312,6 +312,43 @@ child_read(zio_t *zio, vdev_t *vd, int header, uint64_t reloff, uint64_t size,
 
 /*
  * This function is non-static for ZDB, and shouldn't be used for anything else.
+ * Reads the tile map of copy 'mapping' of cvd, map_length bytes long, into
+ * map_abds[], one SPA_MAXBLOCKSIZE buffer per block, each checked against its
+ * checksum in 'header'.  The tile map is 64 MiB and the largest I/O 16 MiB, so
+ * it takes up to 4 reads.  The caller frees the buffers, also on error.
+ */
+int
+vdev_anyraid_read_map(vdev_t *cvd, int mapping, anyraid_header_t *header,
+    uint32_t map_length, abd_t **map_abds, int flags)
+{
+	spa_t *spa = cvd->vdev_spa;
+	uint64_t ashift = cvd->vdev_top->vdev_ashift;
+	uint64_t header_size = VDEV_ANYRAID_MAP_HEADER_SIZE(ashift);
+	zio_t *rio = zio_root(spa, NULL, NULL, flags);
+	uint_t num_maps = (((int64_t)map_length - 1) / SPA_MAXBLOCKSIZE) + 1;
+
+	for (int i = 0; i < num_maps; i++) {
+		zio_eck_t *cksum = (zio_eck_t *)
+		    &header->ah_buf[VDEV_ANYRAID_NVL_BYTES(ashift) +
+		    i * sizeof (*cksum)];
+		zio_t *nio = zio_null(rio, spa, cvd, NULL, &map_abds[i], flags);
+		child_read(nio, cvd, mapping, header_size +
+		    i * SPA_MAXBLOCKSIZE, SPA_MAXBLOCKSIZE, ZIO_CHECKSUM_SHA256,
+		    cksum, flags);
+		zio_nowait(nio);
+	}
+	int error = zio_wait(rio);
+
+	/* With no readable leaf under cvd, nothing was read. */
+	for (int i = 0; error == 0 && i < num_maps; i++) {
+		if (map_abds[i] == NULL)
+			error = SET_ERROR(ENXIO);
+	}
+	return (error);
+}
+
+/*
+ * This function is non-static for ZDB, and shouldn't be used for anything else.
  * Utility function that issues the read for the header and parses out the
  * nvlist.
  */
@@ -551,31 +588,15 @@ anyraid_open_existing(vdev_t *vd, int32_t **child_capacities)
 	    VDEV_ANYRAID_HEADER_CHECKPOINT, &var->vd_checkpoint_tile);
 
 	/*
-	 * Because the tile map is 64 MiB and the maximum IO size is 16MiB,
-	 * we may need to issue up to 4 reads to read in the whole thing.
-	 * Similarly, when processing the mapping, we need to iterate across
-	 * the 4 separate buffers.
+	 * When processing the mapping, we need to iterate across the separate
+	 * buffers of the map.
 	 */
-	zio_t *rio = zio_root(spa, NULL, NULL, flags);
 	abd_t *map_abds[VDEV_ANYRAID_MAP_SIZE / SPA_MAXBLOCKSIZE] = {0};
 	int i;
-	uint_t num_maps = (((int64_t)map_length - 1) / SPA_MAXBLOCKSIZE) + 1;
-	for (i = 0; i < num_maps; i++) {
-		zio_eck_t *cksum = (zio_eck_t *)
-		    &header.ah_buf[VDEV_ANYRAID_NVL_BYTES(ashift) +
-		    i * sizeof (*cksum)];
-		zio_t *nio = zio_null(rio, spa, best_cvd, NULL, &map_abds[i],
-		    flags);
-		child_read(nio, best_cvd, mapping, header_size +
-		    i * SPA_MAXBLOCKSIZE, SPA_MAXBLOCKSIZE,
-		    ZIO_CHECKSUM_SHA256, cksum, flags);
-		zio_nowait(nio);
-	}
-	i--;
-
-	int error = zio_wait(rio);
-	if (error) {
-		for (; i >= 0; i--)
+	int error = vdev_anyraid_read_map(best_cvd, mapping, &header,
+	    map_length, map_abds, flags);
+	if (error != 0) {
+		for (i = 0; i < ARRAY_SIZE(map_abds); i++)
 			abd_free(map_abds[i]);
 		free_header(&header, header_size);
 		zfs_dbgmsg("Error opening anyraid vdev %llu: map read error %d",
@@ -646,7 +667,7 @@ anyraid_open_existing(vdev_t *vd, int32_t **child_capacities)
 
 	var->vd_tile_size = tile_size;
 
-	for (; i >= 0; i--)
+	for (i = 0; i < ARRAY_SIZE(map_abds); i++)
 		abd_free(map_abds[i]);
 
 	/*
