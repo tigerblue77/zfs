@@ -1981,7 +1981,7 @@ vdev_extra_sync(zio_t *zio, uint64_t *good_writes, vdev_t *vd, int flags,
 	if (!vdev_writeable(vd))
 		return;
 
-	if (vd->vdev_parent->vdev_ops == &vdev_anyraid_ops) {
+	if (vd->vdev_top->vdev_ops == &vdev_anyraid_ops) {
 		vdev_anyraid_write_map_sync(vd, zio, txg, good_writes, flags,
 		    status);
 	}

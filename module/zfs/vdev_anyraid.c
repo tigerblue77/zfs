@@ -1365,12 +1365,20 @@ vdev_anyraid_write_map_done(zio_t *zio)
 		atomic_inc_64(good_writes);
 }
 
+/*
+ * Write the tile map to the leaf vd.  The leaf is a child of the AnyRAID
+ * vdev, or a leaf under a replacing or spare child of it, which holds the
+ * same slots and so gets the same map.
+ */
 void
 vdev_anyraid_write_map_sync(vdev_t *vd, zio_t *pio, uint64_t txg,
     uint64_t *good_writes, int flags, vdev_config_sync_status_t status)
 {
-	vdev_t *anyraidvd = vd->vdev_parent;
+	vdev_t *anyraidvd = vd->vdev_top;
 	ASSERT3P(anyraidvd->vdev_ops, ==, &vdev_anyraid_ops);
+	vdev_t *cvd = vd;
+	while (cvd->vdev_parent != anyraidvd)
+		cvd = cvd->vdev_parent;
 	spa_t *spa = vd->vdev_spa;
 	vdev_anyraid_t *var = anyraidvd->vdev_tsd;
 	uint32_t header_size = VDEV_ANYRAID_MAP_HEADER_SIZE(vd->vdev_ashift);
@@ -1466,7 +1474,7 @@ vdev_anyraid_write_map_sync(vdev_t *vd, zio_t *pio, uint64_t txg,
 	    anyraidvd->vdev_children, KM_SLEEP);
 	uint64_t disk_id = 0;
 	for (uint64_t i = 0; i < anyraidvd->vdev_children; i++) {
-		if (anyraidvd->vdev_child[i] == vd)
+		if (anyraidvd->vdev_child[i] == cvd)
 			disk_id = i;
 		ASSERT(0 < var->vd_children[i]->van_capacity &&
 		    var->vd_children[i]->van_capacity <= UINT16_MAX);
