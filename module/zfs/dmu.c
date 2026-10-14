@@ -1534,18 +1534,13 @@ dmu_write_by_dnode(dnode_t *dn, uint64_t offset, uint64_t size,
 }
 
 /*
- * Check if a block should be skipped during rewrite.
- * Returns B_TRUE if block should be skipped.
+ * Decide from its block pointer whether a rewrite leaves a block alone.  The
+ * pointer may be slightly stale, but that is OK for the advisory use.
  */
 static boolean_t
-dmu_rewrite_skip(dmu_buf_t *db, objset_t *os, uint64_t flags)
+dmu_rewrite_skip(objset_t *os, const blkptr_t *bp, uint64_t flags)
 {
-	/*
-	 * This may be slightly stale and racy, but should be OK for
-	 * the advisory use.
-	 */
-	blkptr_t *bp = dmu_buf_get_blkptr(db);
-	if (bp == NULL || BP_IS_HOLE(bp))
+	if (BP_IS_HOLE(bp))
 		return (B_TRUE);
 
 	if (flags & ZFS_REWRITE_SKIP_SNAPSHOT) {
@@ -1562,59 +1557,209 @@ dmu_rewrite_skip(dmu_buf_t *db, objset_t *os, uint64_t flags)
 }
 
 /*
+ * Copy the block pointer of the level 0 block blkid of dn, which is in the
+ * level 1 block l1, or in the dnode if l1 is NULL.  Holding dn_struct_rwlock
+ * keeps the pointer where it is, and the lock of the block that holds it keeps
+ * syncing context from changing it meanwhile.
+ */
+static void
+dmu_rewrite_get_bp(dnode_t *dn, dmu_buf_impl_t *l1, uint64_t blkid,
+    blkptr_t *bp)
+{
+	ASSERT(RW_LOCK_HELD(&dn->dn_struct_rwlock));
+
+	if (l1 != NULL) {
+		int epbs = dn->dn_indblkshift - SPA_BLKPTRSHIFT;
+
+		rw_enter(&l1->db_rwlock, RW_READER);
+		*bp = ((blkptr_t *)l1->db.db_data)[blkid &
+		    ((1ULL << epbs) - 1)];
+		rw_exit(&l1->db_rwlock);
+	} else if (dn->dn_dbuf != NULL) {
+		rw_enter(&dn->dn_dbuf->db_rwlock, RW_READER);
+		*bp = dn->dn_phys->dn_blkptr[blkid];
+		rw_exit(&dn->dn_dbuf->db_rwlock);
+	} else {
+		/* The meta-dnode, see dmu_buf_lock_parent(). */
+		dsl_dataset_t *ds = dmu_objset_ds(dn->dn_objset);
+
+		if (ds != NULL)
+			rrw_enter(&ds->ds_bp_rwlock, RW_READER, FTAG);
+		*bp = dn->dn_phys->dn_blkptr[blkid];
+		if (ds != NULL)
+			rrw_exit(&ds->ds_bp_rwlock, FTAG);
+	}
+}
+
+/*
+ * Mark for rewrite the level 0 blocks [start, end) of dn, which are under the
+ * same level 1 block, or under the dnode itself if it has no indirect block.
+ * The blocks to rewrite are selected from the block pointers there, and only
+ * those are then read, all at once, and marked.
+ */
+static int
+dmu_rewrite_l1(dnode_t *dn, uint64_t start, uint64_t end,
+    uint64_t rewrite_flags, dmu_tx_t *tx, uint64_t *nrp, uint64_t *nwp)
+{
+	objset_t *os = dn->dn_objset;
+	dmu_buf_impl_t *l1 = NULL;
+	dmu_buf_impl_t **dbs;
+	uint64_t nmax;
+	uint64_t n = 0;
+	zio_t *zio;
+	int error = 0;
+	int werror;
+
+	ASSERT3U(start, <, end);
+
+	rw_enter(&dn->dn_struct_rwlock, RW_READER);
+	if (dn->dn_phys->dn_nlevels > 1) {
+		int epbs = dn->dn_indblkshift - SPA_BLKPTRSHIFT;
+
+		error = dbuf_hold_impl(dn, 1, start >> epbs, TRUE, FALSE, FTAG,
+		    &l1);
+		if (error != 0) {
+			rw_exit(&dn->dn_struct_rwlock);
+			/* No level 1 block: no block under it either. */
+			return (error == ENOENT ? 0 : error);
+		}
+		error = dbuf_read(l1, NULL, DB_RF_CANFAIL | DB_RF_HAVESTRUCT |
+		    DMU_READ_NO_PREFETCH);
+		if (error != 0) {
+			dbuf_rele(l1, FTAG);
+			rw_exit(&dn->dn_struct_rwlock);
+			return (error);
+		}
+	} else {
+		end = MIN(end, dn->dn_phys->dn_nblkptr);
+		if (start >= end) {
+			rw_exit(&dn->dn_struct_rwlock);
+			return (0);
+		}
+	}
+
+	nmax = end - start;
+	dbs = kmem_alloc(sizeof (dmu_buf_impl_t *) * nmax, KM_SLEEP);
+	zio = zio_root(os->os_spa, NULL, NULL, ZIO_FLAG_CANFAIL);
+	for (uint64_t blkid = start; blkid < end; blkid++) {
+		dmu_buf_impl_t *db;
+		blkptr_t bp;
+
+		dmu_rewrite_get_bp(dn, l1, blkid, &bp);
+		if (dmu_rewrite_skip(os, &bp, rewrite_flags))
+			continue;
+
+		/*
+		 * A block freed in a transaction group that is not synced yet
+		 * still has its block pointer, but is not worth bringing back.
+		 */
+		if (dnode_block_freed(dn, blkid))
+			continue;
+
+		db = dbuf_hold(dn, blkid, FTAG);
+		if (db == NULL) {
+			error = SET_ERROR(EIO);
+			break;
+		}
+		if (dmu_buf_is_dirty(&db->db, tx)) {
+			dbuf_rele(db, FTAG);
+			continue;
+		}
+		(void) dbuf_read(db, zio, DB_RF_CANFAIL | DB_RF_NEVERWAIT |
+		    DB_RF_HAVESTRUCT | DMU_READ_NO_PREFETCH | DMU_UNCACHEDIO);
+		dbs[n++] = db;
+	}
+	rw_exit(&dn->dn_struct_rwlock);
+
+	werror = zio_wait(zio);
+	if (error == 0)
+		error = werror;
+
+	/* Wait for the reads that were already in progress. */
+	for (uint64_t i = 0; error == 0 && i < n; i++) {
+		dmu_buf_impl_t *db = dbs[i];
+
+		mutex_enter(&db->db_mtx);
+		while (db->db_state == DB_READ || db->db_state == DB_FILL)
+			cv_wait(&db->db_changed, &db->db_mtx);
+		if (db->db_state == DB_UNCACHED)
+			error = SET_ERROR(EIO);
+		mutex_exit(&db->db_mtx);
+	}
+
+	for (uint64_t i = 0; i < n; i++) {
+		if (error == 0) {
+			*nrp += dbs[i]->db.db_size;
+			*nwp += dbs[i]->db.db_size;
+			if (rewrite_flags & ZFS_REWRITE_PHYSICAL)
+				dmu_buf_will_rewrite(&dbs[i]->db, tx);
+			else
+				dmu_buf_will_dirty(&dbs[i]->db, tx);
+		}
+		dbuf_rele(dbs[i], FTAG);
+	}
+	kmem_free(dbs, sizeof (dmu_buf_impl_t *) * nmax);
+	if (l1 != NULL)
+		dbuf_rele(l1, FTAG);
+
+	return (error);
+}
+
+/*
  * Mark the existing blocks of the given range of the object for rewrite, so
  * that they are reallocated as if they were read and written back unchanged.
  * Blocks excluded by the ZFS_REWRITE_SKIP_* flags are left alone, and so are
- * holes and blocks that are being freed: rewriting those would only allocate
- * zeroes.
+ * holes, blocks that are being freed, since rewriting those would only
+ * allocate zeroes, and blocks already dirty in the transaction group, which
+ * are written anyway.  This is decided from the block pointers in the level 1
+ * blocks, or in the dnode, so that the blocks left alone are not read.
  *
- * The transaction must already be assigned and hold the range for writing.
- * The amounts of data read and marked for rewrite are added to *readp and
- * *writtenp, either of which may be NULL.
+ * The transaction must already be assigned and hold the range for writing,
+ * best as whole blocks: the hold of a part of a block reads the block.  The
+ * amounts of data read and marked for rewrite are added to *readp and
+ * *writtenp, either of which may be NULL.  Of the data, only the blocks
+ * marked are read.
  */
 int
 dmu_rewrite_by_dnode(dnode_t *dn, uint64_t offset, uint64_t size,
     uint64_t rewrite_flags, dmu_tx_t *tx, uint64_t *readp, uint64_t *writtenp)
 {
-	dmu_buf_t **dbp;
-	int numbufs;
-	int error;
+	int epbs = dn->dn_indblkshift - SPA_BLKPTRSHIFT;
+	uint64_t blkid;
+	uint64_t end;
 	uint64_t nr = 0;
 	uint64_t nw = 0;
+	int error = 0;
 
-	error = dmu_buf_hold_array_by_dnode(dn, offset, size, TRUE, FTAG,
-	    &numbufs, &dbp, DMU_READ_PREFETCH | DMU_UNCACHEDIO);
-	if (error != 0)
-		return (error);
+	if (size == 0)
+		return (0);
 
-	for (int i = 0; i < numbufs; i++) {
-		nr += dbp[i]->db_size;
-		if (dmu_buf_is_dirty(dbp[i], tx))
-			continue;
-
-		/*
-		 * A block freed in a transaction group that is not synced yet
-		 * is still a block here, but not worth bringing back.
-		 */
-		if (dnode_block_freed(dn, ((dmu_buf_impl_t *)dbp[i])->db_blkid))
-			continue;
-
-		if (dmu_rewrite_skip(dbp[i], dn->dn_objset, rewrite_flags))
-			continue;
-
-		nw += dbp[i]->db_size;
-		if (rewrite_flags & ZFS_REWRITE_PHYSICAL)
-			dmu_buf_will_rewrite(dbp[i], tx);
-		else
-			dmu_buf_will_dirty(dbp[i], tx);
+	rw_enter(&dn->dn_struct_rwlock, RW_READER);
+	if (dn->dn_datablkshift != 0) {
+		blkid = offset >> dn->dn_datablkshift;
+		end = ((offset + size - 1) >> dn->dn_datablkshift) + 1;
+	} else {
+		blkid = 0;
+		end = 1;
 	}
-	dmu_buf_rele_array(dbp, numbufs, FTAG);
+	/* Prefetch the indirect blocks, not the data: it may be skipped. */
+	dmu_zfetch(&dn->dn_zfetch, blkid, end - blkid, B_FALSE, B_FALSE,
+	    B_TRUE, B_TRUE);
+	rw_exit(&dn->dn_struct_rwlock);
+
+	while (error == 0 && blkid < end) {
+		uint64_t next = MIN(end, P2ROUNDUP(blkid + 1, 1ULL << epbs));
+
+		error = dmu_rewrite_l1(dn, blkid, next, rewrite_flags, tx,
+		    &nr, &nw);
+		blkid = next;
+	}
 
 	if (readp != NULL)
 		*readp += nr;
 	if (writtenp != NULL)
 		*writtenp += nw;
-	return (0);
+	return (error);
 }
 
 void
