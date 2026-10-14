@@ -8215,6 +8215,14 @@ spa_vdev_add(spa_t *spa, nvlist_t *nvroot, boolean_t check_ashift)
 	}
 
 	/*
+	 * Count the AnyRAID vdevs while they are still children of vd: they
+	 * are moved to the root vdev below.
+	 */
+	for (uint64_t i = 0; i < vd->vdev_children; i++)
+		if (vd->vdev_child[i]->vdev_ops == &vdev_anyraid_ops)
+			nanyraid++;
+
+	/*
 	 * We must validate the spares and l2cache devices after checking the
 	 * children.  Otherwise, vdev_inuse() will blindly overwrite the spare.
 	 */
@@ -8308,9 +8316,6 @@ spa_vdev_add(spa_t *spa, nvlist_t *nvroot, boolean_t check_ashift)
 		dmu_tx_commit(tx);
 	}
 
-	for (uint64_t i = 0; i < vd->vdev_children; i++)
-		if (vd->vdev_child[i]->vdev_ops == &vdev_anyraid_ops)
-			nanyraid++;
 	if (nanyraid > 0) {
 		dmu_tx_t *tx;
 

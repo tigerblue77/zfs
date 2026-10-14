@@ -49,7 +49,7 @@ tests = [ 'anyraid_clean_mirror_001_pos', 'anyraid_clean_mirror_002_pos',
     'anyraid_offline_write_online_resilver',
     'anyraid_special_vdev_001_pos', 'anyraid_special_vdev_002_pos',
     'anyraid_tile_map_crash_import', 'anyraid_replace_small_neg',
-    'anyraid_checkpoint_empty_vdev']
+    'anyraid_checkpoint_empty_vdev', 'anyraid_add_feature_active']
 tags = ['functional', 'anyraid']
 
 [tests/functional/append]
