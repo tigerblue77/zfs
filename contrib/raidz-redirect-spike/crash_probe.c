@@ -22,6 +22,7 @@
  *   crash_probe <dir> <ashift> rpass <R1|R2|R3|R4|R5|R6> <P1|P2>
  *       [none|stopgap|pass|both|noverify]
  *   crash_probe <dir> <ashift> dva2 <P1|P2> [nomirror|stopgap|nofix]
+ *   crash_probe <dir> <ashift> dva2scrub <P1|P2> [nomove|nofix]
  *
  * The parent never initializes libzpool; every phase runs in a forked child.
  * Phase 0 creates a five-wide raidz1 pool of files in <dir>, writes a plain,
@@ -161,6 +162,14 @@
  * spike_resilver_redirects to 3, so that the traversal reaches the moved
  * blocks instead of the walk; 'nofix' clears spike_mirror_redirect_txg.
  *
+ * dva2scrub: phase 0 as dva2's, the marked blocks moved with every child
+ * online ('nomove' does not move them), the first sector of their DVA 1
+ * inverted on mirror leg m0 with the pool exported, and a scrub, which
+ * must be sorted and must repair each damaged copy of a plain block.  It
+ * reports, and does not check, the gang headers' copies: a sorted scrub
+ * issues a gang block whole and the root mirror then reads only its DVA 0.
+ * 'nofix' clears spike_scan_redirect_split.
+ *
  * Prints one PASS or FAIL line per check and exits 1 if any check failed.
  */
 
@@ -262,6 +271,7 @@ extern int vdev_raidz_redirect_add(uint64_t, uint64_t, uint64_t, uint64_t,
 /* Weak: the fixes for moved blocks with other copies, absent before. */
 extern int spike_mirror_redirect_txg __attribute__((weak));
 extern uint64_t spike_mirror_redirect_repairs[2] __attribute__((weak));
+extern int spike_scan_redirect_split __attribute__((weak));
 
 typedef enum policy { P1, P2, P3 } policy_t;
 static const char *const policy_names[] = { "P1", "P2", "P3" };
@@ -5029,6 +5039,7 @@ typedef struct dv_args {
 	policy_t	dv_policy;
 	boolean_t	dv_mirror;
 	boolean_t	dv_walk;	/* the walk runs, not the stopgap */
+	boolean_t	dv_move;	/* dva2scrub: move the marked blocks */
 } dv_args_t;
 
 static int
@@ -5358,7 +5369,7 @@ child_dva2_scrub(void *arg)
 static int
 run_dva2(policy_t policy, const char *variant)
 {
-	dv_args_t da = { policy, B_TRUE, B_TRUE };
+	dv_args_t da = { policy, B_TRUE, B_TRUE, B_TRUE };
 	char copy[PATH_BUF];
 	const char *orig = dir;
 	int st;
@@ -5402,6 +5413,164 @@ run_dva2(policy_t policy, const char *variant)
 	st = phase("3 read from the new extents", child_dva2_read, NULL);
 	dir = orig;
 	check(st == 0, "the read phase passes (status %d)", st);
+	return (0);
+}
+
+/*
+ * dva2scrub: does a sorted scrub check the other copy of a block whose DVA
+ * 0 was moved?  Phase 0 is dva2's; phase 1 moves the marked blocks with
+ * every child online (not with nomove); then, the pool exported, the first
+ * sector of DVA 1 of each marked block is inverted on mirror leg m0, and
+ * phase 2 scrubs the pool.
+ */
+static int
+child_dvs_move(void *arg)
+{
+	dv_args_t *da = arg;
+	spa_t *spa;
+
+	failures = 0;	/* this phase's own checks */
+	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+	spa = import_pool();
+	if (da->dv_move)
+		dv_move(spa, da->dv_policy, B_TRUE);
+	for (int k = 0; k < 3; k++) {
+		dirty_txg(spa);
+		txg_wait_synced(spa_get_dsl(spa), 0);
+	}
+	export_pool(spa);
+	kernel_fini();
+	return (failures == 0 ? 0 : 1);
+}
+
+static int
+child_dvs_scrub(void *arg)
+{
+	(void) arg;
+	rp_leafstat_t b, a;
+	pool_scan_stat_t ps;
+	int sorted = -1;
+	vdev_t *m0;
+	spa_t *spa;
+
+	failures = 0;	/* this phase's own checks */
+	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+	spa = import_pool();
+	m0 = spa->spa_root_vdev->vdev_child[1]->vdev_child[0];
+	memset(&b, 0, sizeof (b));
+	spa_config_enter(spa, SCL_VDEV, FTAG, RW_READER);
+	rp_leaves(m0, &b);
+	spa_config_exit(spa, SCL_VDEV, FTAG);
+	VERIFY0(spa_scan(spa, POOL_SCAN_SCRUB, 0));
+	for (int n = 0; n < RS_TXGS && dsl_scan_scrubbing(spa_get_dsl(spa));
+	    n++) {
+		if (sorted == -1)
+			sorted = spa_get_dsl(spa)->dp_scan->scn_is_sorted;
+		txg_wait_synced(spa_get_dsl(spa), 0);
+	}
+	VERIFY0(spa_scan_get_stats(spa, &ps));
+	memset(&a, 0, sizeof (a));
+	spa_config_enter(spa, SCL_VDEV, FTAG, RW_READER);
+	rp_leaves(m0, &a);
+	spa_config_exit(spa, SCL_VDEV, FTAG);
+	(void) printf("MEASURE scrub: sorted=%d examined=%llu issued=%llu "
+	    "processed=%llu errors=%llu m0_cksum=%llu m0_read_bytes=%llu\n",
+	    sorted, (u_longlong_t)ps.pss_examined,
+	    (u_longlong_t)ps.pss_issued, (u_longlong_t)ps.pss_processed,
+	    (u_longlong_t)ps.pss_errors, (u_longlong_t)(a.rl_cksum -
+	    b.rl_cksum), (u_longlong_t)(a.rl_rd_bytes - b.rl_rd_bytes));
+	check(ps.pss_func == POOL_SCAN_SCRUB && ps.pss_state == DSS_FINISHED &&
+	    ps.pss_errors == 0 && sorted == 1, "the scrub was sorted and "
+	    "finished with no error");
+	export_pool(spa);
+	kernel_fini();
+	return (failures == 0 ? 0 : 1);
+}
+
+/*
+ * Whether the damaged sector of each marked object's DVA 1 on m0 holds m1's
+ * bytes again; counts for plain and gang blocks.
+ */
+static void
+dvs_restored(int *plain, int *nplain, int *gang, int *ngang)
+{
+	char p0[PATH_BUF], p1[PATH_BUF];
+	uint64_t size = 1ULL << ashift;
+	uint8_t *b0 = malloc(size), *b1 = malloc(size);
+	int fd0, fd1;
+
+	*plain = *nplain = *gang = *ngang = 0;
+	(void) snprintf(p0, sizeof (p0), "%s/m0", dir);
+	(void) snprintf(p1, sizeof (p1), "%s/m1", dir);
+	fd0 = open(p0, O_RDONLY);
+	fd1 = open(p1, O_RDONLY);
+	VERIFY(fd0 != -1 && fd1 != -1);
+	for (int f = 0; f < sh->sh_nfobj; f++) {
+		uint64_t off = sh->sh_dv_off[f] + VDEV_LABEL_START_SIZE;
+		boolean_t g = strncmp(sh->sh_fobj[f].fo_name, "g-", 2) == 0;
+		boolean_t ok;
+
+		if (!sh->sh_fobj[f].fo_moved)
+			continue;
+		VERIFY3S(pread(fd0, b0, size, off), ==, size);
+		VERIFY3S(pread(fd1, b1, size, off), ==, size);
+		ok = memcmp(b0, b1, size) == 0;
+		(void) printf("INFO %s: DVA 1 on m0 %s\n",
+		    sh->sh_fobj[f].fo_name, ok ? "repaired" : "still damaged");
+		if (g) {
+			(*ngang)++;
+			*gang += ok;
+		} else {
+			(*nplain)++;
+			*plain += ok;
+		}
+	}
+	(void) close(fd0);
+	(void) close(fd1);
+	free(b0);
+	free(b1);
+}
+
+static int
+run_dva2scrub(policy_t policy, const char *variant)
+{
+	dv_args_t da = { policy, B_TRUE, B_TRUE, B_TRUE };
+	int st, n, plain, nplain, gang, ngang;
+
+	(void) printf("INFO dva2scrub %s, policy %s, ashift %llu\n",
+	    variant != NULL ? variant : "default", policy_names[policy],
+	    (u_longlong_t)ashift);
+	if (vdev_raidz_redirect_move == NULL)
+		return (2);
+	if (variant != NULL && strcmp(variant, "nomove") == 0) {
+		da.dv_move = B_FALSE;
+	} else if (variant != NULL && strcmp(variant, "nofix") == 0) {
+		if (&spike_scan_redirect_split == NULL) {
+			(void) printf("INFO this libzpool has no "
+			    "spike_scan_redirect_split\n");
+		} else {
+			spike_scan_redirect_split = 0;
+			(void) printf("INFO spike_scan_redirect_split=0\n");
+		}
+	}
+	st = phase("0 setup", child_setup_dva2, &da);
+	check(st == 0, "the setup has blocks to move (status %d)", st);
+	if (st != 0)
+		return (0);
+	st = phase("1 move", child_dvs_move, &da);
+	check(st == 0, "the move phase passes (status %d)", st);
+	n = dv_damage_mirror(0);
+	(void) printf("INFO inverted the first sector of DVA 1 of %d blocks "
+	    "on mirror leg m0\n", n);
+	st = phase("2 scrub", child_dvs_scrub, NULL);
+	check(st == 0, "the scrub phase passes (status %d)", st);
+	dvs_restored(&plain, &nplain, &gang, &ngang);
+	check(nplain > 0 && plain == nplain, "the scrub repaired the damaged "
+	    "copy of each of the %d plain blocks (%d)", nplain, plain);
+	/* A sorted scrub reads only DVA 0 of a gang block, moved or not. */
+	(void) printf("INFO the scrub repaired %d of the %d damaged gang "
+	    "header copies\n", gang, ngang);
+	run_zdb();
 	return (0);
 }
 
@@ -5450,7 +5619,9 @@ usage(void)
 	    "       crash_probe <dir> <ashift> rpass <R1|R2|R3|R4|R5|R6> "
 	    "<P1|P2> [none|stopgap|pass|both|noverify]\n"
 	    "       crash_probe <dir> <ashift> dva2 <P1|P2> "
-	    "[nomirror|stopgap|nofix]\n");
+	    "[nomirror|stopgap|nofix]\n"
+	    "       crash_probe <dir> <ashift> dva2scrub <P1|P2> "
+	    "[nomove|nofix]\n");
 	return (2);
 }
 
@@ -5596,6 +5767,14 @@ main(int argc, char **argv)
 		    strcmp(v, "stopgap") != 0 && strcmp(v, "nofix") != 0))
 			return (usage());
 		st = run_dva2(policy, v);
+	} else if (strcmp(mode, "dva2scrub") == 0 && argc <= 6) {
+		const char *v = argc == 6 ? argv[5] : NULL;
+
+		policy = parse_policy(argv[4], B_FALSE);
+		if (policy == -1 || (v != NULL && strcmp(v, "nomove") != 0 &&
+		    strcmp(v, "nofix") != 0))
+			return (usage());
+		st = run_dva2scrub(policy, v);
 	} else if (strcmp(mode, "stalebp") == 0) {
 		boolean_t same = B_FALSE, nolive = B_FALSE;
 

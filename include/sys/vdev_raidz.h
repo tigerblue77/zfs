@@ -366,6 +366,8 @@ extern spike_scan_pass_stat_t spike_scan_pass_stats;
 extern uint64_t spike_scan_watch[2][3];	/* vdev, offset, size */
 extern int spike_scan_redirect_batch;
 extern int spike_scan_redirect_verify;
+/* SPIKE: test-only, a sorted scan issues a moved DVA alone (dsl_scan.c). */
+extern int spike_scan_redirect_split;
 
 extern int vdev_raidz_redirect_scan_next(spa_t *, uint64_t *, uint64_t,
     uint64_t, raidz_redirect_ent_t *, struct blkptr *,

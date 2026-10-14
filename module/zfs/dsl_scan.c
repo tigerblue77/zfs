@@ -132,6 +132,9 @@ static void count_block_skipped(dsl_scan_t *scn, const blkptr_t *bp,
     boolean_t all);
 static void scan_exec_io(dsl_pool_t *dp, const blkptr_t *bp, int zio_flags,
     const zbookmark_phys_t *zb, dsl_scan_io_queue_t *queue);
+static void scan_exec_io_impl(dsl_pool_t *dp, const blkptr_t *bp,
+    int zio_flags, const zbookmark_phys_t *zb, dsl_scan_io_queue_t *queue,
+    boolean_t all);
 
 extern uint_t zfs_vdev_async_write_active_min_dirty_percent;
 static int zfs_scan_blkstats = 0;
@@ -5148,28 +5151,44 @@ scan_io_queue_insert(dsl_scan_io_queue_t *queue, const blkptr_t *bp, int dva_i,
 }
 
 /*
- * SPIKE, not for merge: a test-only switch for the routing below, kept so
- * that the sorted path can still be shown failing.
+ * SPIKE, not for merge: test-only switches for the routing below, kept so
+ * that the sorted path (spike_scan_redirect_unsorted = 0) and the routing
+ * of whole blocks (spike_scan_redirect_split = 0) can still be shown
+ * failing.
  */
 int spike_scan_redirect_unsorted = 1;
+int spike_scan_redirect_split = 1;
 
 /*
- * SPIKE: B_TRUE if a DVA of the block is redirected to a new extent.  The
- * sorted queues would account the block at its old extent, part of which
- * another block may now hold, and the extent tree's fill accounting does
- * not allow two queued extents to overlap.
+ * SPIKE: B_TRUE if DVA d of the block is redirected to a new extent.  The
+ * sorted queues would account it at its old extent, part of which another
+ * block may now hold, and the extent tree's fill accounting does not allow
+ * two queued extents to overlap.
  */
 static boolean_t
-dsl_scan_bp_redirected(spa_t *spa, const blkptr_t *bp)
+dsl_scan_dva_redirected(spa_t *spa, const blkptr_t *bp, int d)
 {
-	for (int i = 0; i < BP_GET_NDVAS(bp); i++) {
-		if (vdev_raidz_redirect_lookup(spa,
-		    DVA_GET_VDEV(&bp->blk_dva[i]),
-		    DVA_GET_OFFSET(&bp->blk_dva[i]),
-		    BP_GET_PHYSICAL_BIRTH(bp)))
-			return (B_TRUE);
-	}
-	return (B_FALSE);
+	return (spike_scan_redirect_unsorted &&
+	    vdev_raidz_redirect_lookup(spa, DVA_GET_VDEV(&bp->blk_dva[d]),
+	    DVA_GET_OFFSET(&bp->blk_dva[d]), BP_GET_PHYSICAL_BIRTH(bp)));
+}
+
+/*
+ * SPIKE: issue DVA d of the block now, as the sorted queues issue each DVA:
+ * its own I/O, with every DVA for repairs but DVA d first, which is the
+ * only one the root mirror reads in a sorted scrub (vdev_mirror_map_init())
+ * and the only one counted as issued.
+ */
+static void
+dsl_scan_exec_dva(dsl_pool_t *dp, const blkptr_t *bp, int d, int zio_flags,
+    const zbookmark_phys_t *zb)
+{
+	int ndvas = BP_GET_NDVAS(bp);
+	blkptr_t dbp = *bp;
+
+	for (int i = 0; i < ndvas; i++)
+		dbp.blk_dva[i] = bp->blk_dva[(d + i) % ndvas];
+	scan_exec_io_impl(dp, &dbp, zio_flags, zb, NULL, B_FALSE);
 }
 
 /*
@@ -5187,19 +5206,35 @@ dsl_scan_enqueue(dsl_pool_t *dp, const blkptr_t *bp, int zio_flags,
 
 	/*
 	 * Gang blocks are hard to issue sequentially, so we just issue them
-	 * here immediately instead of queuing them.  SPIKE: so are blocks
-	 * read from a new extent, which the queues cannot place.
+	 * here immediately instead of queuing them.
 	 */
-	if (!dp->dp_scan->scn_is_sorted || BP_IS_GANG(bp) ||
-	    (spike_scan_redirect_unsorted &&
-	    dsl_scan_bp_redirected(spa, bp))) {
+	if (!dp->dp_scan->scn_is_sorted || BP_IS_GANG(bp)) {
 		scan_exec_io(dp, bp, zio_flags, zb, NULL);
 		return;
+	}
+	/* SPIKE: test-only, the routing of a whole block before the split. */
+	if (!spike_scan_redirect_split) {
+		for (int i = 0; i < BP_GET_NDVAS(bp); i++) {
+			if (dsl_scan_dva_redirected(spa, bp, i)) {
+				scan_exec_io(dp, bp, zio_flags, zb, NULL);
+				return;
+			}
+		}
 	}
 
 	for (int i = 0; i < BP_GET_NDVAS(bp); i++) {
 		dva_t dva;
 		vdev_t *vdev;
+
+		/*
+		 * SPIKE: a DVA the queues cannot place, read from a new
+		 * extent, is issued now; each other DVA is still queued and
+		 * checked by its own I/O.
+		 */
+		if (dsl_scan_dva_redirected(spa, bp, i)) {
+			dsl_scan_exec_dva(dp, bp, i, zio_flags, zb);
+			continue;
+		}
 
 		dva = bp->blk_dva[i];
 		vdev = vdev_lookup_top(spa, DVA_GET_VDEV(&dva));
@@ -5346,6 +5381,14 @@ static void
 scan_exec_io(dsl_pool_t *dp, const blkptr_t *bp, int zio_flags,
     const zbookmark_phys_t *zb, dsl_scan_io_queue_t *queue)
 {
+	scan_exec_io_impl(dp, bp, zio_flags, zb, queue, queue == NULL);
+}
+
+/* SPIKE: scan_exec_io(), counting every DVA as issued if <all>. */
+static void
+scan_exec_io_impl(dsl_pool_t *dp, const blkptr_t *bp, int zio_flags,
+    const zbookmark_phys_t *zb, dsl_scan_io_queue_t *queue, boolean_t all)
+{
 	spa_t *spa = dp->dp_spa;
 	dsl_scan_t *scn = dp->dp_scan;
 	/*
@@ -5377,7 +5420,7 @@ scan_exec_io(dsl_pool_t *dp, const blkptr_t *bp, int zio_flags,
 	}
 
 	ASSERT(pio != NULL);
-	count_block_issued(spa, bp, queue == NULL);
+	count_block_issued(spa, bp, all);
 	zio_nowait(zio_read(pio, spa, bp, data, size, dsl_scan_scrub_done,
 	    queue, ZIO_PRIORITY_SCRUB, zio_flags, zb));
 }

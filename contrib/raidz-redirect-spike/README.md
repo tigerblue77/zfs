@@ -728,3 +728,38 @@ runs pass: the root mirror repaired 12 to 20 moved copies from the other
 copy in each resilver, 2 to 6 of them gang headers.  `nomirror` passes on
 both: with both copies on one vdev, `vdev_mirror_dva_select()` prefers
 DVA 0, the moved one.
+
+A sorted scrub queues each DVA of a block as its own I/O, with that DVA
+first, and the root mirror of such an I/O reads only its first DVA
+(`vdev_mirror_map_init()`, `c = 1`): the other DVAs come as their own
+I/Os.  Since step 4, `dsl_scan_enqueue()` issued a block with any moved
+DVA whole and at once, since the queues cannot place a moved DVA, so a
+sorted scrub read DVA 0 of such a block and never checked its other
+copies.  Each DVA is now routed on its own: a moved one is issued at once,
+as its own I/O with that DVA first (the order `bp2sio()` gives a queued
+one) and counted alone as issued, and the others are queued as before.
+`spike_scan_redirect_split = 0` (test-only) issues the whole block again.
+
+    crash_probe <dir> <ashift> dva2scrub <P1|P2> [nomove|nofix]
+
+The setup is dva2's; the marked blocks are moved with every child online
+(not with `nomove`), the pool is exported, the first sector of each one's
+DVA 1 is inverted on mirror leg m0, and a scrub runs, which must be sorted
+and must bring each damaged sector of a plain block back to m1's bytes.
+
+At ashift 12 and 9, under P1 and P2, 25 (ashift 12) or 21 (ashift 9) plain
+blocks were damaged.  On fd0cdf8 and on the commit before this one, the
+scrub found none of them in all 8 runs: no checksum error on m0, every
+sector still damaged.  With this commit it found and repaired all of them
+(25 or 21 checksum errors on m0), and with `nofix` none again.  `nomove`
+passes on all three.  In every run, moved or not, the scrub repaired none
+of the 8 damaged gang header copies: a sorted scrub issues a gang block
+whole and reads only its DVA 0.  That is the code path of a block nothing
+moved (the gang branch of `dsl_scan_enqueue()` and the root map's `c = 1`
+are not the spike's), so this spike neither causes nor fixes it; it was
+not run on a libzpool without the spike, which crash_probe cannot load.
+
+Neither fix changes the table, its lookup, its memory or its load, so
+step 7's measurements were not run again.  Fix 1 adds a lookup, skipped
+like the I/O path's when no entry can match, to each read of a block with
+several copies; its cost on reads was not measured.
