@@ -787,6 +787,26 @@ anyraid_open_existing(vdev_t *vd, uint64_t child, int32_t **child_capacities)
 		return (0);
 	}
 
+	/*
+	 * The leaf indexes the child arrays here and in the contraction code,
+	 * so it is checked before anything is set up from the header.
+	 */
+	int32_t contracting_leaf;
+	if (nvlist_lookup_uint32(header.ah_nvl,
+	    VDEV_ANYRAID_HEADER_CONTRACTING_LEAF,
+	    (uint32_t *)&contracting_leaf) != 0)
+		contracting_leaf = -1;
+	if (contracting_leaf != -1 && (contracting_leaf < 0 ||
+	    contracting_leaf >= vd->vdev_children)) {
+		zfs_dbgmsg("Error opening anyraid vdev %llu: Invalid "
+		    "contracting leaf %d", (u_longlong_t)vd->vdev_id,
+		    contracting_leaf);
+		free_header(&header, header_size);
+		free_child_capacities(child_capacities, count);
+		return (SET_ERROR(EINVAL));
+	}
+	va->vd_contracting_leaf = contracting_leaf;
+
 	uint32_t state = ARS_NONE;
 	(void) nvlist_lookup_uint32(header.ah_nvl,
 	    VDEV_ANYRAID_HEADER_RELOC_STATE, &state);
@@ -817,11 +837,6 @@ anyraid_open_existing(vdev_t *vd, uint64_t child, int32_t **child_capacities)
 		anyraid_open_undo_relocate(va);
 		return (error);
 	}
-
-	if (nvlist_lookup_uint32(header.ah_nvl,
-	    VDEV_ANYRAID_HEADER_CONTRACTING_LEAF,
-	    (uint32_t *)&va->vd_contracting_leaf) != 0)
-		va->vd_contracting_leaf = -1;
 
 	if (error == 0) {
 		vdev_anyraid_relocate_t *var = &va->vd_relocate;
