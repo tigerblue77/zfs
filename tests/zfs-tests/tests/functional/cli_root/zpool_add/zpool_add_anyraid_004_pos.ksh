@@ -73,7 +73,7 @@ log_must dd if=/dev/urandom of=/$TESTPOOL/testfile1 bs=1M count=32
 checksum1=$(xxh128sum /$TESTPOOL/testfile1)
 
 log_must zpool export $TESTPOOL
-log_must zpool import -d /var/tmp/testdir/sparse_files $TESTPOOL
+log_must zpool import -d $TESTDIR/sparse_files $TESTPOOL
 
 checksum1_after=$(xxh128sum /$TESTPOOL/testfile1)
 if [ "$checksum1" != "$checksum1_after" ]; then
