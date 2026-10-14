@@ -296,6 +296,9 @@ extern int vdev_anyraid_pick_best_mapping(vdev_t *cvd,
     uint64_t *out_txg, anyraid_header_t *out_header, int *out_mapping);
 extern int vdev_anyraid_open_header(vdev_t *cvd, int header,
     anyraid_header_t *out_header);
+extern int vdev_anyraid_read_map(vdev_t *cvd, int mapping,
+    anyraid_header_t *header, uint32_t map_length, abd_t **map_abds,
+    int flags);
 
 #ifdef	__cplusplus
 }
