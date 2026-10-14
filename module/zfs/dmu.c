@@ -1536,12 +1536,11 @@ dmu_write_by_dnode(dnode_t *dn, uint64_t offset, uint64_t size,
 }
 
 /*
- * Decide from its block pointer whether a rewrite leaves a block of the given
- * level alone.  The pointer may be slightly stale, but that is OK for the
- * advisory use.
+ * Decide from its block pointer whether a rewrite leaves a block alone.  The
+ * pointer may be slightly stale, but that is OK for the advisory use.
  */
 static boolean_t
-dmu_rewrite_skip(objset_t *os, const blkptr_t *bp, int level, uint64_t flags,
+dmu_rewrite_skip(objset_t *os, const blkptr_t *bp, uint64_t flags,
     uint64_t txg)
 {
 	if (BP_IS_HOLE(bp))
@@ -1553,7 +1552,7 @@ dmu_rewrite_skip(objset_t *os, const blkptr_t *bp, int level, uint64_t flags,
 	}
 
 	/* Only data blocks are cloned. */
-	if ((flags & ZFS_REWRITE_SKIP_BRT) && level == 0) {
+	if ((flags & ZFS_REWRITE_SKIP_BRT) && !BP_IS_METADATA(bp)) {
 		if (brt_maybe_exists(os->os_spa, bp))
 			return (B_TRUE);
 	}
@@ -1614,6 +1613,25 @@ dmu_rewrite_get_bp(dnode_t *dn, dmu_buf_impl_t *l1, uint64_t blkid,
 }
 
 /*
+ * Copy the block pointer of db, if it has one, under the lock of the block
+ * that holds it.
+ */
+static boolean_t
+dmu_rewrite_get_db_bp(dmu_buf_impl_t *db, blkptr_t *bp)
+{
+	db_lock_type_t dblt;
+	boolean_t have_bp;
+
+	dblt = dmu_buf_lock_parent(db, RW_READER, FTAG);
+	have_bp = (db->db_blkptr != NULL);
+	if (have_bp)
+		*bp = *db->db_blkptr;
+	dmu_buf_unlock_parent(db, dblt, FTAG);
+
+	return (have_bp);
+}
+
+/*
  * Return, held, the lowest block among the indirect block db and its ancestors
  * that the rewrite does not leave alone, with flags that include
  * ZFS_REWRITE_SKIP_ALLOCATING, or NULL if there is none.  A block dirty in the
@@ -1628,21 +1646,15 @@ dmu_rewrite_find_ind(dnode_t *dn, dmu_buf_impl_t *db, uint64_t flags,
 	ASSERT(flags & ZFS_REWRITE_SKIP_ALLOCATING);
 
 	for (;;) {
-		db_lock_type_t dblt;
-		boolean_t have_bp;
 		blkptr_t bp;
 
 		ASSERT3U(db->db_level, >, 0);
 		if (dmu_buf_is_dirty(&db->db, tx))
 			return (NULL);
 
-		dblt = dmu_buf_lock_parent(db, RW_READER, FTAG);
-		have_bp = (db->db_blkptr != NULL);
-		if (have_bp)
-			bp = *db->db_blkptr;
-		dmu_buf_unlock_parent(db, dblt, FTAG);
-		if (have_bp && !dmu_rewrite_skip(dn->dn_objset, &bp,
-		    db->db_level, flags, dmu_tx_get_txg(tx))) {
+		if (dmu_rewrite_get_db_bp(db, &bp) &&
+		    !dmu_rewrite_skip(dn->dn_objset, &bp, flags,
+		    dmu_tx_get_txg(tx))) {
 			dbuf_add_ref(db, FTAG);
 			return (db);
 		}
@@ -1715,7 +1727,7 @@ dmu_rewrite_l1(dnode_t *dn, uint64_t start, uint64_t end,
 		blkptr_t bp;
 
 		dmu_rewrite_get_bp(dn, l1, blkid, &bp);
-		if (dmu_rewrite_skip(os, &bp, 0, rewrite_flags,
+		if (dmu_rewrite_skip(os, &bp, rewrite_flags,
 		    dmu_tx_get_txg(tx)))
 			continue;
 
@@ -1839,6 +1851,66 @@ dmu_rewrite_by_dnode(dnode_t *dn, uint64_t offset, uint64_t size,
 	if (writtenp != NULL)
 		*writtenp += nw;
 	return (error);
+}
+
+/*
+ * Mark the spill block of dn for rewrite, unless the ZFS_REWRITE_SKIP_* flags
+ * leave it alone, as dmu_rewrite_by_dnode() does with data blocks: this is
+ * decided from its block pointer, before the block is read.  A spill block is
+ * metadata, rewritten without ZFS_REWRITE_PHYSICAL.  The caller serializes
+ * this with the updates of the spill block, as sa_rewrite_spill() does, and
+ * the transaction holds the spill block.  Return B_TRUE if it was marked.
+ */
+boolean_t
+dmu_rewrite_spill_by_dnode(dnode_t *dn, uint64_t rewrite_flags, dmu_tx_t *tx)
+{
+	dmu_buf_impl_t *db = NULL;
+	boolean_t marked = B_FALSE;
+	blkptr_t bp;
+
+	rw_enter(&dn->dn_struct_rwlock, RW_READER);
+	if (dn->dn_have_spill && !dnode_block_freed(dn, DMU_SPILL_BLKID))
+		db = dbuf_hold(dn, DMU_SPILL_BLKID, FTAG);
+	rw_exit(&dn->dn_struct_rwlock);
+	if (db == NULL)
+		return (B_FALSE);
+
+	if (dmu_rewrite_get_db_bp(db, &bp) &&
+	    !dmu_rewrite_skip(dn->dn_objset, &bp, rewrite_flags,
+	    dmu_tx_get_txg(tx)) && !dmu_buf_is_dirty(&db->db, tx)) {
+		dmu_buf_will_dirty(&db->db, tx);
+		marked = B_TRUE;
+	}
+	dbuf_rele(db, FTAG);
+
+	return (marked);
+}
+
+/*
+ * Mark for rewrite the block of the meta-dnode that holds dn, by dirtying the
+ * dnode, unless the ZFS_REWRITE_SKIP_* flags leave that block alone, as
+ * dmu_rewrite_by_dnode() does with data blocks, or the dnode is dirty in a
+ * transaction group not synced yet, which writes the block anyway.  The block
+ * holds other dnodes, which move with it.  A dnode block is metadata,
+ * rewritten without ZFS_REWRITE_PHYSICAL.  The transaction holds the object.
+ * Return B_TRUE if the dnode was dirtied.
+ */
+boolean_t
+dmu_rewrite_dnode(dnode_t *dn, uint64_t rewrite_flags, dmu_tx_t *tx)
+{
+	blkptr_t bp;
+
+	if (DMU_OBJECT_IS_SPECIAL(dn->dn_object) || dn->dn_dbuf == NULL ||
+	    dn->dn_free_txg != 0 || dnode_is_dirty(dn))
+		return (B_FALSE);
+
+	if (!dmu_rewrite_get_db_bp(dn->dn_dbuf, &bp) ||
+	    dmu_rewrite_skip(dn->dn_objset, &bp, rewrite_flags,
+	    dmu_tx_get_txg(tx)))
+		return (B_FALSE);
+
+	dnode_setdirty(dn, tx);
+	return (B_TRUE);
 }
 
 void
