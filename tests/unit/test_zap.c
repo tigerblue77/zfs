@@ -1574,6 +1574,91 @@ test_zap_uint64_keys(const MunitParameter params[], void *data)
 
 /* ========== */
 
+/* Rewrite tests. */
+
+static uint64_t rewrite_calls;
+
+/*
+ * Called by dmu_rewrite_by_dnode() for zap_rewrite_by_dnode(): the ZAP must be
+ * locked as a reader, which keeps out the updates that change its blocks, while
+ * its blocks, which are metadata, are marked for rewrite, at most 1 MiB at a
+ * time.
+ */
+static void
+rewrite_check(dnode_t *dn, uint64_t offset, uint64_t size, uint64_t flags)
+{
+	(void) offset;
+	dmu_buf_t *db;
+
+	unit_ok(dmu_buf_hold_by_dnode(dn, 0, FTAG, &db, 0));
+	zap_t *zap = dmu_buf_get_user(db);
+	unit_notnull(zap);
+	unit_true(RW_READ_HELD(&zap->zap_rwlock));
+	unit_false(RW_WRITE_HELD(&zap->zap_rwlock));
+	dmu_buf_rele(db, FTAG);
+
+	unit_zero(flags & ZFS_REWRITE_PHYSICAL);
+	unit_ne(flags & ZFS_REWRITE_SKIP_SNAPSHOT, 0);
+	unit_le(size, 1024 * 1024);
+	rewrite_calls++;
+}
+
+/*
+ * zap_rewrite_by_dnode() marks every block of the ZAP once, a fat one in
+ * several transactions, and does not dirty the first block itself.
+ */
+static MunitResult
+test_zap_rewrite(const MunitParameter params[], void *data)
+{
+	(void) data;
+
+	dnode_t *dn = mock_zap_create_params(params, "type");
+	mock_dnode_t *mdn = (mock_dnode_t *)dn;
+	dmu_tx_t *tx = (dmu_tx_t *)mock_tx_create();
+	boolean_t fat = mock_zap_is_fatzap(dn);
+	uint64_t perlock = (1024 * 1024) >> fzap_default_block_shift;
+	uint64_t v = 0;
+	char name[32];
+
+	/* A fat ZAP with more blocks than are marked under one lock. */
+	while (fat ? mock_dnode_block_count(mdn) <= perlock : v < 8) {
+		(void) snprintf(name, sizeof (name), "entry-%llu",
+		    (u_longlong_t)v);
+		unit_ok(zap_add_by_dnode(dn, name, sizeof (uint64_t), 1, &v,
+		    tx));
+		v++;
+	}
+	mock_tx_destroy((mock_dmu_tx_t *)tx);
+	unit_true(mock_zap_is_params(dn, params, "type"));
+
+	size_t nblocks = mock_dnode_block_count(mdn);
+	uint64_t dirtied = mock_dnode_block_dirtied(mdn, 0);
+
+	rewrite_calls = 0;
+	mock_dmu_rewrite_cb = rewrite_check;
+	unit_ok(zap_rewrite_by_dnode(dn,
+	    ZFS_REWRITE_PHYSICAL | ZFS_REWRITE_SKIP_SNAPSHOT, NULL, NULL));
+	mock_dmu_rewrite_cb = NULL;
+
+	unit_eq(rewrite_calls, fat ? howmany(nblocks, perlock) : 1);
+	for (uint64_t blkid = 0; blkid < nblocks; blkid++) {
+		if (mock_dnode_block_dirtied(mdn, blkid) != 0)
+			unit_eq(mock_dnode_block_rewritten(mdn, blkid), 1);
+	}
+	unit_eq(mock_dnode_block_dirtied(mdn, 0), dirtied);
+
+	/* Unlocked, and with every entry. */
+	uint64_t count;
+	unit_ok(zap_count_by_dnode(dn, &count));
+	unit_eq(count, v);
+
+	mock_zap_destroy(dn);
+
+	return (MUNIT_OK);
+}
+
+/* ========== */
+
 /* Test suite definition and boilerplate. */
 
 #define	UNIT_PARAM_ZAP_TYPES(p)	\
@@ -1637,6 +1722,8 @@ static const MunitTest zap_tests[] = {
 	UNIT_TEST("norm_conflict",	test_norm_conflict, zap_type_params),
 	UNIT_TEST("norm_realname",	test_norm_realname, zap_type_params),
 	UNIT_TEST("norm_remove",	test_norm_remove, zap_type_params),
+
+	UNIT_TEST_ZAP_TYPES("zap_rewrite",	test_zap_rewrite),
 
 	{ 0 },
 };

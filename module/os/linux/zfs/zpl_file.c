@@ -1227,17 +1227,23 @@ zpl_ioctl_rewrite(struct file *filp, void __user *arg)
 	struct inode *ip = file_inode(filp);
 	zfs_rewrite_args_t args;
 	fstrans_cookie_t cookie;
+	cred_t *cr;
 	int err;
 
 	if (copy_from_user(&args, arg, sizeof (args)))
 		return (-EFAULT);
 
-	if (unlikely(!(filp->f_mode & FMODE_WRITE)))
+	/* A directory is not open for writing: see zfs_rewrite(). */
+	if (unlikely(!S_ISDIR(ip->i_mode) && !(filp->f_mode & FMODE_WRITE)))
 		return (-EBADF);
 
+	cr = CRED();
+	crhold(cr);
 	cookie = spl_fstrans_mark();
-	err = -zfs_rewrite(ITOZ(ip), args.off, args.len, args.flags, args.arg);
+	err = -zfs_rewrite(ITOZ(ip), args.off, args.len, args.flags, args.arg,
+	    cr);
 	spl_fstrans_unmark(cookie);
+	crfree(cr);
 
 	return (err);
 }
