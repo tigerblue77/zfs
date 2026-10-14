@@ -58,6 +58,7 @@ log_must zpool create $TESTPOOL mirror $disk0 $disk1
 log_must poolexists $TESTPOOL
 
 log_must zpool add -f $TESTPOOL anymirror1 $disk2 $disk3
+log_must test "$(get_pool_prop feature@anyraid $TESTPOOL)" = "active"
 
 log_must zpool status $TESTPOOL
 zpool status $TESTPOOL | grep -q "mirror-"
@@ -74,6 +75,7 @@ checksum1=$(xxh128sum /$TESTPOOL/testfile1)
 
 log_must zpool export $TESTPOOL
 log_must zpool import -d /var/tmp/testdir/sparse_files $TESTPOOL
+log_must test "$(get_pool_prop feature@anyraid $TESTPOOL)" = "active"
 
 checksum1_after=$(xxh128sum /$TESTPOOL/testfile1)
 if [ "$checksum1" != "$checksum1_after" ]; then
