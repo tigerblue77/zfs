@@ -98,7 +98,9 @@ vdev property is
 .Sy off
 is rewritten as a new block that is not deduplicated, so that it leaves
 that vdev.
-It then no longer shares space with its duplicates.
+It then no longer shares space with its duplicates, and neither does any
+other write of the same data while the property is
+.Sy off .
 .Pp
 If a
 .Fl l
