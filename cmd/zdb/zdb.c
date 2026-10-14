@@ -10327,17 +10327,6 @@ free_header(anyraid_header_t *header, uint64_t header_size) {
 	abd_free(header->ah_abd);
 }
 
-static inline uint64_t
-anyraid_header_offset(vdev_t *vd, int id)
-{
-	uint64_t full_size = VDEV_ANYRAID_SINGLE_MAP_SIZE;
-	if (id < VDEV_ANYRAID_START_COPIES)
-		return (VDEV_LABEL_START_SIZE + id * full_size);
-	else
-		return (vd->vdev_psize - VDEV_LABEL_END_SIZE -
-		    (VDEV_ANYRAID_MAP_COPIES - id) * full_size);
-}
-
 /*
  * Print one of the anyraid maps from the given vdev child. This prints the
  * mapping entries themselves, rather than the kernel's interpretation of them,
@@ -10350,14 +10339,11 @@ print_anyraid_mapping(vdev_t *vd, int child, int mapping,
 	vdev_anyraid_t *var = vd->vdev_tsd;
 	vdev_t *cvd = vd->vdev_child[child];
 	uint64_t ashift = cvd->vdev_top->vdev_ashift;
-	spa_t *spa = vd->vdev_spa;
 	int error = 0;
 	int flags = ZIO_FLAG_CONFIG_WRITER | ZIO_FLAG_CANFAIL |
 	    ZIO_FLAG_SPECULATIVE;
 
-	uint64_t header_offset = anyraid_header_offset(cvd, mapping);
 	uint64_t header_size = VDEV_ANYRAID_MAP_HEADER_SIZE(ashift);
-	uint64_t map_offset = header_offset + header_size;
 
 	nvlist_t *hnvl = header->ah_nvl;
 	// Look up and print map metadata.
@@ -10400,23 +10386,12 @@ print_anyraid_mapping(vdev_t *vd, int child, int mapping,
 	(void) printf("map length: %6u\tdisk id: %3u\n", map_length, disk_id);
 
 	// Read in and print the actual mapping data
-	zio_t *rio = zio_root(spa, NULL, NULL, flags);
-	abd_t *map_abds[VDEV_ANYRAID_MAP_COPIES] = {0};
+	abd_t *map_abds[VDEV_ANYRAID_MAP_SIZE / SPA_MAXBLOCKSIZE] = {0};
 	int i;
-	for (i = 0; i <= (map_length / SPA_MAXBLOCKSIZE); i++) {
-		zio_eck_t *cksum = (zio_eck_t *)
-		    &header->ah_buf[VDEV_ANYRAID_NVL_BYTES(ashift) +
-		    i * sizeof (*cksum)];
-		map_abds[i] = abd_alloc_linear(SPA_MAXBLOCKSIZE, B_TRUE);
-		zio_nowait(zio_read_phys(rio, cvd, map_offset +
-		    i * SPA_MAXBLOCKSIZE, SPA_MAXBLOCKSIZE, map_abds[i],
-		    ZIO_CHECKSUM_SHA256, NULL, cksum,
-		    ZIO_PRIORITY_SYNC_READ, flags, B_FALSE));
-	}
-	i--;
-	if ((error = zio_wait(rio))) {
+	if ((error = vdev_anyraid_read_map(cvd, mapping, header, map_length,
+	    map_abds, flags))) {
 		(void) printf("Could not read map: %s\n", strerror(error));
-		for (; i >= 0; i--)
+		for (i = 0; i < ARRAY_SIZE(map_abds); i++)
 			abd_free(map_abds[i]);
 		free_header(header, header_size);
 		return;
@@ -10504,7 +10479,7 @@ print_anyraid_mapping(vdev_t *vd, int child, int mapping,
 
 	var->vd_tile_size = tile_size;
 
-	for (; i >= 0; i--)
+	for (i = 0; i < ARRAY_SIZE(map_abds); i++)
 		abd_free(map_abds[i]);
 
 	return;
