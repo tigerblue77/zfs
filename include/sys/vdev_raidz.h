@@ -382,6 +382,9 @@ extern int spike_crash_arm_free;
 #define	SPIKE_RESILVER_NEW_EXTENT	2	/* need_resilver at N, t2 */
 #define	SPIKE_RESILVER_TABLE_PASS	4	/* walk the table by t2 */
 extern int spike_resilver_redirects;
+/* SPIKE: test-only, a root mirror's DTL checks at a moved copy's txg. */
+extern int spike_mirror_redirect_txg;
+extern uint64_t spike_mirror_redirect_repairs[2];
 extern int spike_redirect_move_live;
 extern int spike_redirect_keep_none;
 

@@ -673,3 +673,58 @@ entries; a condense spread over txgs (one rewrites the whole log in one
 txg); an import that finds the log due under the default policy; two raidz
 vdevs; I/O costs outside this userspace file-backed setup; and pools of
 the earlier spike formats, which are refused.
+
+## Fixes: moved blocks with a second copy
+
+A block pointer can hold several DVAs: data written with `copies=2`,
+metadata under `redundant_metadata`, and every gang header, which gets one
+copy more than its data.  Their I/O goes through the root mirror
+(`vdev_mirror_map_init()` with no vdev), which reads one DVA and, for a
+resilver, repairs each other DVA whose top-level vdev's `DTL_PARTIAL`
+holds the block's birth; `zio_vdev_io_start()` then bypasses a repair
+write on any vdev whose `DTL_PARTIAL` does not hold the write's `io_txg`.
+A DVA that a raidz vdev moved is read and repaired at N, written in t2, so
+its DTLs hold t2, not the birth t1.  A resilver read that the root mirror
+served from the other copy (a random choice when the copies are on
+different top-level vdevs) therefore left N's column on the returning
+child stale, and `dsl_scan_done()` still cleared the child's DTL: the
+block lost a level of parity without a trace.  The walk and the stopgap's
+traversal both read through that path.
+
+The root map now keeps, for each child, the txg its copy was written in
+(`vdev_mirror_child_txg()`: the new birth of a moved raidz DVA, otherwise
+the block's birth), and uses it to pick the child to read, to choose the
+children to repair, and as the `io_txg` of the repair write.  Only reads of
+blocks with more than one copy look it up.  Test-only:
+`spike_mirror_redirect_txg = 0` uses the birth again, and
+`spike_mirror_redirect_repairs` counts the repairs of moved copies, and of
+gang headers among them.
+
+    crash_probe <dir> <ashift> dva2 <P1|P2> [nomirror|stopgap|nofix]
+
+A mirror of m0 and m1 sits beside the raidz before any data is written;
+32 plain objects are written with `copies=2`, then 8 gang objects with
+`copies=1`, whose headers get two copies.  Each block whose DVA 0 is on the
+raidz and DVA 1 on the mirror is moved (the gang headers, and those of
+their children on the raidz) while child 2 is offline, with the mirror
+`noalloc` so that N lands on the raidz; then the child comes back and the
+resilver runs.  zdb must be clean, a full scrub must repair nothing, and on
+a copy of the pool's files, with DVA 1 of each moved block damaged on both
+legs and two columns of each N damaged on children other than 2, every
+object must read back, which parity 2 allows only if the resilver rebuilt
+child 2's column.  `nomirror` keeps both copies on the raidz (no copy
+read), `stopgap` sets `spike_resilver_redirects` to 3, so that the
+traversal reads the moved blocks instead of the walk, and `nofix` clears
+`spike_mirror_redirect_txg`.
+
+At ashift 12 and 9, under P1 and P2, 33 (ashift 12) or 29 (ashift 9)
+blocks with two copies were moved, 49 or 45 moves with the gang children.
+On the previous commit, the default and `stopgap` fail in all 8 runs: the
+scrub after the resilver finds 11 to 22 checksum errors and repairs 0.3 to
+0.8 MB, and as many objects return ECKSUM from the copy, gang objects among
+them in 4 runs.  With the fix and `nofix`, the 4 runs fail the same way
+(12 to 17 objects, gang objects among them in 3).  With the fix, the 8
+runs pass: the root mirror repaired 12 to 20 moved copies from the other
+copy in each resilver, 2 to 6 of them gang headers.  `nomirror` passes on
+both: with both copies on one vdev, `vdev_mirror_dva_select()` prefers
+DVA 0, the moved one.

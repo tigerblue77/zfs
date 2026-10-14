@@ -25,6 +25,7 @@
 #include <sys/dsl_scan.h>
 #include <sys/vdev_impl.h>
 #include <sys/vdev_draid.h>
+#include <sys/vdev_raidz.h>
 #include <sys/zio.h>
 #include <sys/zio_checksum.h>
 #include <sys/abd.h>
@@ -102,6 +103,7 @@ typedef struct mirror_child {
 	uint8_t		mc_skipped;
 	uint8_t		mc_speculative;
 	uint8_t		mc_rebuilding;
+	uint64_t	mc_txg;		/* SPIKE: when its copy was written */
 } mirror_child_t;
 
 typedef struct mirror_map {
@@ -249,6 +251,34 @@ vdev_mirror_rebuilding(vdev_t *vd)
 }
 
 /*
+ * SPIKE, not for merge: the txg in which the copy that child mc of a root
+ * map reads was written, for the DTL checks that pick a child to read and
+ * the children to repair.  A DVA that a raidz vdev moved is read and
+ * repaired at a new extent written in a later txg than the block's birth
+ * (vdev_raidz_io_start()), and its DTLs record that txg, not the birth.
+ * Only reads of blocks with several copies look it up: one copy is read
+ * whatever its DTL says.  spike_mirror_redirect_txg = 0 (test-only) uses
+ * the birth, as before; spike_mirror_redirect_repairs counts the repairs
+ * of moved copies, and of moved gang headers among them (test-only).
+ */
+int spike_mirror_redirect_txg = 1;
+uint64_t spike_mirror_redirect_repairs[2];
+
+static uint64_t
+vdev_mirror_child_txg(zio_t *zio, const mirror_map_t *mm,
+    const mirror_child_t *mc)
+{
+	raidz_redirect_ent_t rde;
+
+	if (!mm->mm_root || mm->mm_children < 2 ||
+	    zio->io_type != ZIO_TYPE_READ || !spike_mirror_redirect_txg ||
+	    !vdev_raidz_redirect_get(mc->mc_vd, mc->mc_offset,
+	    BP_GET_PHYSICAL_BIRTH(zio->io_bp), &rde))
+		return (zio->io_txg);
+	return (rde.rde_new_birth);
+}
+
+/*
  * Avoid inlining the function to keep vdev_mirror_io_start(), which
  * is this functions only caller, as small as possible on the stack.
  */
@@ -326,6 +356,7 @@ vdev_mirror_map_init(zio_t *zio)
 				zio->io_error = ENXIO;
 				return (NULL);
 			}
+			mc->mc_txg = vdev_mirror_child_txg(zio, mm, mc);
 		}
 	} else {
 		/*
@@ -365,6 +396,7 @@ vdev_mirror_map_init(zio_t *zio)
 			mc = &mm->mm_child[c];
 			mc->mc_vd = vd->vdev_child[c];
 			mc->mc_offset = zio->io_offset;
+			mc->mc_txg = zio->io_txg;
 
 			if (vdev_mirror_rebuilding(mc->mc_vd))
 				mm->mm_rebuilding = mc->mc_rebuilding = B_TRUE;
@@ -541,7 +573,7 @@ vdev_mirror_child_select(zio_t *zio)
 			continue;
 		}
 
-		if (vdev_mirror_child_missing(mc, txg, 1)) {
+		if (vdev_mirror_child_missing(mc, mc->mc_txg, 1)) {
 			mc->mc_error = SET_ERROR(ESTALE);
 			mc->mc_skipped = 1;
 			mc->mc_speculative = 1;
@@ -886,6 +918,8 @@ vdev_mirror_io_done(zio_t *zio)
 		 * Use the good data we have in hand to repair damaged children.
 		 */
 		for (c = 0; c < mm->mm_children; c++) {
+			zio_t *cio;
+
 			/*
 			 * Don't rewrite known good children.
 			 * Not only is it unnecessary, it could
@@ -917,18 +951,31 @@ vdev_mirror_io_done(zio_t *zio)
 				    ops != &vdev_indirect_ops &&
 				    ops != &vdev_draid_spare_ops &&
 				    !vdev_dtl_contains(mc->mc_vd, DTL_PARTIAL,
-				    zio->io_txg, 1))
+				    mc->mc_txg, 1))
 					continue;
 				mc->mc_error = SET_ERROR(ESTALE);
 			}
 
-			zio_nowait(zio_vdev_child_io(zio, zio->io_bp,
+			cio = zio_vdev_child_io(zio, zio->io_bp,
 			    mc->mc_vd, mc->mc_offset,
 			    zio->io_abd, zio->io_size, ZIO_TYPE_WRITE,
 			    zio->io_priority == ZIO_PRIORITY_REBUILD ?
 			    ZIO_PRIORITY_REBUILD : ZIO_PRIORITY_ASYNC_WRITE,
 			    ZIO_FLAG_IO_REPAIR | (unexpected_errors ?
-			    ZIO_FLAG_SELF_HEAL : 0), NULL, NULL));
+			    ZIO_FLAG_SELF_HEAL : 0), NULL, NULL);
+			/*
+			 * SPIKE: zio_vdev_io_start() bypasses a repair that
+			 * the DTL of its txg does not ask for: the copy's.
+			 */
+			if (mc->mc_txg != zio->io_txg) {
+				uint64_t *rp = spike_mirror_redirect_repairs;
+
+				cio->io_txg = mc->mc_txg;
+				atomic_inc_64(&rp[0]);
+				if (BP_IS_GANG(zio->io_bp))
+					atomic_inc_64(&rp[1]);
+			}
+			zio_nowait(cio);
 		}
 	}
 }

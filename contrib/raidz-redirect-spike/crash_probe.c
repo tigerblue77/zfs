@@ -21,6 +21,7 @@
  *   crash_probe <dir> <ashift> tomb <read|repair>
  *   crash_probe <dir> <ashift> rpass <R1|R2|R3|R4|R5|R6> <P1|P2>
  *       [none|stopgap|pass|both|noverify]
+ *   crash_probe <dir> <ashift> dva2 <P1|P2> [nomirror|stopgap|nofix]
  *
  * The parent never initializes libzpool; every phase runs in a forked child.
  * Phase 0 creates a five-wide raidz1 pool of files in <dir>, writes a plain,
@@ -147,6 +148,19 @@
  * pass (6, the default), both (7); noverify clears
  * spike_scan_redirect_verify.
  *
+ * dva2: moved blocks with a second copy on another top-level vdev.  Phase
+ * 0 adds a mirror of m0 and m1 beside the raidz before writing 32 plain
+ * objects with copies=2 and 8 gang objects (whose headers get two copies),
+ * and marks each block whose DVA 0 is on the raidz and DVA 1 on the mirror.
+ * Phase 1 takes child 2 offline, moves those blocks (the gang children on
+ * the raidz too), brings the child back and resilvers; zdb runs, a full
+ * scrub must repair nothing, and on a copy of the pool's files, with DVA 1
+ * damaged on both legs and two more columns of each new extent damaged,
+ * every object must read back.  'nomirror' keeps both
+ * copies on the raidz (no copy read); 'stopgap' sets
+ * spike_resilver_redirects to 3, so that the traversal reaches the moved
+ * blocks instead of the walk; 'nofix' clears spike_mirror_redirect_txg.
+ *
  * Prints one PASS or FAIL line per check and exits 1 if any check failed.
  */
 
@@ -245,6 +259,9 @@ extern int spike_redirect_condense_tombs __attribute__((weak));
 /* Weak: the previous step's in-memory table, absent from this one. */
 extern int vdev_raidz_redirect_add(uint64_t, uint64_t, uint64_t, uint64_t,
     uint64_t, uint64_t) __attribute__((weak));
+/* Weak: the fixes for moved blocks with other copies, absent before. */
+extern int spike_mirror_redirect_txg __attribute__((weak));
+extern uint64_t spike_mirror_redirect_repairs[2] __attribute__((weak));
 
 typedef enum policy { P1, P2, P3 } policy_t;
 static const char *const policy_names[] = { "P1", "P2", "P3" };
@@ -301,6 +318,8 @@ typedef struct shared {
 	uint64_t		sh_col_hash[MAXMOVES];	/* its bytes before */
 	uint64_t		sh_rp_window;	/* R3: the first process's */
 	int			sh_rp_freed;	/* R4: the freed move */
+	/* dva2, dva2scrub: DVA 1 of each object, to damage on the mirror */
+	uint64_t		sh_dv_off[MAXOBJS];
 } shared_t;
 
 static shared_t *sh;
@@ -4995,6 +5014,397 @@ run_rpass(const char *test, policy_t policy, int fix)
 	return (0);
 }
 
+/*
+ * dva2: moved blocks that have another copy on another top-level vdev.
+ * Phase 0 adds a mirror beside the raidz (unless nomirror) before any
+ * data is written, writes DV_NPLAIN plain objects with copies=2 and
+ * DV_NGANG gang objects with copies=1 (whose headers have two copies),
+ * and marks to move each block, or gang header, whose DVA 0 is on the
+ * raidz and DVA 1 on the mirror (on the raidz too, with nomirror).
+ */
+#define	DV_NPLAIN	32
+#define	DV_NGANG	8
+
+typedef struct dv_args {
+	policy_t	dv_policy;
+	boolean_t	dv_mirror;
+	boolean_t	dv_walk;	/* the walk runs, not the stopgap */
+} dv_args_t;
+
+static int
+child_setup_dva2(void *arg)
+{
+	dv_args_t *da = arg;
+	uint64_t want = da->dv_mirror ? 1 : 0;
+	objset_t *os;
+	spa_t *spa;
+	int n = 0;
+
+	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+	create_pool();
+	VERIFY0(spa_open(POOL, &spa, FTAG));
+	sh->sh_nfobj = 0;
+	if (da->dv_mirror)
+		add_mirror(spa);
+	VERIFY0(dsl_prop_set_int(POOL, "copies", ZPROP_SRC_LOCAL, 2));
+	VERIFY0(dmu_objset_own(POOL, DMU_OST_ANY, B_FALSE, B_TRUE, FTAG, &os));
+	for (int i = 0; i < DV_NPLAIN; i++) {
+		char name[24];
+		int f;
+
+		(void) snprintf(name, sizeof (name), "c2-%02d", i);
+		f = add_fobj(name, 100 + i, B_FALSE);
+		sh->sh_fobj[f].fo_obj = put_object(os, 100 + i);
+		txg_wait_synced(spa_get_dsl(spa), 0);
+	}
+	dmu_objset_disown(os, B_TRUE, FTAG);
+	/* A gang header gets one copy more than its data: two. */
+	VERIFY0(dsl_prop_set_int(POOL, "copies", ZPROP_SRC_LOCAL, 1));
+	metaslab_force_ganging = 100 << 10;
+	metaslab_force_ganging_pct = 100;
+	VERIFY0(dmu_objset_own(POOL, DMU_OST_ANY, B_FALSE, B_TRUE, FTAG, &os));
+	for (int i = 0; i < DV_NGANG; i++) {
+		char name[24];
+		int f;
+
+		(void) snprintf(name, sizeof (name), "g-%d", i);
+		f = add_fobj(name, 120 + i, B_FALSE);
+		sh->sh_fobj[f].fo_obj = put_object(os, 120 + i);
+		txg_wait_synced(spa_get_dsl(spa), 0);
+	}
+	metaslab_force_ganging = SPA_MAXBLOCKSIZE + 1;
+	metaslab_force_ganging_pct = 3;
+	for (int f = 0; f < sh->sh_nfobj; f++) {
+		blkptr_t bp = fobj_bp(os, f);
+
+		(void) printf("INFO %s: %d DVAs, DVA 0 on vdev %llu, DVA 1 on "
+		    "vdev %llu%s\n", sh->sh_fobj[f].fo_name, BP_GET_NDVAS(&bp),
+		    (u_longlong_t)DVA_GET_VDEV(&bp.blk_dva[0]),
+		    (u_longlong_t)DVA_GET_VDEV(&bp.blk_dva[1]),
+		    BP_IS_GANG(&bp) ? ", gang" : "");
+		if (BP_GET_NDVAS(&bp) == 2 &&
+		    DVA_GET_VDEV(&bp.blk_dva[0]) == 0 &&
+		    DVA_GET_VDEV(&bp.blk_dva[1]) == want) {
+			sh->sh_fobj[f].fo_moved = B_TRUE;
+			sh->sh_dv_off[f] = DVA_GET_OFFSET(&bp.blk_dva[1]);
+			n++;
+		}
+	}
+	print_fobjs(os);
+	dmu_objset_disown(os, B_TRUE, FTAG);
+	add_parity2_epoch(spa);
+	export_pool(spa);
+	kernel_fini();
+	(void) printf("INFO %d blocks to move have DVA 0 on the raidz and "
+	    "DVA 1 on vdev %llu\n", n, (u_longlong_t)want);
+	return (n == 0);
+}
+
+/*
+ * Move DVA 0 of every marked block: a gang header, and those of its
+ * children whose DVA 0 is on the raidz too.  N stays on the raidz.
+ */
+static void
+dv_move(spa_t *spa, policy_t policy, boolean_t mirror)
+{
+	uint64_t mguid = 0;
+	objset_t *os;
+	int err;
+
+	VERIFY0(dmu_objset_hold(POOL, FTAG, &os));
+	sh->sh_nmoves = 0;
+	for (int f = 0; f < sh->sh_nfobj; f++) {
+		fobj_t *fo = &sh->sh_fobj[f];
+		blkptr_t bp = fobj_bp(os, f);
+		int first = sh->sh_nmoves;
+		zbookmark_phys_t zb;
+		char name[32];
+
+		if (!fo->fo_moved)
+			continue;
+		SET_BOOKMARK(&zb, dmu_objset_id(os), fo->fo_obj, 0, 0);
+		if (!BP_IS_GANG(&bp)) {
+			add_move(spa, fo->fo_name, &bp, &zb, BP_GET_PSIZE(&bp));
+		} else {
+			uint64_t hp = gang_header_psize(spa);
+			zio_gbh_phys_t *gbh;
+
+			add_move(spa, fo->fo_name, &bp, &zb, hp);
+			gbh = abd_to_buf(sh->sh_rdm[sh->sh_nmoves -
+			    1].rdm_data);
+			(void) snprintf(name, sizeof (name), "%s child",
+			    fo->fo_name);
+			for (int k = 0; k < gbh_nblkptrs(hp); k++) {
+				blkptr_t *cbp = gbh_bp(gbh, k);
+
+				if (BP_IS_HOLE(cbp) ||
+				    DVA_GET_VDEV(&cbp->blk_dva[0]) != 0)
+					continue;
+				add_move(spa, name, cbp, &zb,
+				    BP_GET_PSIZE(cbp));
+			}
+		}
+		for (int i = first; i < sh->sh_nmoves; i++)
+			sh->sh_owner[i] = f;
+	}
+	dmu_objset_rele(os, FTAG);
+	if (mirror) {
+		mguid = spa->spa_root_vdev->vdev_child[1]->vdev_guid;
+		VERIFY0(spa_vdev_noalloc(spa, mguid));
+	}
+	err = do_move(spa, policy, B_FALSE);
+	if (mirror)
+		VERIFY0(spa_vdev_alloc(spa, mguid));
+	check(err == 0, "the move of %d blocks under %s returns 0 (%d)",
+	    sh->sh_nmoves, policy_names[policy], err);
+	for (int i = 0; i < sh->sh_nmoves; i++) {
+		print_move(i);
+		check(sh->sh_rdm[i].rdm_error == 0 &&
+		    sh->sh_rdm[i].rdm_ent.rde_new_asize != 0,
+		    "%s moved", sh->sh_name[i]);
+	}
+}
+
+/*
+ * dva2, phase 1: child 2 offline, the marked blocks moved, child 2 back
+ * and resilvered.
+ */
+static int
+child_dva2_resilver(void *arg)
+{
+	dv_args_t *da = arg;
+	spike_scan_pass_stat_t *st;
+	rp_leafstat_t b, a, bm, am, bc, ac;
+	pool_scan_stat_t ps;
+	vdev_state_t ns;
+	vdev_t *cvd;
+	uint64_t t0, t2;
+	spa_t *spa;
+
+	failures = 0;	/* this phase's own checks */
+	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+	st = rp_walk();
+	spa = import_pool();
+	cvd = spa->spa_root_vdev->vdev_child[0]->vdev_child[RS_CHILD];
+	sh->sh_watch = RS_CHILD;
+	VERIFY0(vdev_offline(spa, cvd->vdev_guid, 0));
+	dv_move(spa, da->dv_policy, da->dv_mirror);
+	for (int k = 0; k < 3; k++) {
+		dirty_txg(spa);
+		txg_wait_synced(spa_get_dsl(spa), 0);
+	}
+	t2 = sh->sh_rdm[0].rdm_ent.rde_new_birth;
+	check(vdev_dtl_contains(cvd, DTL_MISSING, t2, 1), "child %d's "
+	    "DTL_MISSING holds the move's txg %llu", RS_CHILD,
+	    (u_longlong_t)t2);
+	b = rp_stat(spa, -1);
+	bm = rp_stat(spa, da->dv_mirror ? 1 : 0);
+	memset(&bc, 0, sizeof (bc));
+	spa_config_enter(spa, SCL_VDEV, FTAG, RW_READER);
+	rp_leaves(cvd, &bc);
+	spa_config_exit(spa, SCL_VDEV, FTAG);
+	t0 = spa_last_synced_txg(spa);
+	if (spike_mirror_redirect_repairs != NULL)
+		memset(spike_mirror_redirect_repairs, 0, 2 * sizeof (uint64_t));
+	VERIFY0(vdev_online(spa, cvd->vdev_guid, 0, &ns));
+	rs_wait(spa, rs_offline_done, &ps);
+	check(ps.pss_func == POOL_SCAN_RESILVER &&
+	    ps.pss_state == DSS_FINISHED && ps.pss_errors == 0 &&
+	    rs_offline_done(spa), "the resilver of child %d finished with no "
+	    "error and cleared its DTL", RS_CHILD);
+	a = rp_stat(spa, -1);
+	rp_measure(spa, "resilver", &ps, &b, &a,
+	    spa_last_synced_txg(spa) - t0);
+	rp_print_walk("resilver");
+	if (spike_mirror_redirect_repairs != NULL) {
+		/* A moved copy repaired from the other one, read first. */
+		(void) printf("MEASURE root mirror repairs of moved copies "
+		    "during the resilver: %llu, gang headers %llu\n",
+		    (u_longlong_t)spike_mirror_redirect_repairs[0],
+		    (u_longlong_t)spike_mirror_redirect_repairs[1]);
+	}
+	if (st != NULL && da->dv_walk) {
+		check(st->sps_in_window == sh->sh_nmoves &&
+		    st->sps_done_txg != 0, "the walk found the %d moved blocks "
+		    "(%llu)", sh->sh_nmoves, (u_longlong_t)st->sps_in_window);
+	}
+	memset(&ac, 0, sizeof (ac));
+	spa_config_enter(spa, SCL_VDEV, FTAG, RW_READER);
+	rp_leaves(cvd, &ac);
+	spa_config_exit(spa, SCL_VDEV, FTAG);
+	(void) printf("MEASURE raidz child %d during the resilver: "
+	    "write_bytes=%llu\n", RS_CHILD,
+	    (u_longlong_t)(ac.rl_wr_bytes - bc.rl_wr_bytes));
+	if (da->dv_mirror) {
+		am = rp_stat(spa, 1);
+		(void) printf("MEASURE mirror leaves during the resilver: "
+		    "read_bytes=%llu read_ops=%llu processed=%llu healed=%llu "
+		    "cksum=%llu\n",
+		    (u_longlong_t)(am.rl_rd_bytes - bm.rl_rd_bytes),
+		    (u_longlong_t)(am.rl_rd_ops - bm.rl_rd_ops),
+		    (u_longlong_t)am.rl_processed, (u_longlong_t)am.rl_healed,
+		    (u_longlong_t)(am.rl_cksum - bm.rl_cksum));
+		check(am.rl_processed == 0 && am.rl_healed == 0 &&
+		    am.rl_cksum == bm.rl_cksum, "the resilver repaired "
+		    "nothing on the mirror");
+	}
+	export_pool(spa);
+	kernel_fini();
+	return (failures == 0 ? 0 : 1);
+}
+
+/* Invert the first sector of DVA 1 of each moved object on mirror leg m. */
+static int
+dv_damage_mirror(int m)
+{
+	char path[PATH_BUF];
+	uint64_t size = 1ULL << ashift;
+	uint8_t *buf = malloc(size);
+	int fd, n = 0;
+
+	(void) snprintf(path, sizeof (path), "%s/m%d", dir, m);
+	fd = open(path, O_RDWR);
+	VERIFY3S(fd, !=, -1);
+	for (int f = 0; f < sh->sh_nfobj; f++) {
+		uint64_t off = sh->sh_dv_off[f] + VDEV_LABEL_START_SIZE;
+
+		if (!sh->sh_fobj[f].fo_moved)
+			continue;
+		VERIFY3S(pread(fd, buf, size, off), ==, size);
+		for (uint64_t k = 0; k < size; k++)
+			buf[k] = ~buf[k];
+		VERIFY3S(pwrite(fd, buf, size, off), ==, size);
+		n++;
+	}
+	(void) fsync(fd);
+	(void) close(fd);
+	free(buf);
+	return (n);
+}
+
+/*
+ * dva2, phase 3, on a copy of the pool's files taken after the resilver:
+ * DVA 1 of each moved block damaged on both mirror legs, and two columns of
+ * each new extent damaged on children other than 2.  A moved block then
+ * reads back only from N, and only if the resilver rebuilt child 2's column
+ * of it: parity 2 covers two lost columns, not three.
+ */
+static int
+child_dva2_read(void *arg)
+{
+	(void) arg;
+	int on2 = 0, legs;
+	spa_t *spa;
+
+	failures = 0;	/* this phase's own checks */
+	kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+	for (int i = 0; i < sh->sh_nmoves; i++) {
+		zio_t zio;
+		raidz_map_t *rm;
+		raidz_row_t *rr;
+		boolean_t has2 = B_FALSE;
+		int n = 0;
+
+		rm = rs_map(&zio, sh->sh_rdm[i].rdm_ent.rde_new_offset,
+		    sh->sh_rdm[i].rdm_psize, 2);
+		rr = rm->rm_row[0];
+		for (int c = 0; c < rr->rr_cols; c++) {
+			const raidz_col_t *rc = &rr->rr_col[c];
+			uint8_t *buf;
+
+			if (rc->rc_size == 0)
+				continue;
+			if (rc->rc_devidx == RS_CHILD) {
+				has2 = B_TRUE;
+				continue;
+			}
+			if (n == 2)
+				continue;
+			buf = malloc(rc->rc_size);
+			rs_col_io(rc, buf, B_FALSE);
+			for (uint64_t k = 0; k < rc->rc_size; k++)
+				buf[k] = ~buf[k];
+			rs_col_io(rc, buf, B_TRUE);
+			free(buf);
+			n++;
+		}
+		(void) printf("INFO %s: its new extent has %d columns, %s on "
+		    "child %d; %d damaged\n", sh->sh_name[i], (int)rr->rr_cols,
+		    has2 ? "one" : "none", RS_CHILD, n);
+		on2 += has2;
+		rs_map_free(&zio, rm);
+	}
+	legs = dv_damage_mirror(0);
+	VERIFY3S(dv_damage_mirror(1), ==, legs);
+	(void) printf("INFO damaged DVA 1 of %d moved blocks on both legs, "
+	    "and two columns, not on child %d, of %d new extents (%d of them "
+	    "have a column on child %d)\n", legs, RS_CHILD, sh->sh_nmoves,
+	    on2, RS_CHILD);
+	spa = import_pool();
+	check_others_read();
+	export_pool(spa);
+	kernel_fini();
+	return (failures == 0 ? 0 : 1);
+}
+
+/* dva2, phase 2: a scrub must find nothing to repair. */
+static int
+child_dva2_scrub(void *arg)
+{
+	failures = 0;	/* this phase's own checks */
+	return (child_rp_scrub(arg));
+}
+
+static int
+run_dva2(policy_t policy, const char *variant)
+{
+	dv_args_t da = { policy, B_TRUE, B_TRUE };
+	char copy[PATH_BUF];
+	const char *orig = dir;
+	int st;
+
+	(void) printf("INFO dva2 %s, policy %s, ashift %llu\n",
+	    variant != NULL ? variant : "default", policy_names[policy],
+	    (u_longlong_t)ashift);
+	if (vdev_raidz_redirect_move == NULL)
+		return (2);
+	if (variant != NULL && strcmp(variant, "nomirror") == 0) {
+		da.dv_mirror = B_FALSE;
+	} else if (variant != NULL && strcmp(variant, "stopgap") == 0) {
+		/* The traversal reaches the moved blocks, not the walk. */
+		rs_set_fix(SPIKE_RESILVER_WIDEN | SPIKE_RESILVER_NEW_EXTENT);
+		da.dv_walk = B_FALSE;
+	} else if (variant != NULL && strcmp(variant, "nofix") == 0) {
+		if (&spike_mirror_redirect_txg == NULL) {
+			(void) printf("INFO this libzpool has no "
+			    "spike_mirror_redirect_txg\n");
+		} else {
+			spike_mirror_redirect_txg = 0;
+			(void) printf("INFO spike_mirror_redirect_txg=0\n");
+		}
+	}
+	st = phase("0 setup", child_setup_dva2, &da);
+	check(st == 0, "the setup has blocks to move (status %d)", st);
+	if (st != 0)
+		return (0);
+	st = phase("1 move and resilver", child_dva2_resilver, &da);
+	check(st == 0, "the move and resilver phase passes (status %d)", st);
+	run_zdb();
+	(void) snprintf(copy, sizeof (copy), "%s/copy", orig);
+	rp_copy_dir = copy;
+	if (da.dv_mirror)
+		rp_copy();
+	st = phase("2 scrub", child_dva2_scrub, NULL);
+	check(st == 0, "the scrub phase passes (status %d)", st);
+	if (!da.dv_mirror)
+		return (0);
+	dir = copy;
+	st = phase("3 read from the new extents", child_dva2_read, NULL);
+	dir = orig;
+	check(st == 0, "the read phase passes (status %d)", st);
+	return (0);
+}
+
 static int
 parse_point(const char *s)
 {
@@ -5038,7 +5448,9 @@ usage(void)
 	    "       crash_probe <dir> <ashift> corrupt <kind> [P1|P2] [lax]\n"
 	    "       crash_probe <dir> <ashift> tomb <read|repair>\n"
 	    "       crash_probe <dir> <ashift> rpass <R1|R2|R3|R4|R5|R6> "
-	    "<P1|P2> [none|stopgap|pass|both|noverify]\n");
+	    "<P1|P2> [none|stopgap|pass|both|noverify]\n"
+	    "       crash_probe <dir> <ashift> dva2 <P1|P2> "
+	    "[nomirror|stopgap|nofix]\n");
 	return (2);
 }
 
@@ -5176,6 +5588,14 @@ main(int argc, char **argv)
 			return (usage());
 		}
 		st = run_rpass(argv[4], policy, fix);
+	} else if (strcmp(mode, "dva2") == 0 && argc <= 6) {
+		const char *v = argc == 6 ? argv[5] : NULL;
+
+		policy = parse_policy(argv[4], B_FALSE);
+		if (policy == -1 || (v != NULL && strcmp(v, "nomirror") != 0 &&
+		    strcmp(v, "stopgap") != 0 && strcmp(v, "nofix") != 0))
+			return (usage());
+		st = run_dva2(policy, v);
 	} else if (strcmp(mode, "stalebp") == 0) {
 		boolean_t same = B_FALSE, nolive = B_FALSE;
 
