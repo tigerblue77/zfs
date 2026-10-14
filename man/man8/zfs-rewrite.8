@@ -18,7 +18,7 @@
 .
 .Sh NAME
 .Nm zfs-rewrite
-.Nd rewrite specified files and volumes without modification
+.Nd rewrite specified files, directories and volumes without modification
 .Sh SYNOPSIS
 .Nm zfs
 .Cm rewrite
@@ -76,10 +76,12 @@ Rewrite at most this number of bytes.
 .It Fl o Ar offset
 Start at this offset in bytes.
 .It Fl r
-Recurse into directories.
+Recurse into directories, and rewrite the directories themselves,
+the given ones included.
 This has no effect on a volume.
+.No See Sx NOTES .
 .It Fl v
-Print names of all successfully rewritten files and volumes.
+Print names of all successfully rewritten files, directories and volumes.
 .It Fl x
 Don't cross file system mount points when recursing.
 This has no effect on a volume.
@@ -135,18 +137,35 @@ do not fit in its dnode, such as extended attributes stored with
 .Sy xattr Ns = Ns Sy sa ,
 and the block that holds its dnode, with the other dnodes in that block.
 A rewrite of the whole of a volume also rewrites the block that holds its dnode.
+.Pp
+With
+.Fl r ,
+each directory reached is rewritten as a whole: the blocks that hold its
+entries, and as for a file, its spill block and the block that holds its dnode.
+The changes to it that add or free blocks, and all changes to a small
+directory, wait while a part of these blocks is read, a part of at most 1 MiB
+at a time.
+Directories are not rewritten when
+.Fl l
+or
+.Fl o
+is given, which only apply to files.
+Rewriting a directory needs the permission to add entries to it, since it can
+not be opened for writing.
+.Pp
 The
 .Fl A
 and
 .Fl S
-flags apply to these blocks as to the others.
+flags apply to the spill blocks, the blocks that hold dnodes, and the blocks of
+directories, as to the others.
 The
 .Fl P
 flag does not: as they are metadata, they are rewritten with a new birth time,
 and incremental
 .Nm zfs Cm send
-streams then include the dnodes in the rewritten dnode blocks and the spill
-blocks, but no data.
+streams then include the dnodes in the rewritten dnode blocks, and the
+rewritten spill blocks and blocks of directories, but no file data.
 .Pp
 A volume is given by its dataset name, such as
 .Ar pool/volume ,
@@ -184,8 +203,10 @@ property is set to
 rewriting the files and volumes with
 .Fl A
 moves their blocks off it, data, indirect and spill blocks, and the blocks that
-hold their dnodes, without reading or writing the blocks that are elsewhere
-already.
+hold their dnodes, and with
+.Fl r
+the blocks of the directories, without reading or writing the blocks that are
+elsewhere already.
 A gang block is always rewritten, since the vdevs of its parts are not looked
 at.
 A vdev that is being removed does not count, since the removal copies its data
@@ -193,8 +214,11 @@ anyway.
 The blocks that other flags skip stay where they are, and so do the old copies
 that snapshots, or other files that a block was cloned to, still refer to,
 until these are destroyed or rewritten as well.
-Only the blocks of the files and volumes themselves are rewritten: other
-metadata, such as directories, may remain on the vdev.
+Only the blocks of the files, directories and volumes themselves are
+rewritten: other metadata, such as the objects that a file system keeps for
+itself, or the extended attributes stored in hidden directories with
+.Sy xattr Ns = Ns Sy dir ,
+may remain on the vdev.
 .
 .Sh SEE ALSO
 .Xr vdevprops 7 ,
