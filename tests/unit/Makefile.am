@@ -185,8 +185,8 @@ nodist_%C%_test_indirect_mapping_SOURCES = \
 	%D%/test_indirect_mapping.c
 
 %C%_test_indirect_mapping_LDADD = \
-	libspl.la \
-	libunit.la
+	libunit.la \
+	libspl.la
 
 
 %C%_test_nvpair_stress_CFLAGS = $(AM_CFLAGS) $(LIBTIRPC_CFLAGS)
