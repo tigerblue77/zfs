@@ -1540,15 +1540,19 @@ const zio_vsd_ops_t vdev_anyraid_vsd_ops = {
 
 /*
  * Create the tile for a write to a part of the vdev that has none yet.  The
- * caller holds vd_lock as writer.
+ * caller holds vd_lock as writer.  The tile map that holds the new tile is
+ * written in the txg that is syncing, or in the txg of the write if that is
+ * later, and vdev_anyraid_mapped() counts from there.
  */
 static anyraid_tile_t *
-anyraid_tile_create(vdev_anyraid_t *va, uint64_t tile_id, avl_index_t where)
+anyraid_tile_create(vdev_anyraid_t *va, uint64_t tile_id, avl_index_t where,
+    uint64_t txg)
 {
 	ASSERT(RW_WRITE_HELD(&va->vd_lock));
 	zfs_dbgmsg("Allocating tile %llu", (u_longlong_t)tile_id);
 	anyraid_tile_t *tile = kmem_alloc(sizeof (*tile), KM_SLEEP);
 	tile->at_tile_id = tile_id;
+	tile->at_synced = txg;
 	list_create(&tile->at_list, sizeof (anyraid_tile_node_t),
 	    offsetof(anyraid_tile_node_t, atn_node));
 
@@ -1631,7 +1635,8 @@ vdev_anyraid_io_start(zio_t *zio)
 	}
 	if (tile == NULL) {
 		ASSERT(write);
-		tile = anyraid_tile_create(va, start_tile_id, where);
+		tile = anyraid_tile_create(va, start_tile_id, where,
+		    MAX(zio->io_txg, spa_syncing_txg(vd->vdev_spa)));
 	}
 
 	int n = 0;
