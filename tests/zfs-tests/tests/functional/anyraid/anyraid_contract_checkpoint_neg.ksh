@@ -39,6 +39,20 @@
 # 4. Discard checkpoint
 # 5. Verify contraction now succeeds
 #
+# Sizes, in tiles of 64 MiB:
+# - A disk gives up a little over 260 MiB to its labels and the 4 copies of
+#   the tile map, which leaves room for 16 tiles on a 1300 MiB disk.
+# - A tile goes to the two disks with the most free slots, the lowest ids
+#   first, so on 4 disks of one size the tiles alternate between disks 0 and 1
+#   and disks 2 and 3. Disk 3 can then only give its slots to disks 0 and 1,
+#   which hold half the tiles already.
+# - How many tiles the writes map is not a constant of the test: every
+#   allocator fills metaslabs, and so maps tiles, of its own, and a metaslab is
+#   no larger than a tile here. The 1 MiB file mapped 9 tiles at 4 allocators
+#   in some runs and 10 in others. 10 do not fit on the 7 slots that 768 MiB
+#   disks have: disks 0 and 1 hold 5 each, which leaves them 4 free slots for
+#   the 5 tiles of disk 3.
+#
 
 verify_runnable "global"
 
@@ -52,7 +66,7 @@ cleanup() {
 log_onexit cleanup
 
 log_note "DEBUG: creating sparse files"
-log_must truncate -s 768M $TEST_BASE_DIR/vdev_file.{0,1,2,3}
+log_must truncate -s 1300M $TEST_BASE_DIR/vdev_file.{0,1,2,3}
 
 log_note "DEBUG: setting tile size to 64MiB"
 set_tunable64 ANYRAID_MIN_TILE_SIZE 67108864
