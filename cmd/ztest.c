@@ -421,6 +421,7 @@ ztest_func_t ztest_dmu_commit_callbacks;
 ztest_func_t ztest_zap;
 ztest_func_t ztest_zap_parallel;
 ztest_func_t ztest_zap_rewrite;
+ztest_func_t ztest_meta_rewrite;
 ztest_func_t ztest_zil_commit;
 ztest_func_t ztest_zil_remount;
 ztest_func_t ztest_dmu_read_write_zcopy;
@@ -477,6 +478,7 @@ static ztest_info_t ztest_info[] = {
 	ZTI_INIT(ztest_zap, 30, &zopt_always),
 	ZTI_INIT(ztest_zap_parallel, 100, &zopt_always),
 	ZTI_INIT(ztest_zap_rewrite, 10, &zopt_always),
+	ZTI_INIT(ztest_meta_rewrite, 1, &zopt_often),
 	ZTI_INIT(ztest_split_pool, 1, &zopt_sometimes),
 	ZTI_INIT(ztest_zil_commit, 1, &zopt_incessant),
 	ZTI_INIT(ztest_zil_remount, 1, &zopt_sometimes),
@@ -6122,13 +6124,48 @@ ztest_zap_rewrite(ztest_ds_t *zd, uint64_t id)
 	    ZFS_REWRITE_VALID_FLAGS;
 
 	VERIFY0(dnode_hold(os, object, FTAG, &dn));
-	error = zap_rewrite_by_dnode(dn, flags, NULL, NULL);
+	error = zap_rewrite_by_dnode(dn, flags, NULL);
 	dnode_rele(dn, FTAG);
 
 	if (error == ENOSPC)
 		ztest_record_enospc(FTAG);
 	else
 		ASSERT(error == 0 || error == EDQUOT || error == EIO);
+}
+
+/*
+ * Rewrite the blocks of the meta-dnode while other threads allocate, free and
+ * dirty dnodes, then ask for the block of the objset to be rewritten.
+ */
+void
+ztest_meta_rewrite(ztest_ds_t *zd, uint64_t id)
+{
+	(void) id;
+	objset_t *os = zd->zd_os;
+	dmu_rewrite_stats_t drs = { 0 };
+	uint64_t blkid = 0;
+	uint64_t flags;
+	dmu_tx_t *tx;
+	int error;
+
+	flags = ztest_random(ZFS_REWRITE_VALID_FLAGS + 1) &
+	    ZFS_REWRITE_VALID_FLAGS;
+
+	error = dmu_rewrite_meta_dnode(os, &blkid, flags, 0, &drs);
+	if (error == ENOSPC) {
+		ztest_record_enospc(FTAG);
+		return;
+	}
+	ASSERT(error == 0 || error == EDQUOT || error == EIO);
+	if (error != 0)
+		return;
+	VERIFY3U(blkid, ==, UINT64_MAX);
+
+	tx = dmu_tx_create(os);
+	if (ztest_tx_assign(tx, DMU_TX_WAIT, FTAG) == 0)
+		return;
+	(void) dmu_objset_rewrite_used(os, flags, tx);
+	dmu_tx_commit(tx);
 }
 
 /*
