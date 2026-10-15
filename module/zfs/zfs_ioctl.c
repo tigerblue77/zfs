@@ -160,6 +160,7 @@
 #include <sys/zfs_quota.h>
 #include <sys/zfs_vfsops.h>
 #include <sys/zfs_znode.h>
+#include <sys/zfs_vnops.h>
 #include <sys/zap.h>
 #include <sys/spa.h>
 #include <sys/spa_impl.h>
@@ -5178,6 +5179,170 @@ zfs_ioc_zvol_rewrite(const char *name, nvlist_t *innvl, nvlist_t *outnvl)
 }
 
 /*
+ * Refuse to rewrite the dataset name what zvol_rewrite() refuses for a volume,
+ * for which *zvolp is set instead.
+ */
+static int
+zfs_dataset_rewrite_check(const char *name, uint64_t flags, boolean_t *zvolp)
+{
+	dsl_pool_t *dp;
+	dsl_dataset_t *ds;
+	objset_t *os;
+	uint64_t readonly = 0;
+	int error;
+
+	*zvolp = B_FALSE;
+	error = dsl_pool_hold(name, FTAG, &dp);
+	if (error != 0)
+		return (error);
+	/* Without its key, an encrypted dataset can not be written to. */
+	error = dsl_dataset_hold_flags(dp, name, DS_HOLD_FLAG_DECRYPT, FTAG,
+	    &ds);
+	if (error != 0) {
+		dsl_pool_rele(dp, FTAG);
+		return (error);
+	}
+	error = dmu_objset_from_ds(ds, &os);
+	if (error == 0) {
+		if (dmu_objset_type(os) == DMU_OST_ZVOL)
+			*zvolp = B_TRUE;
+		else if (dmu_objset_type(os) != DMU_OST_ZFS)
+			error = SET_ERROR(ENOTSUP);
+		else if (dmu_objset_is_snapshot(os))
+			error = SET_ERROR(EROFS);
+		else if (DS_IS_INCONSISTENT(ds))
+			error = SET_ERROR(EBUSY);
+		else if (dsl_dataset_feature_is_active(ds,
+		    SPA_FEATURE_REDACTED_DATASETS) ||
+		    dsl_dir_incompatible_encryption_version(ds->ds_dir))
+			error = SET_ERROR(EROFS);
+		else if ((flags & ZFS_REWRITE_PHYSICAL) &&
+		    !spa_feature_is_enabled(dp->dp_spa,
+		    SPA_FEATURE_PHYSICAL_REWRITE))
+			error = SET_ERROR(ENOTSUP);
+		/* See zvol_rewrite(): raw incremental streams. */
+		else if ((flags & ZFS_REWRITE_PHYSICAL) && os->os_encrypted)
+			error = SET_ERROR(ENOTSUP);
+		else if ((error = dsl_prop_get_ds(ds,
+		    zfs_prop_to_name(ZFS_PROP_READONLY), 8, 1, &readonly,
+		    NULL)) == 0 && readonly != 0)
+			error = SET_ERROR(EROFS);
+	}
+	dsl_dataset_rele_flags(ds, DS_HOLD_FLAG_DECRYPT, FTAG);
+	dsl_pool_rele(dp, FTAG);
+	return (error);
+}
+
+/*
+ * Rewrite a file system as-is without modification: all its objects, so
+ * that their blocks are reallocated as if they were read and written back,
+ * the objects of its own and those no path reaches included, then the blocks
+ * of its dnodes, its accounting objects and its objset.  This is done in
+ * steps, each call doing about 64 MiB or a second of it, so that a mounted
+ * file system is entered, and an unmounted one owned, for that long at most;
+ * see zfs_rewrite_fs().  A volume is rewritten whole by zvol_rewrite().
+ *
+ * innvl: {
+ *     "rewrite_flags" -> uint64_t (optional, ZFS_REWRITE_* flags)
+ *     "rewrite_cursor" -> nvlist (optional, from the previous call)
+ * }
+ *
+ * outnvl: {
+ *     "rewrite_cursor" -> nvlist (absent once the rewrite is done)
+ *     "rewrite_objects" -> uint64_t (objects rewritten)
+ *     "rewrite_marked" -> uint64_t (bytes marked for rewrite)
+ *     "rewrite_shared" -> uint64_t (blocks left alone: snapshots share them)
+ *     "rewrite_cloned" -> uint64_t (blocks left alone: they are cloned)
+ *     "rewrite_unlinked" -> uint64_t (objects left alone: unlinked)
+ *     "rewrite_other" -> uint64_t (objects left alone: of other types)
+ * }
+ */
+static const zfs_ioc_key_t zfs_keys_dataset_rewrite[] = {
+	{DATASET_REWRITE_FLAGS,		DATA_TYPE_UINT64,	ZK_OPTIONAL},
+	{DATASET_REWRITE_CURSOR,	DATA_TYPE_NVLIST,	ZK_OPTIONAL},
+};
+
+static int
+zfs_ioc_dataset_rewrite(const char *name, nvlist_t *innvl, nvlist_t *outnvl)
+{
+	zfs_rewrite_fs_t zrf = { 0 };
+	nvlist_t *cursor;
+	zfsvfs_t *zfsvfs;
+	boolean_t zvol;
+	objset_t *os;
+	int error;
+
+	if (innvl != NULL) {
+		(void) nvlist_lookup_uint64(innvl, DATASET_REWRITE_FLAGS,
+		    &zrf.zrf_flags);
+		if (nvlist_lookup_nvlist(innvl, DATASET_REWRITE_CURSOR,
+		    &cursor) == 0 &&
+		    (nvlist_lookup_uint64(cursor, "phase", &zrf.zrf_phase) ||
+		    nvlist_lookup_uint64(cursor, "object", &zrf.zrf_object) ||
+		    nvlist_lookup_uint64(cursor, "offset", &zrf.zrf_offset)))
+			return (SET_ERROR(EINVAL));
+	}
+	if ((zrf.zrf_flags & ~ZFS_REWRITE_VALID_FLAGS) != 0 ||
+	    zrf.zrf_phase >= ZFS_REWRITE_FS_DONE)
+		return (SET_ERROR(EINVAL));
+
+	error = zfs_dataset_rewrite_check(name, zrf.zrf_flags, &zvol);
+	if (error != 0)
+		return (error);
+	if (zvol)
+		return (zvol_rewrite(name, 0, 0, zrf.zrf_flags));
+
+	if (getzfsvfs(name, &zfsvfs) == 0) {
+		if (zfs_enter(zfsvfs, FTAG) != 0) {
+			error = SET_ERROR(EBUSY);
+		} else {
+			if (zfs_is_readonly(zfsvfs))
+				error = SET_ERROR(EROFS);
+			else
+				error = zfs_rewrite_fs(zfsvfs, zfsvfs->z_os,
+				    &zrf);
+			zfs_exit(zfsvfs, FTAG);
+		}
+		zfs_vfs_rele(zfsvfs);
+	} else {
+		/* A mount meanwhile fails with EBUSY, for this step only. */
+		error = dmu_objset_own(name, DMU_OST_ZFS, B_FALSE, B_TRUE,
+		    FTAG, &os);
+		if (error == 0) {
+			/* A log not replayed yet may refer to freed blocks. */
+			if (os->os_zil_header.zh_flags & ZIL_REPLAY_NEEDED)
+				error = SET_ERROR(EBUSY);
+			else
+				error = zfs_rewrite_fs(NULL, os, &zrf);
+			dmu_objset_disown(os, B_TRUE, FTAG);
+		}
+	}
+
+	if (zrf.zrf_phase != ZFS_REWRITE_FS_DONE) {
+		cursor = fnvlist_alloc();
+		fnvlist_add_uint64(cursor, "phase", zrf.zrf_phase);
+		fnvlist_add_uint64(cursor, "object", zrf.zrf_object);
+		fnvlist_add_uint64(cursor, "offset", zrf.zrf_offset);
+		fnvlist_add_nvlist(outnvl, DATASET_REWRITE_CURSOR, cursor);
+		fnvlist_free(cursor);
+	}
+	fnvlist_add_uint64(outnvl, DATASET_REWRITE_OBJECTS, zrf.zrf_objects);
+	fnvlist_add_uint64(outnvl, DATASET_REWRITE_MARKED,
+	    zrf.zrf_stats.drs_marked);
+	fnvlist_add_uint64(outnvl, DATASET_REWRITE_SHARED,
+	    zrf.zrf_stats.drs_shared);
+	fnvlist_add_uint64(outnvl, DATASET_REWRITE_CLONED,
+	    zrf.zrf_stats.drs_cloned);
+	fnvlist_add_uint64(outnvl, DATASET_REWRITE_UNLINKED, zrf.zrf_unlinked);
+	fnvlist_add_uint64(outnvl, DATASET_REWRITE_OTHER, zrf.zrf_other);
+
+	/* Report damaged data as I/O does. */
+	if (error == ECKSUM)
+		error = SET_ERROR(EIO);
+	return (error);
+}
+
+/*
  * fsname is name of dataset to rollback (to most recent snapshot)
  *
  * innvl may contain name of expected target snapshot
@@ -8282,6 +8447,12 @@ zfs_ioctl_init(void)
 	    zfs_ioc_zvol_rewrite, zfs_secpolicy_config, DATASET_NAME,
 	    POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY, B_TRUE, B_TRUE,
 	    zfs_keys_zvol_rewrite, ARRAY_SIZE(zfs_keys_zvol_rewrite));
+
+	/* Called once per step: not logged in the history each time. */
+	zfs_ioctl_register("dataset_rewrite", ZFS_IOC_DATASET_REWRITE,
+	    zfs_ioc_dataset_rewrite, zfs_secpolicy_config, DATASET_NAME,
+	    POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY, B_FALSE, B_TRUE,
+	    zfs_keys_dataset_rewrite, ARRAY_SIZE(zfs_keys_dataset_rewrite));
 
 	/* IOCTLS that use the legacy function signature */
 

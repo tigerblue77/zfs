@@ -1536,30 +1536,39 @@ dmu_write_by_dnode(dnode_t *dn, uint64_t offset, uint64_t size,
 
 /*
  * Decide from its block pointer whether a rewrite leaves a block alone.  The
- * pointer may be slightly stale, but that is OK for the advisory use.
+ * pointer may be slightly stale, but that is OK for the advisory use.  If
+ * stats is not NULL, a block that only ZFS_REWRITE_SKIP_SNAPSHOT or
+ * ZFS_REWRITE_SKIP_BRT leaves alone is counted there.
  */
 static boolean_t
-dmu_rewrite_skip(objset_t *os, const blkptr_t *bp, uint64_t flags)
+dmu_rewrite_skip(objset_t *os, const blkptr_t *bp, uint64_t flags,
+    dmu_rewrite_stats_t *stats)
 {
 	if (BP_IS_HOLE(bp))
 		return (B_TRUE);
-
-	if (flags & ZFS_REWRITE_SKIP_SNAPSHOT) {
-		if (dmu_objset_block_is_shared(os, bp))
-			return (B_TRUE);
-	}
-
-	/* Only data blocks are cloned. */
-	if ((flags & ZFS_REWRITE_SKIP_BRT) && !BP_IS_METADATA(bp)) {
-		if (brt_maybe_exists(os->os_spa, bp))
-			return (B_TRUE);
-	}
 
 	/* The parts of a gang block may be anywhere: rewrite it. */
 	if (flags & ZFS_REWRITE_SKIP_ALLOCATING) {
 		if (!BP_IS_GANG(bp) &&
 		    !vdev_bp_has_noalloc_dva(os->os_spa, bp))
 			return (B_TRUE);
+	}
+
+	if (flags & ZFS_REWRITE_SKIP_SNAPSHOT) {
+		if (dmu_objset_block_is_shared(os, bp)) {
+			if (stats != NULL)
+				stats->drs_shared++;
+			return (B_TRUE);
+		}
+	}
+
+	/* Only data blocks are cloned. */
+	if ((flags & ZFS_REWRITE_SKIP_BRT) && !BP_IS_METADATA(bp)) {
+		if (brt_maybe_exists(os->os_spa, bp)) {
+			if (stats != NULL)
+				stats->drs_cloned++;
+			return (B_TRUE);
+		}
 	}
 
 	return (B_FALSE);
@@ -1641,7 +1650,7 @@ dmu_rewrite_find_ind(dnode_t *dn, dmu_buf_impl_t *db, uint64_t flags,
 			return (NULL);
 
 		if (dmu_rewrite_get_db_bp(db, &bp) &&
-		    !dmu_rewrite_skip(dn->dn_objset, &bp, flags)) {
+		    !dmu_rewrite_skip(dn->dn_objset, &bp, flags, NULL)) {
 			dbuf_add_ref(db, FTAG);
 			return (db);
 		}
@@ -1666,9 +1675,16 @@ dmu_rewrite_find_ind(dnode_t *dn, dmu_buf_impl_t *db, uint64_t flags,
  */
 static int
 dmu_rewrite_l1(dnode_t *dn, uint64_t start, uint64_t end,
-    uint64_t rewrite_flags, dmu_tx_t *tx, uint64_t *nrp, uint64_t *nwp)
+    uint64_t rewrite_flags, dmu_tx_t *tx, dmu_rewrite_stats_t *stats)
 {
 	objset_t *os = dn->dn_objset;
+	/*
+	 * Blocks of dnodes are read and dirtied as dnode_hold() and
+	 * dnode_setdirty() do: decrypting one here, which an encrypted
+	 * dataset may keep raw, is not allowed.
+	 */
+	dmu_flags_t raw = (dn->dn_object == DMU_META_DNODE_OBJECT) ?
+	    DMU_READ_NO_DECRYPT : 0;
 	dmu_buf_impl_t *l1 = NULL;
 	dmu_buf_impl_t *ind = NULL;
 	dmu_buf_impl_t **dbs;
@@ -1714,7 +1730,7 @@ dmu_rewrite_l1(dnode_t *dn, uint64_t start, uint64_t end,
 		blkptr_t bp;
 
 		dmu_rewrite_get_bp(dn, l1, blkid, &bp);
-		if (dmu_rewrite_skip(os, &bp, rewrite_flags))
+		if (dmu_rewrite_skip(os, &bp, rewrite_flags, stats))
 			continue;
 
 		/*
@@ -1734,7 +1750,8 @@ dmu_rewrite_l1(dnode_t *dn, uint64_t start, uint64_t end,
 			continue;
 		}
 		(void) dbuf_read(db, zio, DB_RF_CANFAIL | DB_RF_NEVERWAIT |
-		    DB_RF_HAVESTRUCT | DMU_READ_NO_PREFETCH | DMU_UNCACHEDIO);
+		    DB_RF_HAVESTRUCT | DMU_READ_NO_PREFETCH | DMU_UNCACHEDIO |
+		    raw);
 		dbs[n++] = db;
 	}
 	if (error == 0 && n == 0 && l1 != NULL && dn->dn_free_txg == 0 &&
@@ -1760,12 +1777,13 @@ dmu_rewrite_l1(dnode_t *dn, uint64_t start, uint64_t end,
 
 	for (uint64_t i = 0; i < n; i++) {
 		if (error == 0) {
-			*nrp += dbs[i]->db.db_size;
-			*nwp += dbs[i]->db.db_size;
+			stats->drs_read += dbs[i]->db.db_size;
+			stats->drs_marked += dbs[i]->db.db_size;
 			if (rewrite_flags & ZFS_REWRITE_PHYSICAL)
 				dmu_buf_will_rewrite(&dbs[i]->db, tx);
 			else
-				dmu_buf_will_dirty(&dbs[i]->db, tx);
+				dmu_buf_will_dirty_flags(&dbs[i]->db, tx,
+				    DMU_READ_NO_PREFETCH | raw);
 		}
 		dbuf_rele(dbs[i], FTAG);
 	}
@@ -1793,19 +1811,19 @@ dmu_rewrite_l1(dnode_t *dn, uint64_t start, uint64_t end,
  *
  * The transaction must already be assigned and hold the range for writing,
  * best as whole blocks: the hold of a part of a block reads the block.  The
- * amounts of data read and marked for rewrite are added to *readp and
- * *writtenp, either of which may be NULL.  Of the data, only the blocks
- * marked are read.
+ * amounts of data read and marked for rewrite, and the blocks left alone by
+ * ZFS_REWRITE_SKIP_SNAPSHOT or ZFS_REWRITE_SKIP_BRT only, are added to stats,
+ * which may be NULL; indirect blocks are not counted.  Of the data, only the
+ * blocks marked are read.
  */
 int
 dmu_rewrite_by_dnode(dnode_t *dn, uint64_t offset, uint64_t size,
-    uint64_t rewrite_flags, dmu_tx_t *tx, uint64_t *readp, uint64_t *writtenp)
+    uint64_t rewrite_flags, dmu_tx_t *tx, dmu_rewrite_stats_t *stats)
 {
 	int epbs = dn->dn_indblkshift - SPA_BLKPTRSHIFT;
+	dmu_rewrite_stats_t drs = { 0 };
 	uint64_t blkid;
 	uint64_t end;
-	uint64_t nr = 0;
-	uint64_t nw = 0;
 	int error = 0;
 
 	if (size == 0)
@@ -1828,14 +1846,16 @@ dmu_rewrite_by_dnode(dnode_t *dn, uint64_t offset, uint64_t size,
 		uint64_t next = MIN(end, P2ROUNDUP(blkid + 1, 1ULL << epbs));
 
 		error = dmu_rewrite_l1(dn, blkid, next, rewrite_flags, tx,
-		    &nr, &nw);
+		    &drs);
 		blkid = next;
 	}
 
-	if (readp != NULL)
-		*readp += nr;
-	if (writtenp != NULL)
-		*writtenp += nw;
+	if (stats != NULL) {
+		stats->drs_read += drs.drs_read;
+		stats->drs_marked += drs.drs_marked;
+		stats->drs_shared += drs.drs_shared;
+		stats->drs_cloned += drs.drs_cloned;
+	}
 	return (error);
 }
 
@@ -1845,10 +1865,13 @@ dmu_rewrite_by_dnode(dnode_t *dn, uint64_t offset, uint64_t size,
  * decided from its block pointer, before the block is read.  A spill block is
  * metadata, rewritten without ZFS_REWRITE_PHYSICAL.  The caller serializes
  * this with the updates of the spill block, as sa_rewrite_spill() does, and
- * the transaction holds the spill block.  Return B_TRUE if it was marked.
+ * the transaction holds the spill block.  Return B_TRUE if it was marked.  A
+ * spill block left alone, or marked, is counted in stats, if not NULL, as by
+ * dmu_rewrite_by_dnode().
  */
 boolean_t
-dmu_rewrite_spill_by_dnode(dnode_t *dn, uint64_t rewrite_flags, dmu_tx_t *tx)
+dmu_rewrite_spill_by_dnode(dnode_t *dn, uint64_t rewrite_flags, dmu_tx_t *tx,
+    dmu_rewrite_stats_t *stats)
 {
 	dmu_buf_impl_t *db = NULL;
 	boolean_t marked = B_FALSE;
@@ -1862,9 +1885,11 @@ dmu_rewrite_spill_by_dnode(dnode_t *dn, uint64_t rewrite_flags, dmu_tx_t *tx)
 		return (B_FALSE);
 
 	if (dmu_rewrite_get_db_bp(db, &bp) &&
-	    !dmu_rewrite_skip(dn->dn_objset, &bp, rewrite_flags) &&
+	    !dmu_rewrite_skip(dn->dn_objset, &bp, rewrite_flags, stats) &&
 	    !dmu_buf_is_dirty(&db->db, tx)) {
 		dmu_buf_will_dirty(&db->db, tx);
+		if (stats != NULL)
+			stats->drs_marked += db->db.db_size;
 		marked = B_TRUE;
 	}
 	dbuf_rele(db, FTAG);
@@ -1891,11 +1916,154 @@ dmu_rewrite_dnode(dnode_t *dn, uint64_t rewrite_flags, dmu_tx_t *tx)
 		return (B_FALSE);
 
 	if (!dmu_rewrite_get_db_bp(dn->dn_dbuf, &bp) ||
-	    dmu_rewrite_skip(dn->dn_objset, &bp, rewrite_flags))
+	    dmu_rewrite_skip(dn->dn_objset, &bp, rewrite_flags, NULL))
 		return (B_FALSE);
 
 	dnode_setdirty(dn, tx);
 	return (B_TRUE);
+}
+
+/*
+ * Mark for rewrite the data of dn in [*offp, end) that the flags do not leave
+ * alone, skipping holes, in transactions of their own of at most
+ * DMU_MAX_ACCESS / 2 bytes, each holding whole blocks, until budget bytes, if
+ * not 0, are marked.  *offp is moved past what was done, to end once there is
+ * no more data.  The caller keeps out the writers of the object, as the owner
+ * of its objset does.  What is read, marked or left alone is counted in
+ * stats, as by dmu_rewrite_by_dnode().
+ */
+int
+dmu_rewrite_range(dnode_t *dn, uint64_t *offp, uint64_t end,
+    uint64_t rewrite_flags, uint64_t budget, dmu_rewrite_stats_t *stats)
+{
+	dmu_rewrite_stats_t drs = { 0 };
+	uint64_t off = *offp;
+	int error = 0;
+
+	while (off < end) {
+		uint64_t blksz = dn->dn_datablksz;
+		uint64_t noff = off;
+		uint64_t hoff = 0;
+		uint64_t hlen = blksz;
+		uint64_t n;
+		dmu_tx_t *tx;
+
+		error = dnode_next_offset(dn, 0, &noff, 1, 1, 0);
+		if (error == ESRCH || (error == 0 && noff >= end)) {
+			error = 0;
+			off = end;
+			break;
+		}
+		if (error != 0)
+			break;
+		off = noff;
+		if (dnode_next_offset(dn, DNODE_FIND_HOLE, &noff, 1, 1, 0) != 0)
+			noff = end;
+		if (noff <= off) {
+			/* The block was freed since the data search. */
+			off = P2ALIGN_TYPED(off, blksz, uint64_t) + blksz;
+			continue;
+		}
+
+		n = MIN(MIN(end, noff) - off,
+		    DMU_MAX_ACCESS / 2 - P2PHASE(off, blksz));
+
+		/* Hold whole blocks, which does not read them. */
+		if (ISP2(blksz)) {
+			hoff = P2ALIGN_TYPED(off, blksz, uint64_t);
+			hlen = P2ROUNDUP_TYPED(off + n, blksz, uint64_t) - hoff;
+		}
+		tx = dmu_tx_create(dn->dn_objset);
+		dmu_tx_hold_write_by_dnode(tx, dn, hoff, hlen);
+		error = dmu_tx_assign(tx, DMU_TX_WAIT);
+		if (error != 0) {
+			dmu_tx_abort(tx);
+			break;
+		}
+		error = dmu_rewrite_by_dnode(dn, off, n, rewrite_flags, tx,
+		    &drs);
+		dmu_tx_commit(tx);
+		if (error != 0)
+			break;
+		off += n;
+
+		if (budget != 0 && drs.drs_marked >= budget)
+			break;
+		if (issig()) {
+			error = SET_ERROR(EINTR);
+			break;
+		}
+	}
+
+	*offp = off;
+	stats->drs_read += drs.drs_read;
+	stats->drs_marked += drs.drs_marked;
+	stats->drs_shared += drs.drs_shared;
+	stats->drs_cloned += drs.drs_cloned;
+	return (error);
+}
+
+/*
+ * Mark for rewrite the blocks of the meta-dnode of os, the blocks of dnodes
+ * and the indirect blocks above them, that the flags do not leave alone, from
+ * block *blkidp on, in transactions of their own, until budget bytes, if not
+ * 0, are marked.  *blkidp is moved past what was done, to UINT64_MAX once all
+ * is done.  This rewrites the blocks of dnodes that no dirtied dnode brings
+ * along, those of free dnodes included.  Dnodes are only changed in a block of
+ * dnodes in syncing context, so a block is written as it stands then.  These
+ * are metadata, rewritten without ZFS_REWRITE_PHYSICAL.  stats counts as for
+ * dmu_rewrite_by_dnode().
+ */
+int
+dmu_rewrite_meta_dnode(objset_t *os, uint64_t *blkidp, uint64_t rewrite_flags,
+    uint64_t budget, dmu_rewrite_stats_t *stats)
+{
+	dnode_t *mdn = DMU_META_DNODE(os);
+	dmu_rewrite_stats_t drs = { 0 };
+	uint64_t blkid = *blkidp;
+	uint64_t blksz = mdn->dn_datablksz;
+	uint64_t end;
+	int error = 0;
+
+	rewrite_flags &= ~ZFS_REWRITE_PHYSICAL;
+
+	rw_enter(&mdn->dn_struct_rwlock, RW_READER);
+	end = mdn->dn_maxblkid + 1;
+	rw_exit(&mdn->dn_struct_rwlock);
+
+	while (blkid < end) {
+		uint64_t nblks = MIN(end - blkid, (DMU_MAX_ACCESS / 2) / blksz);
+		dmu_tx_t *tx;
+
+		/* A hold of the meta-dnode itself is not checked for. */
+		tx = dmu_tx_create(os);
+		dmu_tx_hold_space(tx, nblks * blksz);
+		error = dmu_tx_assign(tx, DMU_TX_WAIT);
+		if (error != 0) {
+			dmu_tx_abort(tx);
+			break;
+		}
+		error = dmu_rewrite_by_dnode(mdn, blkid * blksz, nblks * blksz,
+		    rewrite_flags, tx, &drs);
+		dmu_tx_commit(tx);
+		if (error != 0)
+			break;
+		blkid += nblks;
+
+		if (budget != 0 && drs.drs_marked >= budget)
+			break;
+		if (issig()) {
+			error = SET_ERROR(EINTR);
+			break;
+		}
+	}
+
+	*blkidp = (error == 0 && blkid >= end) ? UINT64_MAX : blkid;
+	stats->drs_read += drs.drs_read;
+	stats->drs_marked += drs.drs_marked;
+	stats->drs_shared += drs.drs_shared;
+	stats->drs_cloned += drs.drs_cloned;
+	return (error);
 }
 
 /*
@@ -1905,7 +2073,7 @@ dmu_rewrite_dnode(dnode_t *dn, uint64_t rewrite_flags, dmu_tx_t *tx)
 boolean_t
 dmu_rewrite_bp_needed(objset_t *os, const blkptr_t *bp, uint64_t rewrite_flags)
 {
-	return (!dmu_rewrite_skip(os, bp, rewrite_flags));
+	return (!dmu_rewrite_skip(os, bp, rewrite_flags, NULL));
 }
 
 /*
@@ -1923,7 +2091,7 @@ dmu_rewrite_needed_impl(dnode_t *dn, int level, uint64_t blkid,
 
 	if (BP_IS_HOLE(bp))
 		return (B_FALSE);
-	if (!dmu_rewrite_skip(dn->dn_objset, bp, rewrite_flags))
+	if (!dmu_rewrite_skip(dn->dn_objset, bp, rewrite_flags, NULL))
 		return (B_TRUE);
 	if (level == 0)
 		return (B_FALSE);
@@ -1975,6 +2143,33 @@ dmu_rewrite_needed(dnode_t *dn, uint64_t rewrite_flags)
 	rw_exit(&dn->dn_struct_rwlock);
 
 	return (needed);
+}
+
+/*
+ * Wait for transaction group txg, or 0 for the open one, to be synced, for a
+ * rewrite not to return with what it marked still in memory only.  A signal
+ * ends the wait with EINTR, and a pool suspended with failmode=continue with
+ * EIO.
+ */
+int
+dmu_rewrite_wait_synced(dsl_pool_t *dp, uint64_t txg)
+{
+	txg_wait_flag_t wait_flags = TXG_WAIT_SIGNAL;
+	int error;
+
+	if (spa_get_failmode(dp->dp_spa) == ZIO_FAILURE_MODE_CONTINUE)
+		wait_flags |= TXG_WAIT_SUSPEND;
+	for (;;) {
+		error = txg_wait_synced_flags(dp, txg, wait_flags);
+		if (error != EINTR || issig())
+			break;
+		/*
+		 * No signal to act on: a stop, or a FreeBSD process being
+		 * single-threaded, whose sleeps keep failing.
+		 */
+		delay(MSEC_TO_TICK(10));
+	}
+	return (error == ESHUTDOWN ? SET_ERROR(EIO) : error);
 }
 
 void

@@ -12,20 +12,20 @@
 .\" Copyright (c) 2025 iXsystems, Inc.
 .\" Copyright (c) 2025, Klara, Inc.
 .\"
-.Dd October 14, 2026
+.Dd October 15, 2026
 .Dt ZFS-REWRITE 8
 .Os
 .
 .Sh NAME
 .Nm zfs-rewrite
-.Nd rewrite specified files, directories and volumes without modification
+.Nd rewrite files, directories, volumes and file systems without modification
 .Sh SYNOPSIS
 .Nm zfs
 .Cm rewrite
 .Oo Fl ACPSrvx Ns Oc
 .Op Fl l Ar length
 .Op Fl o Ar offset
-.Ar file Ns | Ns Ar directory Ns | Ns Ar volume Ns …
+.Ar file Ns | Ns Ar directory Ns | Ns Ar volume Ns | Ns Ar filesystem Ns …
 .
 .Sh DESCRIPTION
 Rewrite blocks of specified
@@ -34,7 +34,10 @@ as is without modification at a new location and possibly with new properties,
 as if they were atomically read and written back.
 A
 .Ar volume ,
-given by its dataset name or the path of its device, is rewritten the same way.
+given by its dataset name or the path of its device, is rewritten the same way,
+and so is a
+.Ar filesystem ,
+given by its dataset name, with all its objects.
 .No See Sx NOTES .
 for more information about property changes that may be applied during rewrite.
 .Bl -tag -width "-r"
@@ -63,8 +66,9 @@ inclusion in incremental streams.
 Physical rewrite requires the
 .Sy physical_rewrite
 feature to be enabled on the pool.
-It is refused for an encrypted volume: a raw incremental stream would not
-include the rewritten blocks, and the received copy could not be read.
+It is refused for an encrypted volume or file system given by name: a raw
+incremental stream would not include the rewritten blocks, and the received
+copy could not be read.
 .It Fl S
 Skip blocks that are shared with snapshots.
 Blocks created before the most recent snapshot are shared with that snapshot.
@@ -73,18 +77,22 @@ the snapshot and increasing space usage.
 This flag prevents such expansion by skipping snapshot-shared blocks.
 .It Fl l Ar length
 Rewrite at most this number of bytes.
+A file system given by name can not be rewritten in part.
 .It Fl o Ar offset
 Start at this offset in bytes.
+A file system given by name can not be rewritten in part.
 .It Fl r
 Recurse into directories, and rewrite the directories themselves,
 the given ones included.
-This has no effect on a volume.
+This has no effect on a volume or a file system given by name.
 .No See Sx NOTES .
 .It Fl v
 Print names of all successfully rewritten files, directories and volumes.
+For a file system given by name, print the progress after each step, and once
+it is done, what was rewritten and what was left alone.
 .It Fl x
 Don't cross file system mount points when recursing.
-This has no effect on a volume.
+This has no effect on a volume or a file system given by name.
 .El
 .Sh NOTES
 Rewrite works by replacing an existing block with a new block of the same
@@ -218,7 +226,53 @@ Only the blocks of the files, directories and volumes themselves are
 rewritten: other metadata, such as the objects that a file system keeps for
 itself, or the extended attributes stored in hidden directories with
 .Sy xattr Ns = Ns Sy dir ,
-may remain on the vdev.
+may remain on the vdev, unless the file system is rewritten by its name.
+.Pp
+A file system is given by its dataset name, such as
+.Ar pool/filesystem ,
+and as for a volume, a name that is also an existing path is taken as a path.
+It is rewritten whole: all its objects, the files and directories that no path
+reaches included, such as those hidden under a mount point or in hidden
+extended attribute directories, with their spill blocks and the blocks of
+their dnodes, and the objects that the file system keeps for itself, such as
+its master node, its delete queue, its system attribute tables, its FUID
+table and its quotas; then every block that holds dnodes, the user, group and
+project accounting objects, and the block of the objset.
+Its child file systems are not included: each is rewritten by its own name.
+Rewriting a file system needs the same privilege as rewriting a volume.
+.Pp
+A file system is rewritten in steps of about 64 MiB or a second each, which
+the command repeats until it is done; interrupting it stops it within a step,
+and running it again starts over, which with
+.Fl A
+skips the blocks that were moved already.
+A mounted file system can be in use: its files and directories are rewritten
+under the same locks as by path, but the quotas of their owners do not stop
+the rewrite.
+One that is not mounted is held exclusively for each step, during which an
+attempt to mount, roll back, receive into or destroy it fails as busy.
+The command does not return before the rewritten blocks are on stable storage.
+A snapshot, a read-only file system, one being received or received from a
+redacted send stream, one whose intent log has not been replayed yet, which
+mounting it does, and one that is encrypted while its key is not loaded cannot
+be rewritten, nor can a file system of a pool that is not writable.
+.Pp
+Some blocks of a file system rewritten by name are left alone, and reported
+with
+.Fl v :
+the blocks that
+.Fl S
+and
+.Fl C
+skip, counted as blocks; the files in its delete queue, which are freed once
+they are no longer open, counted as objects; and while it is mounted, the
+objects that are neither files, directories nor objects of its own, such as
+the access control lists that file systems of an old version keep apart from
+their files, also counted as objects.
+Its intent log blocks are not rewritten: they are freed once the changes they
+log are written.
+The snapshots of a file system keep their blocks where they are, as the
+snapshots of a volume do.
 .
 .Sh SEE ALSO
 .Xr vdevprops 7 ,
