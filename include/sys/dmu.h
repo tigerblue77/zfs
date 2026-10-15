@@ -943,6 +943,13 @@ boolean_t dmu_rewrite_bp_needed(objset_t *os, const struct blkptr *bp,
     uint64_t rewrite_flags);
 boolean_t dmu_rewrite_needed(dnode_t *dn, uint64_t rewrite_flags);
 int dmu_rewrite_wait_synced(struct dsl_pool *dp, uint64_t txg);
+typedef boolean_t (dmu_rewrite_select_cb_t)(void *arg, int level,
+    uint64_t blkid, uint64_t size);
+int dmu_rewrite_select(dnode_t *dn, uint64_t *blkidp, uint64_t end,
+    uint64_t rewrite_flags, hrtime_t deadline, dmu_rewrite_select_cb_t *cb,
+    void *arg);
+uint64_t dmu_rewrite_block_sync(dnode_t *dn, int level, uint64_t blkid,
+    uint64_t rewrite_flags, dmu_tx_t *tx);
 #ifdef _KERNEL
 int dmu_read_uio(objset_t *os, uint64_t object, zfs_uio_t *uio, uint64_t size,
     dmu_flags_t flags);
