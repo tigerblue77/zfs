@@ -232,8 +232,11 @@ log_must zfs destroy $vol@snap
 
 # What can not be rewritten: ENOENT, EROFS and EINVAL tell what refused it.
 log_must rewrite_fails 2 $TESTPOOL/${TESTVOL}_does_not_exist
-# A file system is not a volume, and its name is no path either.
-log_must rewrite_fails 2 $TESTPOOL/$TESTFS
+# A file system is rewritten by name (see zfs_rewrite_filesystem), but a
+# snapshot of one is neither a volume nor writable.
+log_must zfs snapshot $TESTPOOL/$TESTFS@snap
+log_mustnot zfs rewrite $TESTPOOL/$TESTFS@snap
+log_must zfs destroy $TESTPOOL/$TESTFS@snap
 log_must zfs snapshot $vol@snap
 log_must rewrite_fails 30 $vol@snap
 log_must zfs set snapdev=visible $vol
