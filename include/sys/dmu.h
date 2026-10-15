@@ -923,6 +923,9 @@ boolean_t dmu_rewrite_spill_by_dnode(dnode_t *dn, uint64_t rewrite_flags,
     dmu_tx_t *tx);
 boolean_t dmu_rewrite_dnode(dnode_t *dn, uint64_t rewrite_flags,
     dmu_tx_t *tx);
+boolean_t dmu_rewrite_bp_needed(objset_t *os, const struct blkptr *bp,
+    uint64_t rewrite_flags);
+boolean_t dmu_rewrite_needed(dnode_t *dn, uint64_t rewrite_flags);
 #ifdef _KERNEL
 int dmu_read_uio(objset_t *os, uint64_t object, zfs_uio_t *uio, uint64_t size,
     dmu_flags_t flags);
