@@ -19,7 +19,7 @@
 .\" Copyright (c) 2024-2026, Klara, Inc.
 .\" Copyright (c) 2026, TrueNAS.
 .\"
-.Dd May 26, 2026
+.Dd October 15, 2026
 .Dt ZPOOL 8
 .Os
 .
@@ -174,6 +174,12 @@ Prefetches specific types of pool data.
 Begins a scrub or resumes a paused scrub.
 .It Xr zpool-condense 8
 Condense, flush, garbage collect or otherwise clean up pool metadata.
+.It Xr zpool-rewrite 8
+Rewrites the datasets and the metadata of a pool without modification, for
+example to empty a vdev whose
+.Sy allocating
+property is
+.Sy off .
 .It Xr zpool-checkpoint 8
 Checkpoints the current state of
 .Ar pool ,
@@ -644,6 +650,7 @@ don't wait.
 .Xr zpool-reopen 8 ,
 .Xr zpool-replace 8 ,
 .Xr zpool-resilver 8 ,
+.Xr zpool-rewrite 8 ,
 .Xr zpool-scrub 8 ,
 .Xr zpool-set 8 ,
 .Xr zpool-split 8 ,

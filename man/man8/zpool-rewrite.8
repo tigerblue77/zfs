@@ -1,0 +1,112 @@
+.\" SPDX-License-Identifier: CDDL-1.0
+.\"
+.\" This file and its contents are supplied under the terms of the
+.\" Common Development and Distribution License ("CDDL"), version 1.0.
+.\" You may only use this file in accordance with the terms of version
+.\" 1.0 of the CDDL.
+.\"
+.\" A full copy of the text of the CDDL should have accompanied this
+.\" source.  A copy of the CDDL is also available via the Internet at
+.\" https://opensource.org/license/CDDL-1.0.
+.\"
+.Dd October 15, 2026
+.Dt ZPOOL-REWRITE 8
+.Os
+.
+.Sh NAME
+.Nm zpool-rewrite
+.Nd rewrite the datasets and the metadata of a ZFS storage pool without modification
+.Sh SYNOPSIS
+.Nm zpool
+.Cm rewrite
+.Op Fl Av
+.Ar pool
+.
+.Sh DESCRIPTION
+Rewrite the blocks of every file system and volume of
+.Ar pool ,
+and the blocks of the metadata that the pool keeps for itself, as is without
+modification at a new location, as if they were read and written back.
+Each file system and volume is rewritten as
+.Nm zfs Cm rewrite
+of it by name rewrites it, see
+.Xr zfs-rewrite 8 ,
+then the metadata of the pool: the objects that describe its datasets, their
+properties, snapshots and deadlists, the deduplication and block cloning
+tables, the space maps of all vdevs, including those of a vdev that is being
+emptied, the configuration, the history, the error logs and the other objects
+of the pool, and the blocks that hold their dnodes.
+.Bl -tag -width "-A"
+.It Fl A
+Rewrite only the blocks that have a copy on a top-level vdev whose
+.Sy allocating
+property is
+.Sy off ,
+see
+.Xr vdevprops 7 ,
+so that they move to vdevs that allocate.
+.It Fl v
+Print the progress of each dataset and of the metadata of the pool, what was
+left alone and why, the number of snapshots of each dataset, and once done,
+the space still allocated on each top-level vdev whose
+.Sy allocating
+property is
+.Sy off .
+.El
+.Pp
+The
+.Fl A
+flag helps to empty a top-level vdev, such as a special or dedup vdev, before
+it is removed with
+.Nm zpool Cm remove :
+once its
+.Sy allocating
+property is set to
+.Sy off ,
+.Nm zpool Cm rewrite Fl A
+moves off it every block that can be rewritten.
+What remains is held by snapshots, which keep their blocks where they are until
+they are destroyed, by datasets that cannot be rewritten, which are reported,
+and by blocks that are being freed, which are gone after a few transaction
+groups.
+A file system or volume cannot be rewritten while its encryption key is not
+loaded, while it is read-only or being received, or while its intent log has
+not been replayed yet.
+A deduplicated block stays where the entry of the deduplication table that
+refers to it has it.
+Intent log blocks are not rewritten: they are freed once the changes they log
+are written.
+.Pp
+The metadata of the pool is rewritten in steps of about 16 MiB, each in a
+transaction group of its own, and the datasets in steps as described in
+.Xr zfs-rewrite 8 ,
+so that interrupting the command stops it within a step; running it again
+starts over, which with
+.Fl A
+skips what was moved already.
+The command does not return before the rewritten blocks are on stable storage,
+and the old ones freed.
+It needs the same privilege as other pool configuration operations.
+The pool cannot be rewritten while it has a checkpoint, which keeps the blocks
+that are freed, while a vdev is being removed, or if it is not writable.
+.
+.Sh EXAMPLES
+.Ss Example 1 : No Emptying a special vdev before removing it
+The following commands stop allocations on the special vdev
+.Ar mirror-1
+of the pool
+.Ar tank ,
+move every block that can be moved off it, and remove it once nothing is
+allocated on it anymore.
+.Bd -literal -compact -offset Ds
+.No # Nm zpool Cm set Sy allocating Ns = Ns Sy off Ar tank mirror-1
+.No # Nm zpool Cm rewrite Fl Av Ar tank
+.No # Nm zpool Cm list Fl v Ar tank
+.No # Nm zpool Cm remove Ar tank mirror-1
+.Ed
+.
+.Sh SEE ALSO
+.Xr vdevprops 7 ,
+.Xr zfs-rewrite 8 ,
+.Xr zpool-checkpoint 8 ,
+.Xr zpool-remove 8
