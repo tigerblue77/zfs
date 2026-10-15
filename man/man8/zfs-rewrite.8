@@ -249,6 +249,10 @@ rewritten: other metadata, such as the objects that a file system keeps for
 itself, or the extended attributes stored in hidden directories with
 .Sy xattr Ns = Ns Sy dir ,
 may remain on the vdev, unless the file system is rewritten by its name.
+The metadata of the pool itself is rewritten by
+.Nm zpool Cm rewrite ,
+which also rewrites every file system and volume of the pool by name, see
+.Xr zpool-rewrite 8 .
 .Pp
 A file system is given by its dataset name, such as
 .Ar pool/filesystem ,
@@ -301,4 +305,5 @@ snapshots of a volume do.
 .Xr zfsprops 7 ,
 .Xr zpool-features 7 ,
 .Xr zpool-attach 8 ,
-.Xr zpool-remove 8
+.Xr zpool-remove 8 ,
+.Xr zpool-rewrite 8
