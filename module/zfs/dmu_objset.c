@@ -2210,7 +2210,7 @@ dmu_objset_rewrite_used_sync(objset_t *os, dmu_tx_t *tx)
 		size = (dn->dn_maxblkid + 1) * dn->dn_datablksz;
 		rw_exit(&dn->dn_struct_rwlock);
 		(void) dmu_rewrite_by_dnode(dn, 0, size, rewrite_flags, tx,
-		    NULL, NULL);
+		    NULL);
 		dnode_rele(dn, FTAG);
 	}
 }

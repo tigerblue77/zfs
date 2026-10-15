@@ -597,7 +597,7 @@ int zap_get_stats_by_dnode(dnode_t *dn, zap_stats_t *zs);
  * the ZFS_REWRITE_* flags.
  */
 int zap_rewrite_by_dnode(dnode_t *dn, uint64_t rewrite_flags,
-    uint64_t *readp, uint64_t *writtenp);
+    dmu_rewrite_stats_t *stats);
 
 /* ZAP subsystem setup/teardown */
 void zap_init(void);

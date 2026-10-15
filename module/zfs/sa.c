@@ -2259,17 +2259,19 @@ sa_handle_unlock(sa_handle_t *hdl)
  * dmu_rewrite_spill_by_dnode().  Holding sa_lock keeps the updates of the
  * attributes, which may resize or remove the spill block, from running
  * meanwhile.  The transaction holds the spill block.  Return B_TRUE if it was
- * marked.
+ * marked.  stats, which may be NULL, counts it as there.
  */
 boolean_t
-sa_rewrite_spill(sa_handle_t *hdl, uint64_t rewrite_flags, dmu_tx_t *tx)
+sa_rewrite_spill(sa_handle_t *hdl, uint64_t rewrite_flags, dmu_tx_t *tx,
+    dmu_rewrite_stats_t *stats)
 {
 	dmu_buf_impl_t *db = (dmu_buf_impl_t *)hdl->sa_bonus;
 	boolean_t marked;
 
 	mutex_enter(&hdl->sa_lock);
 	DB_DNODE_ENTER(db);
-	marked = dmu_rewrite_spill_by_dnode(DB_DNODE(db), rewrite_flags, tx);
+	marked = dmu_rewrite_spill_by_dnode(DB_DNODE(db), rewrite_flags, tx,
+	    stats);
 	DB_DNODE_EXIT(db);
 	mutex_exit(&hdl->sa_lock);
 
