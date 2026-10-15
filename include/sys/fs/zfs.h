@@ -2016,12 +2016,22 @@ typedef enum {
 #define	DDT_PRUNE_AMOUNT	"ddt_prune_amount"
 
 /*
- * The following are names used when invoking ZFS_IOC_DATASET_REWRITE.  The
- * flags are the ZFS_REWRITE_* flags of zfs_rewrite_args_t.
+ * The following are names used when invoking ZFS_IOC_DATASET_REWRITE, and in
+ * what it returns.  The flags are the ZFS_REWRITE_* flags of
+ * zfs_rewrite_args_t.  A range, an offset and a length, only applies to a
+ * volume.  The cursor of a file system is returned until its rewrite is done,
+ * to be passed back as it is.  The counters are those of the call.
  */
-#define	DATASET_REWRITE_OFFSET	"rewrite_offset"
-#define	DATASET_REWRITE_LENGTH	"rewrite_length"
-#define	DATASET_REWRITE_FLAGS	"rewrite_flags"
+#define	DATASET_REWRITE_OFFSET		"rewrite_offset"
+#define	DATASET_REWRITE_LENGTH		"rewrite_length"
+#define	DATASET_REWRITE_FLAGS		"rewrite_flags"
+#define	DATASET_REWRITE_CURSOR		"rewrite_cursor"
+#define	DATASET_REWRITE_OBJECTS		"rewrite_objects"
+#define	DATASET_REWRITE_MARKED		"rewrite_marked"	/* bytes */
+#define	DATASET_REWRITE_SHARED		"rewrite_shared"	/* blocks */
+#define	DATASET_REWRITE_CLONED		"rewrite_cloned"	/* blocks */
+#define	DATASET_REWRITE_UNLINKED	"rewrite_unlinked"	/* objects */
+#define	DATASET_REWRITE_OTHER		"rewrite_other"		/* objects */
 
 /*
  * Flags for ZFS_IOC_VDEV_SET_STATE

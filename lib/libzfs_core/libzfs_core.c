@@ -2077,9 +2077,9 @@ lzc_get_bootenv(const char *pool, nvlist_t **outnvl)
 }
 
 /*
- * Rewrite a range of the dataset as-is without modification, so that its
- * blocks are reallocated.  Only volumes can be rewritten this way so far; any
- * other dataset fails with ENOTSUP.
+ * Rewrite the dataset dsname as-is without modification, or a range of it if
+ * it is a volume, so that its blocks are reallocated: see
+ * ZFS_IOC_DATASET_REWRITE.
  *
  * The optional arguments are given in innvl, which may be NULL:
  *
@@ -2087,10 +2087,14 @@ lzc_get_bootenv(const char *pool, nvlist_t **outnvl)
  * "rewrite_length" -> uint64_t (DATASET_REWRITE_LENGTH, defaults to 0, which
  *     stands for the rest of the volume)
  * "rewrite_flags" -> uint64_t (DATASET_REWRITE_FLAGS, ZFS_REWRITE_* flags)
+ * "rewrite_cursor" -> nvlist (DATASET_REWRITE_CURSOR, absent the first time)
  *
- * outnvl may be NULL.  Nothing is returned in it so far: as for lzc_sync(), it
- * keeps the signature for what the call may return later.  *outnvl, if set,
- * is to be freed by the caller.
+ * A range only applies to a volume, which is rewritten in one call.  A file
+ * system is rewritten in steps: the first call is made without a cursor, each
+ * following one with the DATASET_REWRITE_CURSOR nvlist that the previous one
+ * returned in *outnvl, until none is returned.  *outnvl also holds the
+ * counters of the call, such as DATASET_REWRITE_MARKED, and is to be freed by
+ * the caller.
  */
 int
 lzc_dataset_rewrite(const char *dsname, nvlist_t *innvl, nvlist_t **outnvl)

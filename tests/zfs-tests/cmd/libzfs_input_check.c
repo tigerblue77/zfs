@@ -933,20 +933,33 @@ test_wait_fs(const char *dataset)
 	nvlist_free(required);
 }
 
-/* The working dataset is a file system, which can not be rewritten so far. */
+/*
+ * The working dataset is a file system, to which a range does not apply.  The
+ * cursor of the last step rewrites its accounting objects only.
+ */
 static void
 test_dataset_rewrite(const char *dataset)
 {
+	nvlist_t *range = fnvlist_alloc();
 	nvlist_t *optional = fnvlist_alloc();
+	nvlist_t *cursor = fnvlist_alloc();
 
+	fnvlist_add_uint64(range, DATASET_REWRITE_OFFSET, 4096);
+	IOC_INPUT_TEST(ZFS_IOC_DATASET_REWRITE, dataset, NULL, range, EINVAL);
+
+	fnvlist_add_uint64(cursor, "phase", 2);
+	fnvlist_add_uint64(cursor, "object", 0);
+	fnvlist_add_uint64(cursor, "offset", 0);
 	fnvlist_add_uint64(optional, DATASET_REWRITE_OFFSET, 0);
 	fnvlist_add_uint64(optional, DATASET_REWRITE_LENGTH, 0);
 	fnvlist_add_uint64(optional, DATASET_REWRITE_FLAGS, 0);
+	fnvlist_add_nvlist(optional, DATASET_REWRITE_CURSOR, cursor);
 
-	IOC_INPUT_TEST(ZFS_IOC_DATASET_REWRITE, dataset, NULL, optional,
-	    ENOTSUP);
+	IOC_INPUT_TEST(ZFS_IOC_DATASET_REWRITE, dataset, NULL, optional, 0);
 
+	nvlist_free(cursor);
 	nvlist_free(optional);
+	nvlist_free(range);
 }
 
 static void
