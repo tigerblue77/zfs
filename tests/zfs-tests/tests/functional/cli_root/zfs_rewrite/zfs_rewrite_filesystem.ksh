@@ -16,7 +16,8 @@
 #	of it, mounted or not: the files and directories, those that no path
 #	reaches included, the objects of the file system itself, the blocks
 #	of dnodes, the accounting objects and the block of the objset, as the
-#	flags allow, and leaves the files in the delete queue alone.
+#	flags allow, and leaves the files in the delete queue alone; and that
+#	zfs rewrite of a whole volume rewrites all of it.
 #
 # STRATEGY:
 #	1. Create a pool with a raidz vdev and a special mirror, which takes
@@ -25,16 +26,17 @@
 #	   blocks, and files of other users, groups and projects, with quotas.
 #	   In the first one, which stays mounted, hide a file under the mount
 #	   of another file system, and keep a file open once it is removed.
-#	   Unmount the second one.  Verify that each has blocks on the
-#	   special mirror, the objset block and the accounting objects
-#	   included.
+#	   Unmount the second one.  Create a volume whose blocks all go to
+#	   the special mirror.  Verify that each has blocks on the special
+#	   mirror, the objset block and the accounting objects included.
 #	2. Take a snapshot of the first one, set allocating=off on the
 #	   special mirror, and verify that zfs rewrite -A -S of it moves
 #	   nothing and reports the blocks left alone.
 #	3. Destroy the snapshot, and verify that zfs rewrite -A of each file
 #	   system leaves nothing on the special mirror but the blocks of the
 #	   removed file, which it reports as left alone, and that a second
-#	   zfs rewrite -A rewrites nothing.
+#	   zfs rewrite -A rewrites nothing, and that zfs rewrite -A of the
+#	   volume leaves nothing of it there.
 #	4. Verify the contents of the file systems after an export and
 #	   import, and that zdb finds no leak.
 
@@ -46,9 +48,11 @@ typeset VDIR=$TEST_BASE_DIR/zfs_rewrite_filesystem
 typeset FS1=$TESTPOOL1/fs1
 typeset FS2=$TESTPOOL1/fs2
 typeset COVER=$TESTPOOL1/cover
+typeset VOL=$TESTPOOL1/vol
+typeset VOLDEV=$ZVOL_DEVDIR/$VOL
 typeset XNAME=user.rewrite
 typeset XVAL
-typeset SPECIAL SPECIAL_ID MNT1 MNT2
+typeset SPECIAL SPECIAL_ID MNT1 MNT2 VOLHASH
 typeset -i UNLINKED_OBJ HIDDEN_OBJ
 
 function cleanup
@@ -201,6 +205,16 @@ log_must rm $MNT1/unlinked
 log_must eval "contents $MNT2 > $VDIR/c2.0"
 log_must zfs unmount $FS2
 
+log_must zfs create -V 1m -o volblocksize=16k -o special_small_blocks=16k \
+    $VOL
+block_device_wait $VOLDEV
+log_must dd if=/dev/urandom of=$VOLDEV bs=16k count=64 conv=fsync
+VOLHASH=$(xxh128digest $VOLDEV)
+log_must eval "special_objects $VOL > $VDIR/v.0"
+for obj in root 0 1 2; do
+	log_must grep -q "^$obj " $VDIR/v.0
+done
+
 log_must eval "special_objects $FS1 > $VDIR/s1.0"
 log_must eval "special_objects $FS2 > $VDIR/s2.0"
 for s in $VDIR/s1.0 $VDIR/s2.0; do
@@ -247,6 +261,12 @@ log_must grep -q "^$FS1: done, [0-9]* objects, 0B marked" $VDIR/out.3
 log_must eval "special_objects $FS1 > $VDIR/s1.3"
 log_must cmp $VDIR/s1.2 $VDIR/s1.3
 
+# The volume, its properties and its objset included.
+log_must zfs rewrite -A $VOL
+log_must eval "special_objects $VOL > $VDIR/v.1"
+cat $VDIR/v.1
+log_must [ ! -s $VDIR/v.1 ]
+
 exec 5<&-
 log_must zfs unmount $COVER
 log_must eval "contents $MNT1 > $VDIR/c1.0"
@@ -255,6 +275,8 @@ log_must zpool import -d $VDIR $TESTPOOL1
 # The import mounts it again.
 ismounted $FS2 || log_must zfs mount $FS2
 log_must zfs unmount $COVER
+block_device_wait $VOLDEV
+log_must [ "$(xxh128digest $VOLDEV)" = "$VOLHASH" ]
 log_must eval "contents $MNT1 > $VDIR/c1.1"
 log_must eval "contents $MNT2 > $VDIR/c2.1"
 log_must cmp $VDIR/c1.0 $VDIR/c1.1
