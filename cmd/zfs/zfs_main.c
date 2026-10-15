@@ -413,7 +413,8 @@ get_usage(zfs_help_t idx)
 		    "<redaction_snapshot> ...\n");
 	case HELP_REWRITE:
 		return ("\trewrite [-ACPSrvx] [-o <offset>] "
-		    "[-l <length>] <directory|file|volume ...>\n");
+		    "[-l <length>]\n"
+		    "\t    <directory|file|volume|filesystem ...>\n");
 	case HELP_JAIL:
 		return ("\tjail <jailid|jailname> <filesystem>\n");
 	case HELP_UNJAIL:
@@ -9115,6 +9116,87 @@ zfs_rewrite_volume(const char *name, boolean_t verbose,
 }
 
 /*
+ * Rewrite a file system whole, one step of the kernel at a time, so that an
+ * interruption stops it within a step.
+ */
+static int
+zfs_rewrite_filesystem(const char *name, boolean_t verbose,
+    zfs_rewrite_args_t *args)
+{
+	static const char *const keys[] = { DATASET_REWRITE_OBJECTS,
+	    DATASET_REWRITE_MARKED, DATASET_REWRITE_SHARED,
+	    DATASET_REWRITE_CLONED, DATASET_REWRITE_UNLINKED,
+	    DATASET_REWRITE_OTHER };
+	enum { OBJECTS, MARKED, SHARED, CLONED, UNLINKED, OTHER };
+	uint64_t count[ARRAY_SIZE(keys)] = { 0 };
+	nvlist_t *cursor = NULL;
+	char buf[32];
+	int ret;
+
+	if (args->off != 0 || args->len != 0) {
+		(void) fprintf(stderr, "cannot rewrite %s: an offset or a "
+		    "length only applies to a file\n", name);
+		return (EINVAL);
+	}
+
+	for (;;) {
+		nvlist_t *out = NULL, *next;
+		uint64_t v;
+
+		ret = lzc_dataset_rewrite(name, args->flags, cursor, &out);
+		fnvlist_free(cursor);
+		cursor = NULL;
+		if (out != NULL) {
+			for (int i = 0; i < ARRAY_SIZE(keys); i++) {
+				if (nvlist_lookup_uint64(out, keys[i],
+				    &v) == 0)
+					count[i] += v;
+			}
+			if (ret == 0 && nvlist_lookup_nvlist(out,
+			    DATASET_REWRITE_CURSOR, &next) == 0)
+				cursor = fnvlist_dup(next);
+			fnvlist_free(out);
+		}
+		if (ret != 0 || cursor == NULL)
+			break;
+		if (verbose) {
+			zfs_nicebytes(count[MARKED], buf, sizeof (buf));
+			(void) printf("%s: %llu objects, %s marked\n", name,
+			    (u_longlong_t)count[OBJECTS], buf);
+			(void) fflush(stdout);
+		}
+	}
+	fnvlist_free(cursor);
+
+	if (ret >= ZFS_ERR_CHECKPOINT_EXISTS) {
+		/* Not an errno: libzfs knows what it means. */
+		char msg[ZFS_MAX_DATASET_NAME_LEN + 32];
+
+		(void) snprintf(msg, sizeof (msg), "cannot rewrite '%s'", name);
+		(void) zfs_standard_error(g_zfs, ret, msg);
+		ret = ENOTSUP;
+	} else if (ret != 0) {
+		(void) fprintf(stderr, "failed to rewrite %s: %s\n",
+		    name, strerror(ret));
+	} else if (verbose) {
+		zfs_nicebytes(count[MARKED], buf, sizeof (buf));
+		(void) printf("%s: done, %llu objects, %s marked\n", name,
+		    (u_longlong_t)count[OBJECTS], buf);
+		if (count[SHARED] + count[CLONED] + count[UNLINKED] +
+		    count[OTHER] != 0)
+			(void) printf("%s: left alone: %llu blocks shared "
+			    "with snapshots, %llu cloned blocks, %llu "
+			    "unlinked objects, %llu objects of other types\n",
+			    name, (u_longlong_t)count[SHARED],
+			    (u_longlong_t)count[CLONED],
+			    (u_longlong_t)count[UNLINKED],
+			    (u_longlong_t)count[OTHER]);
+	}
+
+	return (ret);
+}
+
+/*
  * Rewrite the directory open as dir itself, unless a range is given, which
  * only applies to files.
  */
@@ -9230,13 +9312,17 @@ zfs_rewrite_path(const char *path, boolean_t verbose, boolean_t recurse,
 	if (lstat(path, &st) < 0) {
 		ret = errno;
 		/*
-		 * Not an existing path, but it may be the name of a volume, or
-		 * of a snapshot, which the kernel refuses with a proper error.
+		 * Not an existing path, but it may be the name of a dataset:
+		 * a volume, or a snapshot, which the kernel refuses with a
+		 * proper error, or a file system.
 		 */
 		if ((ret == ENOENT || ret == ENOTDIR) &&
 		    zfs_dataset_exists(g_zfs, path,
 		    ZFS_TYPE_VOLUME | ZFS_TYPE_SNAPSHOT))
 			return (zfs_rewrite_volume(path, verbose, args));
+		if ((ret == ENOENT || ret == ENOTDIR) &&
+		    zfs_dataset_exists(g_zfs, path, ZFS_TYPE_FILESYSTEM))
+			return (zfs_rewrite_filesystem(path, verbose, args));
 		(void) fprintf(stderr, "failed to stat %s: %s\n",
 		    path, strerror(ret));
 		return (ret);
@@ -9320,7 +9406,8 @@ zfs_do_rewrite(int argc, char **argv)
 	argc -= optind;
 	if (argc == 0) {
 		(void) fprintf(stderr,
-		    "missing file, directory or volume target(s)\n");
+		    "missing file, directory, volume or file system "
+		    "target(s)\n");
 		usage(B_FALSE);
 	}
 
