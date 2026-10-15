@@ -354,10 +354,9 @@ void (*mock_dmu_rewrite_cb)(dnode_t *dn, uint64_t offset, uint64_t size,
 
 int
 dmu_rewrite_by_dnode(dnode_t *dn, uint64_t offset, uint64_t size,
-    uint64_t rewrite_flags, dmu_tx_t *tx, uint64_t *readp,
-    uint64_t *writtenp)
+    uint64_t rewrite_flags, dmu_tx_t *tx, dmu_rewrite_stats_t *stats)
 {
-	(void) tx; (void) readp; (void) writtenp;
+	(void) tx; (void) stats;
 	mock_dnode_t *mdn = (mock_dnode_t *)dn;
 
 	if (mock_dmu_rewrite_cb != NULL)

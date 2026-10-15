@@ -993,6 +993,8 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/cli_root/zfs_rewrite/zfs_rewrite_allocating.ksh \
 	functional/cli_root/zfs_rewrite/zfs_rewrite_dedup_birth.ksh \
 	functional/cli_root/zfs_rewrite/zfs_rewrite_directory.ksh \
+	functional/cli_root/zfs_rewrite/zfs_rewrite_filesystem.ksh \
+	functional/cli_root/zfs_rewrite/zfs_rewrite_filesystem_steps.ksh \
 	functional/cli_root/zfs_rewrite/zfs_rewrite_physical.ksh \
 	functional/cli_root/zfs_rewrite/zfs_rewrite_physical_raw_send.ksh \
 	functional/cli_root/zfs_rewrite/zfs_rewrite_skip_clone.ksh \
