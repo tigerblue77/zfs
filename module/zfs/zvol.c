@@ -515,8 +515,7 @@ zvol_rewrite_chunk(objset_t *os, dnode_t *dn, uint64_t off, uint64_t len,
 	zfs_locked_range_t *lr = NULL;
 	uint64_t lo;
 	uint64_t hi;
-	uint64_t nr = 0;
-	uint64_t nw = 0;
+	dmu_rewrite_stats_t drs = { 0 };
 	dmu_tx_t *tx;
 	int error;
 
@@ -555,13 +554,14 @@ zvol_rewrite_chunk(objset_t *os, dnode_t *dn, uint64_t off, uint64_t len,
 		dmu_tx_abort(tx);
 	} else {
 		*txgp = dmu_tx_get_txg(tx);
-		error = dmu_rewrite_by_dnode(dn, off, len, flags, tx, &nr, &nw);
+		error = dmu_rewrite_by_dnode(dn, off, len, flags, tx, &drs);
 		dmu_tx_commit(tx);
 	}
 
 	if (zv != NULL) {
-		dataset_kstats_update_read_kstats(&zv->zv_kstat, nr);
-		dataset_kstats_update_write_kstats(&zv->zv_kstat, nw);
+		dataset_kstats_update_read_kstats(&zv->zv_kstat, drs.drs_read);
+		dataset_kstats_update_write_kstats(&zv->zv_kstat,
+		    drs.drs_marked);
 		zfs_rangelock_exit(lr);
 		rw_exit(&zv->zv_suspend_lock);
 	}
@@ -746,24 +746,11 @@ zvol_rewrite(const char *name, uint64_t off, uint64_t len, uint64_t flags)
 
 	/* Do not return with the rewritten data still in memory only. */
 	if (last_txg != 0) {
-		txg_wait_flag_t wait_flags = TXG_WAIT_SIGNAL;
-		int werror;
+		int werror = dmu_rewrite_wait_synced(dmu_objset_pool(os),
+		    last_txg);
 
-		if (spa_get_failmode(spa) == ZIO_FAILURE_MODE_CONTINUE)
-			wait_flags |= TXG_WAIT_SUSPEND;
-		for (;;) {
-			werror = txg_wait_synced_flags(dmu_objset_pool(os),
-			    last_txg, wait_flags);
-			if (werror != EINTR || issig())
-				break;
-			/*
-			 * No signal to act on: a stop, or a FreeBSD process
-			 * being single-threaded, whose sleeps keep failing.
-			 */
-			delay(MSEC_TO_TICK(10));
-		}
-		if (error == 0 && werror != 0)
-			error = (werror == ESHUTDOWN) ? SET_ERROR(EIO) : werror;
+		if (error == 0)
+			error = werror;
 	}
 out:
 	if (dn != NULL)
