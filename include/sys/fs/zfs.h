@@ -1710,6 +1710,7 @@ typedef enum zfs_ioc {
 	ZFS_IOC_POOL_CONDENSE,			/* 0x5a5a */
 	ZFS_IOC_ZVOL_REWRITE,			/* 0x5a5b */
 	ZFS_IOC_DATASET_REWRITE,		/* 0x5a5c */
+	ZFS_IOC_POOL_REWRITE,			/* 0x5a5d */
 
 	/*
 	 * Per-platform (Optional) - 8/128 numbers reserved.
@@ -2029,6 +2030,19 @@ typedef enum {
 #define	DATASET_REWRITE_CLONED		"rewrite_cloned"	/* blocks */
 #define	DATASET_REWRITE_UNLINKED	"rewrite_unlinked"	/* objects */
 #define	DATASET_REWRITE_OTHER		"rewrite_other"		/* objects */
+
+/*
+ * The following are names used when invoking ZFS_IOC_POOL_REWRITE, and in
+ * what it returns.  The flags are ZFS_REWRITE_* flags, of which only
+ * ZFS_REWRITE_SKIP_ALLOCATING applies.  The cursor is returned until the
+ * rewrite is done, to be passed back as it is.  The counters are those of
+ * the call.
+ */
+#define	POOL_REWRITE_FLAGS		"rewrite_flags"
+#define	POOL_REWRITE_CURSOR		"rewrite_cursor"
+#define	POOL_REWRITE_OBJECTS		"rewrite_objects"
+#define	POOL_REWRITE_BLOCKS		"rewrite_blocks"
+#define	POOL_REWRITE_MARKED		"rewrite_marked"	/* bytes */
 
 /*
  * Flags for ZFS_IOC_VDEV_SET_STATE

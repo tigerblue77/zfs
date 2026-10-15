@@ -1550,6 +1550,220 @@ dsl_pool_config_held_writer(dsl_pool_t *dp)
 	return (RRW_WRITE_HELD(&dp->dp_config_rwlock));
 }
 
+/*
+ * What one call of dsl_pool_rewrite() selects at most, roughly, and how long
+ * it walks at most, roughly, before the blocks are marked in a transaction
+ * group of their own.
+ */
+#define	DSL_POOL_REWRITE_BYTES	(16ULL << 20)
+#define	DSL_POOL_REWRITE_NSEC	(1ULL * NANOSEC)
+
+typedef struct dsl_pool_rewrite_blk {
+	uint64_t	dprb_object;
+	uint64_t	dprb_blkid;
+	int		dprb_level;
+} dsl_pool_rewrite_blk_t;
+
+typedef struct dsl_pool_rewrite_sel {
+	dsl_pool_rewrite_t	*dprs_dpr;
+	dsl_pool_rewrite_blk_t	*dprs_blks;
+	uint64_t		dprs_nblks;
+	uint64_t		dprs_maxblks;
+	uint64_t		dprs_bytes;
+	uint64_t		dprs_object;
+} dsl_pool_rewrite_sel_t;
+
+static boolean_t
+dsl_pool_rewrite_select_cb(void *arg, int level, uint64_t blkid,
+    uint64_t size)
+{
+	dsl_pool_rewrite_sel_t *dprs = arg;
+
+	if (dprs->dprs_nblks == dprs->dprs_maxblks) {
+		uint64_t max = MAX(dprs->dprs_maxblks * 2, 1024);
+		dsl_pool_rewrite_blk_t *blks = kmem_alloc(max *
+		    sizeof (dsl_pool_rewrite_blk_t), KM_SLEEP);
+
+		if (dprs->dprs_nblks != 0) {
+			memcpy(blks, dprs->dprs_blks, dprs->dprs_nblks *
+			    sizeof (dsl_pool_rewrite_blk_t));
+			kmem_free(dprs->dprs_blks, dprs->dprs_maxblks *
+			    sizeof (dsl_pool_rewrite_blk_t));
+		}
+		dprs->dprs_blks = blks;
+		dprs->dprs_maxblks = max;
+	}
+	dprs->dprs_blks[dprs->dprs_nblks].dprb_object = dprs->dprs_object;
+	dprs->dprs_blks[dprs->dprs_nblks].dprb_blkid = blkid;
+	dprs->dprs_blks[dprs->dprs_nblks].dprb_level = level;
+	dprs->dprs_nblks++;
+	dprs->dprs_bytes += size;
+
+	return (dprs->dprs_bytes < DSL_POOL_REWRITE_BYTES);
+}
+
+/* See dsl_pool_rewrite(). */
+static int
+dsl_pool_rewrite_allowed(spa_t *spa)
+{
+	if (spa_has_checkpoint(spa))
+		return (SET_ERROR(ZFS_ERR_CHECKPOINT_EXISTS));
+	if (spa->spa_vdev_removal != NULL)
+		return (SET_ERROR(ZFS_ERR_DEVRM_IN_PROGRESS));
+	return (0);
+}
+
+static int
+dsl_pool_rewrite_check(void *arg, dmu_tx_t *tx)
+{
+	(void) arg;
+
+	return (dsl_pool_rewrite_allowed(dmu_tx_pool(tx)->dp_spa));
+}
+
+static void
+dsl_pool_rewrite_sync(void *arg, dmu_tx_t *tx)
+{
+	dsl_pool_rewrite_sel_t *dprs = arg;
+	dsl_pool_rewrite_t *dpr = dprs->dprs_dpr;
+	objset_t *mos = dmu_tx_pool(tx)->dp_meta_objset;
+	dnode_t *dn = NULL;
+	uint64_t object = 0;
+
+	for (uint64_t i = 0; i < dprs->dprs_nblks; i++) {
+		dsl_pool_rewrite_blk_t *b = &dprs->dprs_blks[i];
+		uint64_t size;
+
+		if (dn == NULL || b->dprb_object != object) {
+			if (dn != NULL && object != DMU_META_DNODE_OBJECT)
+				dnode_rele(dn, FTAG);
+			dn = NULL;
+			object = b->dprb_object;
+			if (object == DMU_META_DNODE_OBJECT)
+				dn = DMU_META_DNODE(mos);
+			else if (dnode_hold(mos, object, FTAG, &dn) != 0)
+				dn = NULL;	/* Freed meanwhile. */
+			if (dn == NULL)
+				continue;
+		}
+		size = dmu_rewrite_block_sync(dn, b->dprb_level,
+		    b->dprb_blkid, dpr->dpr_flags, tx);
+		if (size != 0) {
+			dpr->dpr_blocks++;
+			dpr->dpr_marked += size;
+		}
+	}
+	if (dn != NULL && object != DMU_META_DNODE_OBJECT)
+		dnode_rele(dn, FTAG);
+}
+
+/*
+ * Rewrite the MOS as-is without modification, so that its blocks are
+ * reallocated, from the cursor of dpr on, in steps.  Each call selects blocks,
+ * about DSL_POOL_REWRITE_BYTES of them or for about DSL_POOL_REWRITE_NSEC, from
+ * their block pointers, in open context, while prefetching them: the blocks of
+ * every object, then the blocks of dnodes.  A sync task then marks them, in
+ * syncing context, where the MOS is changed, after deciding again for each.
+ * Only the objects that the MOS had when the rewrite started, and the blocks
+ * of their dnodes, are walked: the others are new, and walking them could go
+ * on for as long as the rewrite adds to the MOS, a log space map per
+ * transaction group for one.  The cursor is left where to go on from, or at
+ * DSL_POOL_REWRITE_DONE once the frees of the old blocks are synced too.  The
+ * counters of dpr are added to.  The datasets are rewritten one by one, see
+ * zfs_rewrite_fs() and zvol_rewrite().  This is refused while the pool has a
+ * checkpoint, which keeps what is freed, or while a vdev is being removed.
+ */
+int
+dsl_pool_rewrite(dsl_pool_t *dp, dsl_pool_rewrite_t *dpr)
+{
+	dsl_pool_rewrite_sel_t dprs = { 0 };
+	objset_t *mos = dp->dp_meta_objset;
+	hrtime_t deadline = gethrtime() + DSL_POOL_REWRITE_NSEC;
+	int error;
+
+	error = dsl_pool_rewrite_allowed(dp->dp_spa);
+
+	if (dpr->dpr_end == 0) {
+		dnode_t *mdn = DMU_META_DNODE(mos);
+
+		rw_enter(&mdn->dn_struct_rwlock, RW_READER);
+		dpr->dpr_end = (mdn->dn_maxblkid + 1) <<
+		    (mdn->dn_datablkshift - DNODE_SHIFT);
+		rw_exit(&mdn->dn_struct_rwlock);
+	}
+
+	dprs.dprs_dpr = dpr;
+	while (error == 0 && dpr->dpr_phase != DSL_POOL_REWRITE_DONE &&
+	    dprs.dprs_bytes < DSL_POOL_REWRITE_BYTES &&
+	    gethrtime() < deadline) {
+		uint64_t object = dpr->dpr_object;
+		uint64_t end;
+		dnode_t *dn;
+
+		if (dpr->dpr_phase == DSL_POOL_REWRITE_OBJECTS &&
+		    dpr->dpr_blkid == 0) {
+			/* An object left in the middle is gone on with. */
+			error = dmu_object_next(mos, &object, B_FALSE, 0);
+			if (error == 0 && object >= dpr->dpr_end)
+				error = SET_ERROR(ESRCH);
+			if (error == ESRCH) {
+				dpr->dpr_phase = DSL_POOL_REWRITE_DNODES;
+				dpr->dpr_object = DMU_META_DNODE_OBJECT;
+				error = 0;
+				continue;
+			}
+			if (error != 0)
+				break;
+			dpr->dpr_object = object;
+		}
+
+		dsl_pool_config_enter(dp, FTAG);
+		if (dpr->dpr_phase == DSL_POOL_REWRITE_DNODES) {
+			dn = DMU_META_DNODE(mos);
+		} else if (dnode_hold(mos, object, FTAG, &dn) != 0) {
+			/* Freed meanwhile. */
+			dsl_pool_config_exit(dp, FTAG);
+			dpr->dpr_blkid = 0;
+			continue;
+		}
+		dprs.dprs_object = object;
+		end = (dpr->dpr_phase == DSL_POOL_REWRITE_DNODES) ?
+		    howmany(dpr->dpr_end, DNODES_PER_BLOCK) : UINT64_MAX;
+		error = dmu_rewrite_select(dn, &dpr->dpr_blkid, end,
+		    dpr->dpr_flags, deadline, dsl_pool_rewrite_select_cb,
+		    &dprs);
+		if (dpr->dpr_phase == DSL_POOL_REWRITE_OBJECTS)
+			dnode_rele(dn, FTAG);
+		dsl_pool_config_exit(dp, FTAG);
+		if (error != 0)
+			break;
+
+		if (dpr->dpr_blkid == UINT64_MAX) {
+			dpr->dpr_objects++;
+			dpr->dpr_blkid = 0;
+			if (dpr->dpr_phase == DSL_POOL_REWRITE_DNODES)
+				dpr->dpr_phase = DSL_POOL_REWRITE_DONE;
+		}
+	}
+
+	/* Its space is checked in blocks of 16K, from the bytes selected. */
+	if (error == 0 && dprs.dprs_nblks != 0) {
+		error = dsl_sync_task(spa_name(dp->dp_spa),
+		    dsl_pool_rewrite_check, dsl_pool_rewrite_sync, &dprs,
+		    (int)howmany(dprs.dprs_bytes, 1ULL << 14),
+		    ZFS_SPACE_CHECK_EXTRA_RESERVED);
+	}
+	if (dprs.dprs_maxblks != 0) {
+		kmem_free(dprs.dprs_blks, dprs.dprs_maxblks *
+		    sizeof (dsl_pool_rewrite_blk_t));
+	}
+
+	/* Let the frees of the old blocks be synced. */
+	if (error == 0 && dpr->dpr_phase == DSL_POOL_REWRITE_DONE)
+		error = dmu_rewrite_wait_synced(dp, 0);
+	return (error);
+}
+
 EXPORT_SYMBOL(dsl_pool_config_enter);
 EXPORT_SYMBOL(dsl_pool_config_exit);
 
