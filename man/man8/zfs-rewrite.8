@@ -165,7 +165,8 @@ is given, also rewrites its spill block, which holds the system attributes that
 do not fit in its dnode, such as extended attributes stored with
 .Sy xattr Ns = Ns Sy sa ,
 and the block that holds its dnode, with the other dnodes in that block.
-A rewrite of the whole of a volume also rewrites the block that holds its dnode.
+A rewrite of the whole of a volume also rewrites the object that holds its
+properties, the blocks that hold its dnodes, and the block of its objset.
 .Pp
 With
 .Fl r ,

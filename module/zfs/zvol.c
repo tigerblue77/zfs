@@ -584,8 +584,8 @@ zvol_rewrite_chunk(objset_t *os, dnode_t *dn, uint64_t off, uint64_t len,
  * held and the pool referenced meanwhile, so the volume can not be destroyed,
  * rolled back, received into, shrunk or sent itself, nor the pool exported,
  * until the rewrite is done.  It does not return before the rewritten data is
- * on stable storage.  A rewrite of the whole volume includes the block of its
- * dnode.
+ * on stable storage.  A rewrite of the whole volume includes the ZAP of its
+ * properties, the blocks of its dnodes and the block of its objset.
  */
 int
 zvol_rewrite(const char *name, uint64_t off, uint64_t len, uint64_t flags)
@@ -732,20 +732,37 @@ zvol_rewrite(const char *name, uint64_t off, uint64_t len, uint64_t flags)
 	}
 
 	/*
-	 * The block of the dnode, after the data: a data block marked for
-	 * rewrite dirtied the dnode already.
+	 * The ZAP of the volume properties, the blocks of the dnodes and the
+	 * block of the objset, after the data: a data block marked for
+	 * rewrite dirtied the dnode, and the blocks above it, already.
 	 */
 	if (error == 0 && whole && end >= volsize) {
-		dmu_tx_t *tx = dmu_tx_create(os);
+		dmu_rewrite_stats_t drs = { 0 };
+		uint64_t blkid = 0;
+		dnode_t *zdn;
 
-		dmu_tx_hold_bonus(tx, ZVOL_OBJ);
-		error = dmu_tx_assign(tx, DMU_TX_WAIT);
-		if (error != 0) {
-			dmu_tx_abort(tx);
-		} else {
-			if (dmu_rewrite_dnode(dn, flags, tx))
-				last_txg = MAX(last_txg, dmu_tx_get_txg(tx));
-			dmu_tx_commit(tx);
+		error = dnode_hold(os, ZVOL_ZAP_OBJ, FTAG, &zdn);
+		if (error == 0) {
+			error = zap_rewrite_by_dnode(zdn, flags, &drs);
+			dnode_rele(zdn, FTAG);
+		}
+		if (error == 0)
+			error = dmu_rewrite_meta_dnode(os, &blkid, flags, 0,
+			    &drs);
+		if (error == 0) {
+			dmu_tx_t *tx = dmu_tx_create(os);
+
+			error = dmu_tx_assign(tx, DMU_TX_WAIT);
+			if (error != 0) {
+				dmu_tx_abort(tx);
+			} else {
+				/* This group follows those of the marks. */
+				if (dmu_objset_rewrite_used(os, flags, tx) ||
+				    drs.drs_marked != 0)
+					last_txg = MAX(last_txg,
+					    dmu_tx_get_txg(tx));
+				dmu_tx_commit(tx);
+			}
 		}
 	}
 
