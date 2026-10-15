@@ -198,6 +198,27 @@ int dsl_pool_open_special_dir(dsl_pool_t *dp, const char *name, dsl_dir_t **);
 int dsl_pool_hold(const char *name, const void *tag, dsl_pool_t **dp);
 void dsl_pool_rele(dsl_pool_t *dp, const void *tag);
 
+/*
+ * The rewrite of the MOS, in steps, by dsl_pool_rewrite(): its flags, its
+ * cursor, which starts at 0, and its counters.
+ */
+#define	DSL_POOL_REWRITE_OBJECTS	0	/* the objects */
+#define	DSL_POOL_REWRITE_DNODES		1	/* the meta-dnode */
+#define	DSL_POOL_REWRITE_DONE		2
+
+typedef struct dsl_pool_rewrite {
+	uint64_t	dpr_flags;	/* ZFS_REWRITE_* flags */
+	uint64_t	dpr_phase;	/* DSL_POOL_REWRITE_* */
+	uint64_t	dpr_object;	/* object walked */
+	uint64_t	dpr_blkid;	/* level 0 block to go on from */
+	uint64_t	dpr_end;	/* objects older than this */
+	uint64_t	dpr_objects;	/* objects walked through */
+	uint64_t	dpr_blocks;	/* blocks marked */
+	uint64_t	dpr_marked;	/* bytes marked */
+} dsl_pool_rewrite_t;
+
+int dsl_pool_rewrite(dsl_pool_t *dp, dsl_pool_rewrite_t *dpr);
+
 void dsl_pool_create_obsolete_bpobj(dsl_pool_t *dp, dmu_tx_t *tx);
 void dsl_pool_destroy_obsolete_bpobj(dsl_pool_t *dp, dmu_tx_t *tx);
 
