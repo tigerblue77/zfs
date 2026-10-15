@@ -948,6 +948,25 @@ test_zvol_rewrite(const char *dataset)
 	nvlist_free(optional);
 }
 
+/* The cursor of the last step: rewrite the accounting objects only. */
+static void
+test_dataset_rewrite(const char *dataset)
+{
+	nvlist_t *optional = fnvlist_alloc();
+	nvlist_t *cursor = fnvlist_alloc();
+
+	fnvlist_add_uint64(cursor, "phase", 2);
+	fnvlist_add_uint64(cursor, "object", 0);
+	fnvlist_add_uint64(cursor, "offset", 0);
+	fnvlist_add_uint64(optional, DATASET_REWRITE_FLAGS, 0);
+	fnvlist_add_nvlist(optional, DATASET_REWRITE_CURSOR, cursor);
+
+	IOC_INPUT_TEST(ZFS_IOC_DATASET_REWRITE, dataset, NULL, optional, 0);
+
+	nvlist_free(cursor);
+	nvlist_free(optional);
+}
+
 static void
 test_get_bootenv(const char *pool)
 {
@@ -1071,6 +1090,7 @@ zfs_ioc_input_tests(const char *pool)
 	test_wait_fs(dataset);
 
 	test_zvol_rewrite(dataset);
+	test_dataset_rewrite(dataset);
 
 	test_set_bootenv(pool);
 	test_get_bootenv(pool);

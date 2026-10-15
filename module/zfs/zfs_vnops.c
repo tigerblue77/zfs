@@ -1125,10 +1125,10 @@ zfs_write(znode_t *zp, zfs_uio_t *uio, int ioflag, cred_t *cr)
 /*
  * Rewrite the spill block of a file or directory and the block of its dnode,
  * for a rewrite of the whole of it.  A block marked for rewrite before dirtied
- * the dnode already.
+ * the dnode already.  The spill block is counted in stats, if not NULL.
  */
 static int
-zfs_rewrite_meta(znode_t *zp, uint64_t flags)
+zfs_rewrite_meta(znode_t *zp, uint64_t flags, dmu_rewrite_stats_t *stats)
 {
 	zfsvfs_t *zfsvfs = ZTOZSB(zp);
 	dmu_buf_impl_t *db = (dmu_buf_impl_t *)sa_get_db(zp->z_sa_hdl);
@@ -1144,7 +1144,7 @@ zfs_rewrite_meta(znode_t *zp, uint64_t flags)
 		return (error);
 	}
 
-	(void) sa_rewrite_spill(zp->z_sa_hdl, flags, tx);
+	(void) sa_rewrite_spill(zp->z_sa_hdl, flags, tx, stats);
 	DB_DNODE_ENTER(db);
 	(void) dmu_rewrite_dnode(DB_DNODE(db), flags, tx);
 	DB_DNODE_EXIT(db);
@@ -1158,84 +1158,36 @@ zfs_rewrite_meta(znode_t *zp, uint64_t flags)
  * and as for a whole file, its spill block and the block of its dnode.
  */
 static int
-zfs_rewrite_dir(znode_t *zp, uint64_t flags)
+zfs_rewrite_dir(znode_t *zp, uint64_t flags, dmu_rewrite_stats_t *stats)
 {
 	dmu_buf_impl_t *db = (dmu_buf_impl_t *)sa_get_db(zp->z_sa_hdl);
 	int error;
 
 	DB_DNODE_ENTER(db);
-	error = zap_rewrite_by_dnode(DB_DNODE(db), flags, NULL, NULL);
+	error = zap_rewrite_by_dnode(DB_DNODE(db), flags, stats);
 	DB_DNODE_EXIT(db);
 
 	if (error == 0)
-		error = zfs_rewrite_meta(zp, flags);
+		error = zfs_rewrite_meta(zp, flags, stats);
 	return (error);
 }
 
 /*
- * Rewrite a range of file as-is without modification.  A rewrite of the whole
- * file includes its spill block and the block of its dnode.  A directory has
- * no range: it is rewritten whole, with off and len 0, and the caller needs
- * the permission to add entries to it, since it can not be open for writing.
- *
- *	IN:	zp	- znode of file or directory to be rewritten.
- *		off	- Offset of the range to rewrite.
- *		len	- Length of the range to rewrite.
- *		flags	- Random rewrite parameters.
- *		arg	- flags-specific argument.
- *		cr	- credentials of caller.
- *
- *	RETURN:	0 if success
- *		error code if failure
+ * Rewrite the data of a file in [*offp, end), skipping holes, under its range
+ * lock, until budget bytes, if not 0, are marked, failing with EDQUOT if quota
+ * and an owner of the file is over quota.  *offp is moved past what was done,
+ * to end once there is no more data.  The data read and marked, and the blocks
+ * left alone, are added to stats.
  */
-int
-zfs_rewrite(znode_t *zp, uint64_t off, uint64_t len, uint64_t flags,
-    uint64_t arg, cred_t *cr)
+static int
+zfs_rewrite_data(znode_t *zp, uint64_t *offp, uint64_t end, uint64_t flags,
+    uint64_t budget, boolean_t quota, dmu_rewrite_stats_t *stats)
 {
-	int error;
-
-	if ((flags & ~ZFS_REWRITE_VALID_FLAGS) != 0 || arg != 0)
-		return (SET_ERROR(EINVAL));
-
 	zfsvfs_t *zfsvfs = ZTOZSB(zp);
-	if ((error = zfs_enter_verify_zp(zfsvfs, zp, FTAG)) != 0)
-		return (error);
-
-	/* Check if physical rewrite is allowed */
-	spa_t *spa = zfsvfs->z_os->os_spa;
-	if ((flags & ZFS_REWRITE_PHYSICAL) &&
-	    !spa_feature_is_enabled(spa, SPA_FEATURE_PHYSICAL_REWRITE)) {
-		zfs_exit(zfsvfs, FTAG);
-		return (SET_ERROR(ENOTSUP));
-	}
-
-	if (zfs_is_readonly(zfsvfs)) {
-		zfs_exit(zfsvfs, FTAG);
-		return (SET_ERROR(EROFS));
-	}
-
-	if (Z_ISDIR(ZTOTYPE(zp))) {
-		if (off != 0 || len != 0)
-			error = SET_ERROR(EINVAL);
-		else
-			error = zfs_zaccess(zp, ACE_ADD_FILE, 0, B_FALSE, cr);
-		if (error == 0)
-			error = zfs_rewrite_dir(zp, flags);
-		zfs_exit(zfsvfs, FTAG);
-		return (error);
-	}
-
-	const boolean_t whole = (off == 0 && (len == 0 || len >= zp->z_size));
-
-	if (off >= zp->z_size) {
-		/* An empty file still has a dnode, and may have a spill. */
-		if (whole)
-			error = zfs_rewrite_meta(zp, flags);
-		zfs_exit(zfsvfs, FTAG);
-		return (error);
-	}
-	if (len == 0 || len > zp->z_size - off)
-		len = zp->z_size - off;
+	dmu_rewrite_stats_t drs = { 0 };
+	uint64_t off = *offp;
+	uint64_t len = end - off;
+	int error = 0;
 
 	/* Flush any mmap()'d data to disk */
 	if (zn_has_cached_data(zp, off, off + len - 1))
@@ -1252,7 +1204,7 @@ zfs_rewrite(znode_t *zp, uint64_t off, uint64_t len, uint64_t flags,
 	DB_DNODE_ENTER(db);
 	dnode_t *dn = DB_DNODE(db);
 
-	uint64_t n, noff = off, nr = 0, nw = 0;
+	uint64_t n, noff = off;
 	while (len > 0) {
 		/*
 		 * Rewrite only actual data, skipping any holes.  This might
@@ -1264,6 +1216,8 @@ zfs_rewrite(znode_t *zp, uint64_t off, uint64_t len, uint64_t flags,
 			if (error || noff >= off + len) {
 				if (error == ESRCH)	/* No more data. */
 					error = 0;
+				if (error == 0)
+					off = end;
 				break;
 			}
 			ASSERT3U(noff, >=, off);
@@ -1278,11 +1232,12 @@ zfs_rewrite(znode_t *zp, uint64_t off, uint64_t len, uint64_t flags,
 		}
 		ASSERT3U(noff, >, off);
 
-		if (zfs_id_overblockquota(zfsvfs, DMU_USERUSED_OBJECT, uid) ||
+		if (quota &&
+		    (zfs_id_overblockquota(zfsvfs, DMU_USERUSED_OBJECT, uid) ||
 		    zfs_id_overblockquota(zfsvfs, DMU_GROUPUSED_OBJECT, gid) ||
 		    (projid != ZFS_DEFAULT_PROJID &&
 		    zfs_id_overblockquota(zfsvfs, DMU_PROJECTUSED_OBJECT,
-		    projid))) {
+		    projid)))) {
 			error = SET_ERROR(EDQUOT);
 			break;
 		}
@@ -1313,7 +1268,7 @@ zfs_rewrite(znode_t *zp, uint64_t off, uint64_t len, uint64_t flags,
 		}
 
 		/* Mark all dbufs within range as dirty to trigger rewrite. */
-		error = dmu_rewrite_by_dnode(dn, off, n, flags, tx, &nr, &nw);
+		error = dmu_rewrite_by_dnode(dn, off, n, flags, tx, &drs);
 		if (error) {
 			dmu_tx_commit(tx);
 			break;
@@ -1324,6 +1279,9 @@ zfs_rewrite(znode_t *zp, uint64_t off, uint64_t len, uint64_t flags,
 		len -= n;
 		off += n;
 
+		if (budget != 0 && drs.drs_marked >= budget)
+			break;
+
 		if (issig()) {
 			error = SET_ERROR(EINTR);
 			break;
@@ -1331,15 +1289,399 @@ zfs_rewrite(znode_t *zp, uint64_t off, uint64_t len, uint64_t flags,
 	}
 
 	DB_DNODE_EXIT(db);
-
-	dataset_kstats_update_read_kstats(&zfsvfs->z_kstat, nr);
-	dataset_kstats_update_write_kstats(&zfsvfs->z_kstat, nw);
-
-	if (error == 0 && whole)
-		error = zfs_rewrite_meta(zp, flags);
-
 	zfs_rangelock_exit(lr);
+
+	dataset_kstats_update_read_kstats(&zfsvfs->z_kstat, drs.drs_read);
+	dataset_kstats_update_write_kstats(&zfsvfs->z_kstat, drs.drs_marked);
+
+	stats->drs_read += drs.drs_read;
+	stats->drs_marked += drs.drs_marked;
+	stats->drs_shared += drs.drs_shared;
+	stats->drs_cloned += drs.drs_cloned;
+	*offp = off;
+	return (error);
+}
+
+/*
+ * Rewrite a range of file as-is without modification.  A rewrite of the whole
+ * file includes its spill block and the block of its dnode.  A directory has
+ * no range: it is rewritten whole, with off and len 0, and the caller needs
+ * the permission to add entries to it, since it can not be open for writing.
+ *
+ *	IN:	zp	- znode of file or directory to be rewritten.
+ *		off	- Offset of the range to rewrite.
+ *		len	- Length of the range to rewrite.
+ *		flags	- Random rewrite parameters.
+ *		arg	- flags-specific argument.
+ *		cr	- credentials of caller.
+ *
+ *	RETURN:	0 if success
+ *		error code if failure
+ */
+int
+zfs_rewrite(znode_t *zp, uint64_t off, uint64_t len, uint64_t flags,
+    uint64_t arg, cred_t *cr)
+{
+	dmu_rewrite_stats_t drs = { 0 };
+	int error;
+
+	if ((flags & ~ZFS_REWRITE_VALID_FLAGS) != 0 || arg != 0)
+		return (SET_ERROR(EINVAL));
+
+	zfsvfs_t *zfsvfs = ZTOZSB(zp);
+	if ((error = zfs_enter_verify_zp(zfsvfs, zp, FTAG)) != 0)
+		return (error);
+
+	/* Check if physical rewrite is allowed */
+	spa_t *spa = zfsvfs->z_os->os_spa;
+	if ((flags & ZFS_REWRITE_PHYSICAL) &&
+	    !spa_feature_is_enabled(spa, SPA_FEATURE_PHYSICAL_REWRITE)) {
+		zfs_exit(zfsvfs, FTAG);
+		return (SET_ERROR(ENOTSUP));
+	}
+
+	if (zfs_is_readonly(zfsvfs)) {
+		zfs_exit(zfsvfs, FTAG);
+		return (SET_ERROR(EROFS));
+	}
+
+	if (Z_ISDIR(ZTOTYPE(zp))) {
+		if (off != 0 || len != 0)
+			error = SET_ERROR(EINVAL);
+		else
+			error = zfs_zaccess(zp, ACE_ADD_FILE, 0, B_FALSE, cr);
+		if (error == 0)
+			error = zfs_rewrite_dir(zp, flags, &drs);
+		zfs_exit(zfsvfs, FTAG);
+		return (error);
+	}
+
+	const boolean_t whole = (off == 0 && (len == 0 || len >= zp->z_size));
+
+	if (off < zp->z_size) {
+		if (len == 0 || len > zp->z_size - off)
+			len = zp->z_size - off;
+		error = zfs_rewrite_data(zp, &off, off + len, flags, 0, B_TRUE,
+		    &drs);
+	}
+
+	/* An empty file still has a dnode, and may have a spill. */
+	if (error == 0 && whole)
+		error = zfs_rewrite_meta(zp, flags, &drs);
+
 	zfs_exit(zfsvfs, FTAG);
+	return (error);
+}
+
+/*
+ * What one call of zfs_rewrite_fs() marks for rewrite at most, roughly, and
+ * how long it runs at most, roughly: it stops between objects, or between
+ * pieces of an object, of at most DMU_MAX_ACCESS / 2 bytes.
+ */
+#define	ZFS_REWRITE_FS_BYTES	(64ULL << 20)
+#define	ZFS_REWRITE_FS_NSEC	(1ULL * NANOSEC)
+
+static void
+zfs_rewrite_fs_add(dmu_rewrite_stats_t *to, const dmu_rewrite_stats_t *from)
+{
+	to->drs_read += from->drs_read;
+	to->drs_marked += from->drs_marked;
+	to->drs_shared += from->drs_shared;
+	to->drs_cloned += from->drs_cloned;
+}
+
+/*
+ * Rewrite a file or directory of a mounted file system through its znode, as
+ * zfs_rewrite() does, from zrf_offset on, until budget bytes are marked.  The
+ * quotas of its owners do not stop it, as they do not when unmounted.
+ */
+static int
+zfs_rewrite_fs_znode(zfsvfs_t *zfsvfs, uint64_t obj, zfs_rewrite_fs_t *zrf,
+    uint64_t budget)
+{
+	dmu_rewrite_stats_t drs = { 0 };
+	znode_t *zp;
+	int error;
+
+	error = zfs_zget(zfsvfs, obj, &zp);
+	if (error == ENOENT || error == EINVAL) {
+		/* Freed, or reused for something else, meanwhile. */
+		zrf->zrf_offset = 0;
+		return (0);
+	}
+	if (error != 0)
+		return (error);
+
+	if (zp->z_unlinked) {
+		zrf->zrf_unlinked++;
+		zrf->zrf_offset = 0;
+	} else if (Z_ISDIR(ZTOTYPE(zp))) {
+		error = zfs_rewrite_dir(zp, zrf->zrf_flags, &drs);
+		if (error == 0) {
+			zrf->zrf_objects++;
+			zrf->zrf_offset = 0;
+		}
+	} else {
+		uint64_t off = zrf->zrf_offset;
+		uint64_t size = zp->z_size;
+
+		if (off < size) {
+			error = zfs_rewrite_data(zp, &off, size,
+			    zrf->zrf_flags, budget, B_FALSE, &drs);
+		}
+		if (error == 0 && off < size) {
+			zrf->zrf_offset = off;
+		} else if (error == 0) {
+			error = zfs_rewrite_meta(zp, zrf->zrf_flags, &drs);
+			if (error == 0) {
+				zrf->zrf_objects++;
+				zrf->zrf_offset = 0;
+			}
+		}
+	}
+	zfs_rewrite_fs_add(&zrf->zrf_stats, &drs);
+
+	zrele(zp);
+	return (error);
+}
+
+/*
+ * Rewrite the FUID table of a mounted file system under the lock of its
+ * updates, taken once the transaction is assigned, as they do.
+ */
+static int
+zfs_rewrite_fs_fuid(zfsvfs_t *zfsvfs, dnode_t *dn, zfs_rewrite_fs_t *zrf)
+{
+	uint64_t size;
+	dmu_tx_t *tx;
+	int error;
+
+	rw_enter(&dn->dn_struct_rwlock, RW_READER);
+	size = (dn->dn_maxblkid + 1) * dn->dn_datablksz;
+	rw_exit(&dn->dn_struct_rwlock);
+
+	tx = dmu_tx_create(zfsvfs->z_os);
+	dmu_tx_hold_write_by_dnode(tx, dn, 0, size);
+	error = dmu_tx_assign(tx, DMU_TX_WAIT);
+	if (error != 0) {
+		dmu_tx_abort(tx);
+		return (error);
+	}
+	rw_enter(&zfsvfs->z_fuid_lock, RW_READER);
+	error = dmu_rewrite_by_dnode(dn, 0, size, zrf->zrf_flags, tx,
+	    &zrf->zrf_stats);
+	rw_exit(&zfsvfs->z_fuid_lock);
+	dmu_tx_commit(tx);
+
+	return (error);
+}
+
+/*
+ * Rewrite an object of a file system through the DMU: a ZAP object under its
+ * lock, or, when the objset is owned, the data of any other object, and its
+ * spill block.  The blocks of dnodes are rewritten later, by the pass over
+ * the meta-dnode.
+ */
+static int
+zfs_rewrite_fs_dnode(zfsvfs_t *zfsvfs, dnode_t *dn, zfs_rewrite_fs_t *zrf,
+    uint64_t budget)
+{
+	objset_t *os = dn->dn_objset;
+	uint64_t flags = zrf->zrf_flags;
+	int error;
+
+	if (DMU_OT_BYTESWAP(dn->dn_type) == DMU_BSWAP_ZAP) {
+		error = zap_rewrite_by_dnode(dn, flags, &zrf->zrf_stats);
+		zrf->zrf_offset = 0;
+	} else if (zfsvfs != NULL && dn->dn_type == DMU_OT_FUID) {
+		error = zfs_rewrite_fs_fuid(zfsvfs, dn, zrf);
+		zrf->zrf_offset = 0;
+	} else {
+		uint64_t end;
+
+		ASSERT3P(zfsvfs, ==, NULL);
+		rw_enter(&dn->dn_struct_rwlock, RW_READER);
+		end = (dn->dn_maxblkid + 1) * dn->dn_datablksz;
+		rw_exit(&dn->dn_struct_rwlock);
+		error = dmu_rewrite_range(dn, &zrf->zrf_offset, end, flags,
+		    budget, &zrf->zrf_stats);
+		if (error == 0 && zrf->zrf_offset < end)
+			return (0);
+		zrf->zrf_offset = 0;
+	}
+
+	/* Nothing else changes the spill block of an owned objset. */
+	if (error == 0 && zfsvfs == NULL && dn->dn_have_spill) {
+		dmu_tx_t *tx = dmu_tx_create(os);
+
+		dmu_tx_hold_spill(tx, dn->dn_object);
+		error = dmu_tx_assign(tx, DMU_TX_WAIT);
+		if (error != 0) {
+			dmu_tx_abort(tx);
+		} else {
+			(void) dmu_rewrite_spill_by_dnode(dn, flags, tx,
+			    &zrf->zrf_stats);
+			dmu_tx_commit(tx);
+		}
+	}
+	if (error == 0)
+		zrf->zrf_objects++;
+	return (error);
+}
+
+/*
+ * Rewrite object obj of a file system, from zrf_offset on, as the owner of
+ * the object would let it be: through its znode, under the locks of the ZPL,
+ * if the file system is mounted, else through the DMU, the objset being
+ * owned.  An object that the delete queue holds is left alone, since it is
+ * about to be freed, or still open while unlinked, and so is, when mounted,
+ * an object whose updates the ZPL does not serialize as these locks expect,
+ * such as a legacy ACL.  zrf_offset is left at 0 once the object is done.
+ */
+static int
+zfs_rewrite_fs_object(zfsvfs_t *zfsvfs, objset_t *os, uint64_t obj,
+    uint64_t unlinkedobj, zfs_rewrite_fs_t *zrf, uint64_t budget)
+{
+	dmu_object_info_t doi;
+	dnode_t *dn;
+	int error;
+
+	error = dmu_object_info(os, obj, &doi);
+	if (error == ENOENT) {
+		zrf->zrf_offset = 0;
+		return (0);
+	}
+	if (error != 0)
+		return (error);
+
+	if (unlinkedobj != 0 && zap_lookup_int(os, unlinkedobj, obj) == 0) {
+		zrf->zrf_unlinked++;
+		zrf->zrf_offset = 0;
+		return (0);
+	}
+
+	if (zfsvfs != NULL && (doi.doi_bonus_type == DMU_OT_SA ||
+	    doi.doi_bonus_type == DMU_OT_ZNODE) &&
+	    (doi.doi_type == DMU_OT_PLAIN_FILE_CONTENTS ||
+	    doi.doi_type == DMU_OT_DIRECTORY_CONTENTS))
+		return (zfs_rewrite_fs_znode(zfsvfs, obj, zrf, budget));
+
+	if (zfsvfs != NULL && doi.doi_type != DMU_OT_FUID &&
+	    DMU_OT_BYTESWAP(doi.doi_type) != DMU_BSWAP_ZAP) {
+		zrf->zrf_other++;
+		zrf->zrf_offset = 0;
+		return (0);
+	}
+
+	error = dnode_hold(os, obj, FTAG, &dn);
+	if (error == ENOENT) {
+		zrf->zrf_offset = 0;
+		return (0);
+	}
+	if (error != 0)
+		return (error);
+	error = zfs_rewrite_fs_dnode(zfsvfs, dn, zrf, budget);
+	dnode_rele(dn, FTAG);
+
+	return (error);
+}
+
+/*
+ * Rewrite a file system, the head dataset of objset os, from the cursor of
+ * zrf on, for about ZFS_REWRITE_FS_BYTES or ZFS_REWRITE_FS_NSEC, and leave the
+ * cursor where to go on, or at ZFS_REWRITE_FS_DONE.  Its objects are rewritten
+ * first, see zfs_rewrite_fs_object(), then the blocks of dnodes and the
+ * indirect blocks of the meta-dnode, then the accounting objects and the
+ * objset, in one transaction group, which is waited for.  If the file system
+ * is mounted, zfsvfs is the one entered, else NULL, and os is owned.  The
+ * counters of zrf are added to.
+ */
+int
+zfs_rewrite_fs(zfsvfs_t *zfsvfs, objset_t *os, zfs_rewrite_fs_t *zrf)
+{
+	uint64_t marked = zrf->zrf_stats.drs_marked;
+	hrtime_t start = gethrtime();
+	uint64_t unlinkedobj = 0;
+	int error = 0;
+
+	if (zfsvfs != NULL) {
+		unlinkedobj = zfsvfs->z_unlinkedobj;
+	} else {
+		error = zap_lookup(os, MASTER_NODE_OBJ, ZFS_UNLINKED_SET, 8, 1,
+		    &unlinkedobj);
+		if (error == ENOENT)
+			error = 0;
+		if (error != 0)
+			return (error);
+	}
+
+	while (error == 0 && zrf->zrf_phase == ZFS_REWRITE_FS_OBJECTS) {
+		uint64_t obj = zrf->zrf_object;
+		uint64_t done = zrf->zrf_stats.drs_marked - marked;
+
+		if (done >= ZFS_REWRITE_FS_BYTES ||
+		    gethrtime() - start >= ZFS_REWRITE_FS_NSEC)
+			return (0);
+
+		/* An object left in the middle is gone on with first. */
+		if (zrf->zrf_offset == 0) {
+			error = dmu_object_next(os, &obj, B_FALSE, 0);
+			if (error == ESRCH) {
+				zrf->zrf_phase = ZFS_REWRITE_FS_DNODES;
+				zrf->zrf_object = 0;
+				error = 0;
+				break;
+			}
+			if (error != 0)
+				break;
+			zrf->zrf_object = obj;
+		}
+		error = zfs_rewrite_fs_object(zfsvfs, os, obj, unlinkedobj,
+		    zrf, ZFS_REWRITE_FS_BYTES - done);
+		if (error == 0 && issig())
+			error = SET_ERROR(EINTR);
+	}
+
+	if (error == 0 && zrf->zrf_phase == ZFS_REWRITE_FS_DNODES) {
+		uint64_t done = zrf->zrf_stats.drs_marked - marked;
+
+		/*
+		 * Let the dnodes dirtied so far be written first, which they
+		 * are anyway, so that their blocks are not written twice.
+		 */
+		if (zrf->zrf_object == 0)
+			error = dmu_rewrite_wait_synced(dmu_objset_pool(os), 0);
+		if (error != 0)
+			return (error);
+
+		error = dmu_rewrite_meta_dnode(os, &zrf->zrf_object,
+		    zrf->zrf_flags, done < ZFS_REWRITE_FS_BYTES ?
+		    ZFS_REWRITE_FS_BYTES - done : 1, &zrf->zrf_stats);
+		if (error == 0 && zrf->zrf_object == UINT64_MAX)
+			zrf->zrf_phase = ZFS_REWRITE_FS_ACCOUNTING;
+	}
+
+	if (error == 0 && zrf->zrf_phase == ZFS_REWRITE_FS_ACCOUNTING) {
+		dmu_tx_t *tx = dmu_tx_create(os);
+		uint64_t txg;
+
+		error = dmu_tx_assign(tx, DMU_TX_WAIT);
+		if (error != 0) {
+			dmu_tx_abort(tx);
+			return (error);
+		}
+		txg = dmu_tx_get_txg(tx);
+		(void) dmu_objset_rewrite_used(os, zrf->zrf_flags, tx);
+		dmu_tx_commit(tx);
+
+		/* Do not return with the rewrite still in memory only. */
+		error = dmu_rewrite_wait_synced(dmu_objset_pool(os), txg);
+		if (error == 0) {
+			zrf->zrf_phase = ZFS_REWRITE_FS_DONE;
+			zrf->zrf_object = 0;
+		}
+	}
+
 	return (error);
 }
 
