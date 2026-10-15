@@ -206,6 +206,7 @@ nobase_dist_datadir_zfs_tests_tests_DATA += \
 	functional/cli_root/zpool_reopen/zpool_reopen.cfg \
 	functional/cli_root/zpool_reopen/zpool_reopen.shlib \
 	functional/cli_root/zpool_resilver/zpool_resilver.cfg \
+	functional/cli_root/zpool_rewrite/zpool_rewrite.kshlib \
 	functional/cli_root/zpool_scrub/zpool_scrub.cfg \
 	functional/cli_root/zpool_split/zpool_split.cfg \
 	functional/cli_root/zpool_trim/zpool_trim.kshlib \
@@ -1381,6 +1382,10 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/cli_root/zpool_resilver/zpool_resilver_bad_args.ksh \
 	functional/cli_root/zpool_resilver/zpool_resilver_restart.ksh \
 	functional/cli_root/zpool_resilver/zpool_resilver_concurrent.ksh \
+	functional/cli_root/zpool_rewrite/cleanup.ksh \
+	functional/cli_root/zpool_rewrite/setup.ksh \
+	functional/cli_root/zpool_rewrite/zpool_rewrite_drain.ksh \
+	functional/cli_root/zpool_rewrite/zpool_rewrite_snapshot.ksh \
 	functional/cli_root/zpool_scrub/cleanup.ksh \
 	functional/cli_root/zpool_scrub/setup.ksh \
 	functional/cli_root/zpool_scrub/zpool_scrub_001_neg.ksh \
