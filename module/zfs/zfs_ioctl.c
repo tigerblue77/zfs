@@ -5357,6 +5357,83 @@ zfs_ioc_dataset_rewrite(const char *name, nvlist_t *innvl, nvlist_t *outnvl)
 }
 
 /*
+ * Rewrite the metadata of the pool itself, its MOS, as-is without
+ * modification, in steps: see dsl_pool_rewrite().  This is refused while the
+ * pool has a checkpoint, which keeps what is freed, or while a vdev is being
+ * removed.  The datasets are rewritten one by one with
+ * ZFS_IOC_DATASET_REWRITE.
+ *
+ * innvl: {
+ *     "rewrite_flags" -> uint64_t (optional, ZFS_REWRITE_SKIP_ALLOCATING)
+ *     "rewrite_cursor" -> nvlist (optional, from the previous call)
+ * }
+ *
+ * outnvl: {
+ *     "rewrite_cursor" -> nvlist (absent once the rewrite is done)
+ *     "rewrite_objects" -> uint64_t (objects walked through)
+ *     "rewrite_blocks" -> uint64_t (blocks marked for rewrite)
+ *     "rewrite_marked" -> uint64_t (bytes marked for rewrite)
+ * }
+ */
+static const zfs_ioc_key_t zfs_keys_pool_rewrite[] = {
+	{POOL_REWRITE_FLAGS,	DATA_TYPE_UINT64,	ZK_OPTIONAL},
+	{POOL_REWRITE_CURSOR,	DATA_TYPE_NVLIST,	ZK_OPTIONAL},
+};
+
+static int
+zfs_ioc_pool_rewrite(const char *pool, nvlist_t *innvl, nvlist_t *outnvl)
+{
+	dsl_pool_rewrite_t dpr = { 0 };
+	nvlist_t *cursor;
+	spa_t *spa;
+	int error;
+
+	if (innvl != NULL) {
+		(void) nvlist_lookup_uint64(innvl, POOL_REWRITE_FLAGS,
+		    &dpr.dpr_flags);
+		if (nvlist_lookup_nvlist(innvl, POOL_REWRITE_CURSOR,
+		    &cursor) == 0) {
+			if (nvlist_lookup_uint64(cursor, "phase",
+			    &dpr.dpr_phase) != 0 ||
+			    nvlist_lookup_uint64(cursor, "object",
+			    &dpr.dpr_object) != 0 ||
+			    nvlist_lookup_uint64(cursor, "blkid",
+			    &dpr.dpr_blkid) != 0)
+				return (SET_ERROR(EINVAL));
+			(void) nvlist_lookup_uint64(cursor, "end",
+			    &dpr.dpr_end);
+		}
+	}
+	if ((dpr.dpr_flags & ~ZFS_REWRITE_SKIP_ALLOCATING) != 0 ||
+	    dpr.dpr_phase >= DSL_POOL_REWRITE_DONE)
+		return (SET_ERROR(EINVAL));
+
+	error = spa_open(pool, &spa, FTAG);
+	if (error != 0)
+		return (error);
+	error = dsl_pool_rewrite(spa_get_dsl(spa), &dpr);
+	spa_close(spa, FTAG);
+
+	if (dpr.dpr_phase != DSL_POOL_REWRITE_DONE) {
+		cursor = fnvlist_alloc();
+		fnvlist_add_uint64(cursor, "phase", dpr.dpr_phase);
+		fnvlist_add_uint64(cursor, "object", dpr.dpr_object);
+		fnvlist_add_uint64(cursor, "blkid", dpr.dpr_blkid);
+		fnvlist_add_uint64(cursor, "end", dpr.dpr_end);
+		fnvlist_add_nvlist(outnvl, POOL_REWRITE_CURSOR, cursor);
+		fnvlist_free(cursor);
+	}
+	fnvlist_add_uint64(outnvl, POOL_REWRITE_OBJECTS, dpr.dpr_objects);
+	fnvlist_add_uint64(outnvl, POOL_REWRITE_BLOCKS, dpr.dpr_blocks);
+	fnvlist_add_uint64(outnvl, POOL_REWRITE_MARKED, dpr.dpr_marked);
+
+	/* Report damaged metadata as I/O does. */
+	if (error == ECKSUM)
+		error = SET_ERROR(EIO);
+	return (error);
+}
+
+/*
  * fsname is name of dataset to rollback (to most recent snapshot)
  *
  * innvl may contain name of expected target snapshot
@@ -8467,6 +8544,12 @@ zfs_ioctl_init(void)
 	    zfs_ioc_dataset_rewrite, zfs_secpolicy_config, DATASET_NAME,
 	    POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY, B_FALSE, B_TRUE,
 	    zfs_keys_dataset_rewrite, ARRAY_SIZE(zfs_keys_dataset_rewrite));
+
+	/* Called once per step: not logged in the history each time. */
+	zfs_ioctl_register("pool_rewrite", ZFS_IOC_POOL_REWRITE,
+	    zfs_ioc_pool_rewrite, zfs_secpolicy_config, POOL_NAME,
+	    POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY, B_FALSE, B_TRUE,
+	    zfs_keys_pool_rewrite, ARRAY_SIZE(zfs_keys_pool_rewrite));
 
 	/* IOCTLS that use the legacy function signature */
 

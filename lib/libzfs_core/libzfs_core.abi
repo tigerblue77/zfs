@@ -222,6 +222,7 @@
     <elf-symbol name='lzc_pool_checkpoint' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='lzc_pool_checkpoint_discard' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='lzc_pool_prefetch' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
+    <elf-symbol name='lzc_pool_rewrite' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='lzc_promote' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='lzc_receive' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='lzc_receive_one' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
@@ -2836,6 +2837,7 @@
       <enumerator name='ZFS_IOC_POOL_CONDENSE' value='23130'/>
       <enumerator name='ZFS_IOC_ZVOL_REWRITE' value='23131'/>
       <enumerator name='ZFS_IOC_DATASET_REWRITE' value='23132'/>
+      <enumerator name='ZFS_IOC_POOL_REWRITE' value='23133'/>
       <enumerator name='ZFS_IOC_PLATFORM' value='23168'/>
       <enumerator name='ZFS_IOC_EVENTS_NEXT' value='23169'/>
       <enumerator name='ZFS_IOC_EVENTS_CLEAR' value='23170'/>
@@ -4501,6 +4503,13 @@
     </function-decl>
     <function-decl name='lzc_dataset_rewrite' mangled-name='lzc_dataset_rewrite' visibility='default' binding='global' size-in-bits='64' elf-symbol-id='lzc_dataset_rewrite'>
       <parameter type-id='80f4b756' name='fsname'/>
+      <parameter type-id='9c313c2d' name='flags'/>
+      <parameter type-id='5ce45b60' name='cursor'/>
+      <parameter type-id='857bb57e' name='outnvl'/>
+      <return type-id='95e97e5e'/>
+    </function-decl>
+    <function-decl name='lzc_pool_rewrite' mangled-name='lzc_pool_rewrite' visibility='default' binding='global' size-in-bits='64' elf-symbol-id='lzc_pool_rewrite'>
+      <parameter type-id='80f4b756' name='pool'/>
       <parameter type-id='9c313c2d' name='flags'/>
       <parameter type-id='5ce45b60' name='cursor'/>
       <parameter type-id='857bb57e' name='outnvl'/>
