@@ -2117,6 +2117,105 @@ dmu_objset_do_userquota_updates_prep(objset_t *os, dmu_tx_t *tx)
 }
 
 /*
+ * Ask for the blocks of the user, group and project accounting objects of os
+ * that the ZFS_REWRITE_SKIP_* flags do not leave alone to be rewritten, as
+ * dmu_rewrite_by_dnode() does for other objects, in the transaction group of
+ * tx.  Those objects are only changed in syncing context, once the other
+ * objects of the dataset are synced, so dmu_objset_rewrite_used_sync() marks
+ * their blocks then.  If one of them, or the block of the objset, which every
+ * sync of the dataset writes anew, is to be rewritten, the dataset is dirtied,
+ * so that it is synced in that group.  Return B_TRUE if it was.
+ */
+static const uint64_t dmu_objset_used_objects[] = {
+	DMU_USERUSED_OBJECT, DMU_GROUPUSED_OBJECT, DMU_PROJECTUSED_OBJECT
+};
+
+boolean_t
+dmu_objset_rewrite_used(objset_t *os, uint64_t rewrite_flags, dmu_tx_t *tx)
+{
+	dsl_dataset_t *ds = os->os_dsl_dataset;
+	uint64_t txg = dmu_tx_get_txg(tx);
+	int t = txg & TXG_MASK;
+	boolean_t needed;
+	blkptr_t bp;
+
+	ASSERT(!dmu_tx_is_syncing(tx));
+	ASSERT3P(ds, !=, NULL);
+
+	rewrite_flags &= ~ZFS_REWRITE_PHYSICAL;
+
+	rrw_enter(&ds->ds_bp_rwlock, RW_READER, FTAG);
+	bp = *os->os_rootbp;
+	rrw_exit(&ds->ds_bp_rwlock, FTAG);
+	needed = dmu_rewrite_bp_needed(os, &bp, rewrite_flags);
+	for (int i = 0; i < ARRAY_SIZE(dmu_objset_used_objects) && !needed;
+	    i++) {
+		dnode_t *dn;
+
+		/* The hold is what lets their blocks be held. */
+		if (dnode_hold(os, dmu_objset_used_objects[i], FTAG,
+		    &dn) != 0)
+			continue;
+		needed = dmu_rewrite_needed(dn, rewrite_flags);
+		dnode_rele(dn, FTAG);
+	}
+	if (!needed)
+		return (B_FALSE);
+
+	mutex_enter(&os->os_lock);
+	if (os->os_rewrite_used_txg[t] == txg) {
+		/* Two requests: leave alone only what both would. */
+		os->os_rewrite_used_flags[t] &= rewrite_flags;
+	} else {
+		os->os_rewrite_used_txg[t] = txg;
+		os->os_rewrite_used_flags[t] = rewrite_flags;
+	}
+	mutex_exit(&os->os_lock);
+
+	dsl_dataset_dirty(ds, tx);
+	return (B_TRUE);
+}
+
+/*
+ * Mark for rewrite the blocks of the accounting objects that
+ * dmu_objset_rewrite_used() asked for in this transaction group, before they
+ * are updated: the dataset is then synced again, with them.
+ */
+static void
+dmu_objset_rewrite_used_sync(objset_t *os, dmu_tx_t *tx)
+{
+	uint64_t txg = dmu_tx_get_txg(tx);
+	int t = txg & TXG_MASK;
+	uint64_t rewrite_flags;
+
+	ASSERT(dmu_tx_is_syncing(tx));
+
+	mutex_enter(&os->os_lock);
+	if (os->os_rewrite_used_txg[t] != txg) {
+		mutex_exit(&os->os_lock);
+		return;
+	}
+	rewrite_flags = os->os_rewrite_used_flags[t];
+	os->os_rewrite_used_txg[t] = 0;
+	mutex_exit(&os->os_lock);
+
+	for (int i = 0; i < ARRAY_SIZE(dmu_objset_used_objects); i++) {
+		dnode_t *dn;
+		uint64_t size;
+
+		if (dnode_hold(os, dmu_objset_used_objects[i], FTAG,
+		    &dn) != 0)
+			continue;
+		rw_enter(&dn->dn_struct_rwlock, RW_READER);
+		size = (dn->dn_maxblkid + 1) * dn->dn_datablksz;
+		rw_exit(&dn->dn_struct_rwlock);
+		(void) dmu_rewrite_by_dnode(dn, 0, size, rewrite_flags, tx,
+		    NULL, NULL);
+		dnode_rele(dn, FTAG);
+	}
+}
+
+/*
  * Dispatch taskq tasks to dp_sync_taskq to update the user accounting, and
  * also release the holds on the dnodes from dmu_objset_sync_dnodes().
  * The caller must taskq_wait(dp_sync_taskq).
@@ -2125,6 +2224,9 @@ void
 dmu_objset_sync_done(objset_t *os, dmu_tx_t *tx)
 {
 	boolean_t need_userquota = dmu_objset_do_userquota_updates_prep(os, tx);
+
+	if (need_userquota)
+		dmu_objset_rewrite_used_sync(os, tx);
 
 	int num_sublists = multilist_get_num_sublists(&os->os_synced_dnodes);
 	for (int i = 0; i < num_sublists; i++) {
@@ -3026,6 +3128,7 @@ dmu_objset_block_is_shared(objset_t *os, const blkptr_t *bp)
 	return (BP_GET_BIRTH(bp) <= dsl_dataset_phys(ds)->ds_prev_snap_txg);
 }
 
+EXPORT_SYMBOL(dmu_objset_rewrite_used);
 EXPORT_SYMBOL(dmu_objset_zil);
 EXPORT_SYMBOL(dmu_objset_pool);
 EXPORT_SYMBOL(dmu_objset_ds);
