@@ -1277,12 +1277,12 @@ static const uint64_t zap_rewrite_batch = 1024 * 1024;
  * transactions, each holding the lock again for at most zap_rewrite_batch
  * bytes.  The blocks that updates add meanwhile are left alone, since they have
  * just been written.  The ZAP must be one that is only updated in open context.
- * The amounts of data read and marked are added to *readp and *writtenp,
- * either of which may be NULL.
+ * What is read, marked or left alone is counted in stats, if not NULL, as by
+ * dmu_rewrite_by_dnode().
  */
 int
-zap_rewrite_by_dnode(dnode_t *dn, uint64_t rewrite_flags, uint64_t *readp,
-    uint64_t *writtenp)
+zap_rewrite_by_dnode(dnode_t *dn, uint64_t rewrite_flags,
+    dmu_rewrite_stats_t *stats)
 {
 	uint64_t blkid = 0;
 	uint64_t end;
@@ -1329,7 +1329,7 @@ zap_rewrite_by_dnode(dnode_t *dn, uint64_t rewrite_flags, uint64_t *readp,
 		rw_exit(&dn->dn_struct_rwlock);
 		if (same) {
 			err = dmu_rewrite_by_dnode(dn, blkid * blksz,
-			    nblks * blksz, rewrite_flags, tx, readp, writtenp);
+			    nblks * blksz, rewrite_flags, tx, stats);
 			blkid += nblks;
 		}
 
