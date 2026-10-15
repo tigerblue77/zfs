@@ -1912,6 +1912,85 @@ dmu_rewrite_dnode(dnode_t *dn, uint64_t rewrite_flags, dmu_tx_t *tx)
 	return (B_TRUE);
 }
 
+/*
+ * Return B_TRUE if a rewrite with these flags would rewrite the block bp of
+ * the objset os, as dmu_rewrite_by_dnode() decides it for its blocks.
+ */
+boolean_t
+dmu_rewrite_bp_needed(objset_t *os, const blkptr_t *bp, uint64_t rewrite_flags)
+{
+	return (!dmu_rewrite_skip(os, bp, rewrite_flags));
+}
+
+/*
+ * Return B_TRUE if the block bp of dn, at level and blkid, or a block under
+ * it, would be rewritten with these flags.  Holding dn_struct_rwlock keeps
+ * the block pointers where they are.
+ */
+static boolean_t
+dmu_rewrite_needed_impl(dnode_t *dn, int level, uint64_t blkid,
+    const blkptr_t *bp, uint64_t rewrite_flags)
+{
+	int epbs = dn->dn_indblkshift - SPA_BLKPTRSHIFT;
+	dmu_buf_impl_t *db;
+	boolean_t needed = B_FALSE;
+
+	if (BP_IS_HOLE(bp))
+		return (B_FALSE);
+	if (!dmu_rewrite_skip(dn->dn_objset, bp, rewrite_flags))
+		return (B_TRUE);
+	if (level == 0)
+		return (B_FALSE);
+
+	/* What a snapshot shares, it shares with the blocks under it. */
+	if ((rewrite_flags & ZFS_REWRITE_SKIP_SNAPSHOT) &&
+	    dmu_objset_block_is_shared(dn->dn_objset, bp))
+		return (B_FALSE);
+
+	/* A block that can not be read is better looked at by the rewrite. */
+	if (dbuf_hold_impl(dn, level, blkid, TRUE, FALSE, FTAG, &db) != 0)
+		return (B_TRUE);
+	if (dbuf_read(db, NULL, DB_RF_CANFAIL | DB_RF_HAVESTRUCT |
+	    DMU_READ_NO_PREFETCH) != 0) {
+		dbuf_rele(db, FTAG);
+		return (B_TRUE);
+	}
+	for (uint64_t i = 0; i < (1ULL << epbs) && !needed; i++) {
+		blkptr_t cbp;
+
+		rw_enter(&db->db_rwlock, RW_READER);
+		cbp = ((blkptr_t *)db->db.db_data)[i];
+		rw_exit(&db->db_rwlock);
+		needed = dmu_rewrite_needed_impl(dn, level - 1,
+		    (blkid << epbs) + i, &cbp, rewrite_flags);
+	}
+	dbuf_rele(db, FTAG);
+
+	return (needed);
+}
+
+/*
+ * Return B_TRUE if a rewrite of dn with these flags would rewrite one of its
+ * blocks, data or indirect, without marking anything.
+ */
+boolean_t
+dmu_rewrite_needed(dnode_t *dn, uint64_t rewrite_flags)
+{
+	boolean_t needed = B_FALSE;
+
+	rw_enter(&dn->dn_struct_rwlock, RW_READER);
+	for (int i = 0; i < dn->dn_phys->dn_nblkptr && !needed; i++) {
+		blkptr_t bp;
+
+		dmu_rewrite_get_bp(dn, NULL, i, &bp);
+		needed = dmu_rewrite_needed_impl(dn,
+		    dn->dn_phys->dn_nlevels - 1, i, &bp, rewrite_flags);
+	}
+	rw_exit(&dn->dn_struct_rwlock);
+
+	return (needed);
+}
+
 void
 dmu_write_embedded(objset_t *os, uint64_t object, uint64_t offset,
     void *data, uint8_t etype, uint8_t comp, int uncompressed_size,
