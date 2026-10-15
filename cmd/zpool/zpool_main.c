@@ -61,6 +61,7 @@
 #include <math.h>
 
 #include <libzfs.h>
+#include <libzfs_core.h>
 #include <libzutil.h>
 
 #include "zpool_util.h"
@@ -118,6 +119,7 @@ static int zpool_do_set(int, char **);
 
 static int zpool_do_sync(int, char **);
 static int zpool_do_condense(int, char **);
+static int zpool_do_rewrite(int, char **);
 
 static int zpool_do_version(int, char **);
 
@@ -174,6 +176,7 @@ typedef enum {
 	HELP_SPLIT,
 	HELP_SYNC,
 	HELP_REGUID,
+	HELP_REWRITE,
 	HELP_REOPEN,
 	HELP_VERSION,
 	HELP_WAIT
@@ -402,6 +405,7 @@ static zpool_command_t command_table[] = {
 	{ "scrub",	zpool_do_scrub,		HELP_SCRUB		},
 	{ "trim",	zpool_do_trim,		HELP_TRIM		},
 	{ "condense",	zpool_do_condense,	HELP_CONDENSE		},
+	{ "rewrite",	zpool_do_rewrite,	HELP_REWRITE		},
 	{ NULL },
 	{ "import",	zpool_do_import,	HELP_IMPORT		},
 	{ "export",	zpool_do_export,	HELP_EXPORT		},
@@ -532,6 +536,8 @@ get_usage(zpool_help_t idx)
 		    "[<device> ...]\n");
 	case HELP_REGUID:
 		return ("\treguid [-g guid] <pool>\n");
+	case HELP_REWRITE:
+		return ("\trewrite [-Av] <pool>\n");
 	case HELP_SYNC:
 		return ("\tsync [pool] ...\n");
 	case HELP_CONDENSE:
@@ -14128,6 +14134,306 @@ found:;
 	(void) pthread_mutex_destroy(&wd.wd_mutex);
 	(void) pthread_cond_destroy(&wd.wd_cv);
 	return (error);
+}
+
+typedef struct rewrite_cb {
+	uint64_t	rc_flags;
+	boolean_t	rc_verbose;
+	int		rc_error;
+} rewrite_cb_t;
+
+/* Print why a dataset or the pool, of that name, could not be rewritten. */
+static void
+rewrite_error(const char *name, int error)
+{
+	char msg[ZFS_MAX_DATASET_NAME_LEN + 32];
+
+	(void) snprintf(msg, sizeof (msg), "cannot rewrite '%s'", name);
+	if (error == ZFS_ERR_CHECKPOINT_EXISTS)
+		(void) fprintf(stderr, "%s: the pool has a checkpoint\n", msg);
+	else if (error == ZFS_ERR_DEVRM_IN_PROGRESS)
+		(void) fprintf(stderr, "%s: a vdev is being removed\n", msg);
+	else if (error >= ZFS_ERR_CHECKPOINT_EXISTS)
+		(void) zfs_standard_error(g_zfs, error, msg);
+	else if (error == EACCES)
+		(void) fprintf(stderr, "%s: its key is not loaded\n", msg);
+	else
+		(void) fprintf(stderr, "%s: %s\n", msg, strerror(error));
+}
+
+static int
+rewrite_count_snapshot(zfs_handle_t *zhp, void *arg)
+{
+	(*(uint64_t *)arg)++;
+	zfs_close(zhp);
+	return (0);
+}
+
+/*
+ * Rewrite a file system or volume whole, one step of the kernel at a time, as
+ * zfs rewrite does, then its children.
+ */
+static int
+rewrite_dataset(zfs_handle_t *zhp, void *arg)
+{
+	static const char *const keys[] = { DATASET_REWRITE_OBJECTS,
+	    DATASET_REWRITE_MARKED, DATASET_REWRITE_SHARED,
+	    DATASET_REWRITE_CLONED, DATASET_REWRITE_UNLINKED,
+	    DATASET_REWRITE_OTHER };
+	enum { OBJECTS, MARKED, SHARED, CLONED, UNLINKED, OTHER };
+	uint64_t count[ARRAY_SIZE(keys)] = { 0 };
+	rewrite_cb_t *cb = arg;
+	const char *name = zfs_get_name(zhp);
+	nvlist_t *cursor = NULL;
+	uint64_t snapshots = 0;
+	char buf[32];
+	int error;
+
+	for (;;) {
+		nvlist_t *out = NULL, *next;
+		uint64_t v;
+
+		error = lzc_dataset_rewrite(name, cb->rc_flags, cursor, &out);
+		fnvlist_free(cursor);
+		cursor = NULL;
+		if (out != NULL) {
+			for (int i = 0; i < ARRAY_SIZE(keys); i++) {
+				if (nvlist_lookup_uint64(out, keys[i],
+				    &v) == 0)
+					count[i] += v;
+			}
+			if (error == 0 && nvlist_lookup_nvlist(out,
+			    DATASET_REWRITE_CURSOR, &next) == 0)
+				cursor = fnvlist_dup(next);
+			fnvlist_free(out);
+		}
+		if (error != 0 || cursor == NULL)
+			break;
+		if (cb->rc_verbose) {
+			zfs_nicebytes(count[MARKED], buf, sizeof (buf));
+			(void) printf("%s: %llu objects, %s marked\n",
+			    name, (u_longlong_t)count[OBJECTS], buf);
+			(void) fflush(stdout);
+		}
+	}
+	fnvlist_free(cursor);
+
+	if (error != 0) {
+		rewrite_error(name, error);
+		cb->rc_error = 1;
+	} else if (cb->rc_verbose) {
+		zfs_nicebytes(count[MARKED], buf, sizeof (buf));
+		(void) printf("%s: done, %llu objects, %s marked\n",
+		    name, (u_longlong_t)count[OBJECTS], buf);
+		if (count[SHARED] + count[CLONED] + count[UNLINKED] +
+		    count[OTHER] != 0)
+			(void) printf("%s: left alone: %llu blocks "
+			    "shared with snapshots, %llu cloned blocks, %llu "
+			    "unlinked objects, %llu objects of other types\n",
+			    name, (u_longlong_t)count[SHARED],
+			    (u_longlong_t)count[CLONED],
+			    (u_longlong_t)count[UNLINKED],
+			    (u_longlong_t)count[OTHER]);
+	}
+	if (cb->rc_verbose) {
+		(void) zfs_iter_snapshots_v2(zhp, 0, rewrite_count_snapshot,
+		    &snapshots, 0, 0);
+		if (snapshots != 0)
+			(void) printf("%s: %llu snapshots keep their "
+			    "blocks\n", name, (u_longlong_t)snapshots);
+	}
+	(void) fflush(stdout);
+
+	(void) zfs_iter_filesystems_v2(zhp, 0, rewrite_dataset, cb);
+	zfs_close(zhp);
+	return (0);
+}
+
+/*
+ * Rewrite the metadata of the pool itself, one step of the kernel at a time.
+ */
+static int
+rewrite_pool_metadata(const char *pool, rewrite_cb_t *cb)
+{
+	static const char *const keys[] = { POOL_REWRITE_OBJECTS,
+	    POOL_REWRITE_MARKED };
+	enum { OBJECTS, MARKED };
+	uint64_t count[ARRAY_SIZE(keys)] = { 0 };
+	nvlist_t *cursor = NULL;
+	char buf[32];
+	int error;
+
+	for (;;) {
+		nvlist_t *out = NULL, *next;
+		uint64_t v;
+
+		error = lzc_pool_rewrite(pool, cb->rc_flags, cursor, &out);
+		fnvlist_free(cursor);
+		cursor = NULL;
+		if (out != NULL) {
+			for (int i = 0; i < ARRAY_SIZE(keys); i++) {
+				if (nvlist_lookup_uint64(out, keys[i],
+				    &v) == 0)
+					count[i] += v;
+			}
+			if (error == 0 && nvlist_lookup_nvlist(out,
+			    POOL_REWRITE_CURSOR, &next) == 0)
+				cursor = fnvlist_dup(next);
+			fnvlist_free(out);
+		}
+		if (error != 0 || cursor == NULL)
+			break;
+		if (cb->rc_verbose) {
+			zfs_nicebytes(count[MARKED], buf, sizeof (buf));
+			(void) printf("%s: pool metadata: %llu objects, "
+			    "%s marked\n", pool, (u_longlong_t)count[OBJECTS],
+			    buf);
+			(void) fflush(stdout);
+		}
+	}
+	fnvlist_free(cursor);
+
+	if (error != 0) {
+		rewrite_error(pool, error);
+		cb->rc_error = 1;
+	} else if (cb->rc_verbose) {
+		zfs_nicebytes(count[MARKED], buf, sizeof (buf));
+		(void) printf("%s: pool metadata: done, %llu objects, "
+		    "%s marked\n", pool, (u_longlong_t)count[OBJECTS], buf);
+	}
+	return (error);
+}
+
+/* Print the space still allocated on the top-level vdevs that allocate not. */
+static void
+rewrite_print_noalloc(zpool_handle_t *zhp)
+{
+	nvlist_t *config, *nvroot, **child;
+	boolean_t missing;
+	uint_t children;
+	char buf[32];
+
+	if (zpool_refresh_stats(zhp, &missing) != 0 ||
+	    (config = zpool_get_config(zhp, NULL)) == NULL ||
+	    nvlist_lookup_nvlist(config, ZPOOL_CONFIG_VDEV_TREE,
+	    &nvroot) != 0 ||
+	    nvlist_lookup_nvlist_array(nvroot, ZPOOL_CONFIG_CHILDREN, &child,
+	    &children) != 0)
+		return;
+
+	for (uint_t c = 0; c < children; c++) {
+		const char *type;
+		vdev_stat_t *vs;
+		uint_t n;
+
+		if (nvlist_lookup_string(child[c], ZPOOL_CONFIG_TYPE,
+		    &type) != 0 || strcmp(type, VDEV_TYPE_HOLE) == 0 ||
+		    strcmp(type, VDEV_TYPE_INDIRECT) == 0 ||
+		    nvlist_lookup_uint64_array(child[c],
+		    ZPOOL_CONFIG_VDEV_STATS, (uint64_t **)&vs, &n) != 0 ||
+		    !vs->vs_noalloc)
+			continue;
+		char *vname = zpool_vdev_name(g_zfs, zhp, child[c], 0);
+		zfs_nicebytes(vs->vs_alloc, buf, sizeof (buf));
+		(void) printf("%s: %s (allocating=off): %s "
+		    "allocated\n", zpool_get_name(zhp), vname, buf);
+		free(vname);
+	}
+}
+
+/*
+ * Refuse, before any dataset is rewritten, what the rewrite of the metadata of
+ * the pool refuses: a checkpoint, which keeps what is freed, or the removal of
+ * a vdev in progress.
+ */
+static int
+rewrite_pool_allowed(zpool_handle_t *zhp)
+{
+	nvlist_t *config, *nvroot;
+	pool_checkpoint_stat_t *pcs = NULL;
+	pool_removal_stat_t *prs = NULL;
+	uint_t c;
+
+	if ((config = zpool_get_config(zhp, NULL)) == NULL ||
+	    nvlist_lookup_nvlist(config, ZPOOL_CONFIG_VDEV_TREE, &nvroot) != 0)
+		return (0);
+	(void) nvlist_lookup_uint64_array(nvroot,
+	    ZPOOL_CONFIG_CHECKPOINT_STATS, (uint64_t **)&pcs, &c);
+	(void) nvlist_lookup_uint64_array(nvroot, ZPOOL_CONFIG_REMOVAL_STATS,
+	    (uint64_t **)&prs, &c);
+	if (pcs != NULL && pcs->pcs_state != CS_NONE)
+		return (ZFS_ERR_CHECKPOINT_EXISTS);
+	if (prs != NULL && prs->prs_state == DSS_SCANNING)
+		return (ZFS_ERR_DEVRM_IN_PROGRESS);
+	return (0);
+}
+
+/*
+ * zpool rewrite [-Av] <pool>
+ *
+ *	-A	Only rewrite the blocks that have a copy on a top-level vdev
+ *		whose allocating property is off.
+ *	-v	Print the progress, and what was left alone.
+ *
+ * Rewrite every file system and volume of the pool, as zfs rewrite of each
+ * one by name does, then the metadata of the pool itself, so that their
+ * blocks are reallocated.  Snapshots keep their blocks.
+ */
+static int
+zpool_do_rewrite(int argc, char **argv)
+{
+	rewrite_cb_t cb = { 0 };
+	zpool_handle_t *zhp;
+	zfs_handle_t *root;
+	const char *pool;
+	int c;
+
+	while ((c = getopt(argc, argv, "Av")) != -1) {
+		switch (c) {
+		case 'A':
+			cb.rc_flags |= ZFS_REWRITE_SKIP_ALLOCATING;
+			break;
+		case 'v':
+			cb.rc_verbose = B_TRUE;
+			break;
+		case '?':
+			(void) fprintf(stderr, "invalid option '%c'\n",
+			    optopt);
+			usage(B_FALSE);
+		}
+	}
+
+	argc -= optind;
+	argv += optind;
+	if (argc < 1) {
+		(void) fprintf(stderr, "missing pool name argument\n");
+		usage(B_FALSE);
+	}
+	if (argc > 1) {
+		(void) fprintf(stderr, "too many arguments\n");
+		usage(B_FALSE);
+	}
+	pool = argv[0];
+
+	if ((zhp = zpool_open(g_zfs, pool)) == NULL)
+		return (1);
+	if ((c = rewrite_pool_allowed(zhp)) != 0) {
+		rewrite_error(pool, c);
+		zpool_close(zhp);
+		return (1);
+	}
+
+	if ((root = zfs_open(g_zfs, pool, ZFS_TYPE_FILESYSTEM)) == NULL) {
+		zpool_close(zhp);
+		return (1);
+	}
+	(void) rewrite_dataset(root, &cb);
+
+	if (rewrite_pool_metadata(pool, &cb) == 0 && cb.rc_verbose)
+		rewrite_print_noalloc(zhp);
+
+	zpool_close(zhp);
+	return (cb.rc_error);
 }
 
 /*
