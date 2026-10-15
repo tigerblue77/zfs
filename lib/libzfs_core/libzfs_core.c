@@ -2116,6 +2116,31 @@ lzc_dataset_rewrite(const char *fsname, uint64_t flags, nvlist_t *cursor,
 }
 
 /*
+ * Rewrite a part of the metadata of the pool itself as-is without
+ * modification, all of it after enough calls: see ZFS_IOC_POOL_REWRITE.  The
+ * flags are ZFS_REWRITE_* flags.  Pass a NULL cursor the first time, then the
+ * POOL_REWRITE_CURSOR nvlist of the previous result, until there is none.
+ * The result, with the counters of the call, is returned in *outnvl, to be
+ * freed by the caller.
+ */
+int
+lzc_pool_rewrite(const char *pool, uint64_t flags, nvlist_t *cursor,
+    nvlist_t **outnvl)
+{
+	nvlist_t *args = fnvlist_alloc();
+
+	fnvlist_add_uint64(args, POOL_REWRITE_FLAGS, flags);
+	if (cursor != NULL)
+		fnvlist_add_nvlist(args, POOL_REWRITE_CURSOR, cursor);
+
+	int error = lzc_ioctl(ZFS_IOC_POOL_REWRITE, pool, args, outnvl);
+
+	fnvlist_free(args);
+
+	return (error);
+}
+
+/*
  * Prune the specified amount from the pool's dedup table.
  */
 int
