@@ -422,6 +422,7 @@ ztest_func_t ztest_zap;
 ztest_func_t ztest_zap_parallel;
 ztest_func_t ztest_zap_rewrite;
 ztest_func_t ztest_meta_rewrite;
+ztest_func_t ztest_pool_rewrite;
 ztest_func_t ztest_zil_commit;
 ztest_func_t ztest_zil_remount;
 ztest_func_t ztest_dmu_read_write_zcopy;
@@ -479,6 +480,7 @@ static ztest_info_t ztest_info[] = {
 	ZTI_INIT(ztest_zap_parallel, 100, &zopt_always),
 	ZTI_INIT(ztest_zap_rewrite, 10, &zopt_always),
 	ZTI_INIT(ztest_meta_rewrite, 1, &zopt_often),
+	ZTI_INIT(ztest_pool_rewrite, 1, &zopt_sometimes),
 	ZTI_INIT(ztest_split_pool, 1, &zopt_sometimes),
 	ZTI_INIT(ztest_zil_commit, 1, &zopt_incessant),
 	ZTI_INIT(ztest_zil_remount, 1, &zopt_sometimes),
@@ -6166,6 +6168,42 @@ ztest_meta_rewrite(ztest_ds_t *zd, uint64_t id)
 		return;
 	(void) dmu_objset_rewrite_used(os, flags, tx);
 	dmu_tx_commit(tx);
+}
+
+/*
+ * Rewrite the MOS, step by step, while the other threads change it, with
+ * dedup, block cloning, scrubs, checkpoints, removals and expansions under
+ * way.  The rewrite refuses to run while there is a checkpoint, or while a
+ * vdev is being removed.
+ */
+void
+ztest_pool_rewrite(ztest_ds_t *zd, uint64_t id)
+{
+	(void) zd, (void) id;
+	dsl_pool_rewrite_t dpr = { 0 };
+	spa_t *spa = ztest_spa;
+	int error = 0;
+
+	dpr.dpr_flags = ztest_random(2) ? ZFS_REWRITE_SKIP_ALLOCATING : 0;
+
+	(void) pthread_rwlock_rdlock(&ztest_name_lock);
+	while (error == 0 && dpr.dpr_phase != DSL_POOL_REWRITE_DONE)
+		error = dsl_pool_rewrite(spa_get_dsl(spa), &dpr);
+	(void) pthread_rwlock_unlock(&ztest_name_lock);
+
+	switch (error) {
+	case 0:
+	case ZFS_ERR_CHECKPOINT_EXISTS:
+	case ZFS_ERR_DEVRM_IN_PROGRESS:
+	case EIO:
+		break;
+	case ENOSPC:
+		ztest_record_enospc(FTAG);
+		break;
+	default:
+		fatal(B_FALSE, "dsl_pool_rewrite(%s) = %d", spa_name(spa),
+		    error);
+	}
 }
 
 /*
