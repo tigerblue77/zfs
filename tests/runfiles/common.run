@@ -324,6 +324,7 @@ tags = ['functional', 'cli_root', 'zfs_reservation']
 
 [tests/functional/cli_root/zfs_rewrite]
 tests = ['zfs_rewrite', 'zfs_rewrite_allocating', 'zfs_rewrite_directory',
+    'zfs_rewrite_filesystem', 'zfs_rewrite_filesystem_steps',
     'zfs_rewrite_physical', 'zfs_rewrite_skip_clone',
     'zfs_rewrite_skip_snapshot', 'zfs_rewrite_skip_width',
     'zfs_rewrite_spill_dnode', 'zfs_rewrite_volume']

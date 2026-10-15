@@ -1637,7 +1637,7 @@ test_zap_rewrite(const MunitParameter params[], void *data)
 	rewrite_calls = 0;
 	mock_dmu_rewrite_cb = rewrite_check;
 	unit_ok(zap_rewrite_by_dnode(dn,
-	    ZFS_REWRITE_PHYSICAL | ZFS_REWRITE_SKIP_SNAPSHOT, NULL, NULL));
+	    ZFS_REWRITE_PHYSICAL | ZFS_REWRITE_SKIP_SNAPSHOT, NULL));
 	mock_dmu_rewrite_cb = NULL;
 
 	unit_eq(rewrite_calls, fat ? howmany(nblocks, perlock) : 1);
