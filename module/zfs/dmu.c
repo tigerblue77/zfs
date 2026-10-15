@@ -2189,6 +2189,181 @@ dmu_rewrite_wait_synced(dsl_pool_t *dp, uint64_t txg)
 	return (error == ESHUTDOWN ? SET_ERROR(EIO) : error);
 }
 
+/*
+ * The first level 0 block under block blkid of a level, UINT64_MAX if beyond.
+ */
+static uint64_t
+dmu_rewrite_first_l0(int epbs, int level, uint64_t blkid)
+{
+	int shift = level * epbs;
+
+	if (shift >= 64 || blkid > (UINT64_MAX >> shift))
+		return (UINT64_MAX);
+	return (blkid << shift);
+}
+
+typedef struct dmu_rewrite_walk {
+	dnode_t			*drw_dn;
+	uint64_t		drw_flags;
+	uint64_t		drw_start;
+	uint64_t		drw_end;
+	uint64_t		drw_next;
+	hrtime_t		drw_deadline;
+	boolean_t		drw_stop;
+	dmu_rewrite_select_cb_t	*drw_cb;
+	void			*drw_arg;
+} dmu_rewrite_walk_t;
+
+static int
+dmu_rewrite_select_impl(dmu_rewrite_walk_t *drw, int level, uint64_t blkid,
+    const blkptr_t *bp)
+{
+	dnode_t *dn = drw->drw_dn;
+	int epbs = dn->dn_indblkshift - SPA_BLKPTRSHIFT;
+	dmu_buf_impl_t *db;
+	int error;
+
+	if (BP_IS_HOLE(bp) ||
+	    dmu_rewrite_first_l0(epbs, level, blkid + 1) <= drw->drw_start ||
+	    dmu_rewrite_first_l0(epbs, level, blkid) >= drw->drw_end)
+		return (0);
+
+	if (dmu_rewrite_bp_needed(dn->dn_objset, bp, drw->drw_flags)) {
+		uint64_t size = dn->dn_datablksz;
+
+		if (level == 0) {
+			(void) dbuf_prefetch(dn, 0, blkid,
+			    ZIO_PRIORITY_ASYNC_READ, 0);
+		} else {
+			size = 1ULL << dn->dn_indblkshift;
+		}
+		if (!drw->drw_cb(drw->drw_arg, level, blkid, size))
+			drw->drw_stop = B_TRUE;
+	}
+	if (level == 0)
+		return (0);
+
+	error = dbuf_hold_impl(dn, level, blkid, TRUE, FALSE, FTAG, &db);
+	if (error != 0)
+		return (error);
+	error = dbuf_read(db, NULL, DB_RF_CANFAIL | DB_RF_HAVESTRUCT |
+	    DMU_READ_NO_PREFETCH);
+	for (uint64_t i = 0; error == 0 && i < (1ULL << epbs); i++) {
+		uint64_t cblkid = (blkid << epbs) + i;
+		blkptr_t cbp;
+
+		rw_enter(&db->db_rwlock, RW_READER);
+		cbp = ((blkptr_t *)db->db.db_data)[i];
+		rw_exit(&db->db_rwlock);
+		error = dmu_rewrite_select_impl(drw, level - 1, cblkid, &cbp);
+
+		/* Stop between the parts that level 1 blocks cover. */
+		if (level > 1 && drw->drw_deadline != 0 &&
+		    gethrtime() >= drw->drw_deadline)
+			drw->drw_stop = B_TRUE;
+		if (level > 1 && drw->drw_stop) {
+			if (drw->drw_next == UINT64_MAX) {
+				drw->drw_next = dmu_rewrite_first_l0(epbs,
+				    level - 1, cblkid + 1);
+			}
+			break;
+		}
+	}
+	dbuf_rele(db, FTAG);
+
+	return (error);
+}
+
+/*
+ * Walk the blocks of dn, data and indirect, from level 0 block *blkidp on, up
+ * to level 0 block end, and pass each one that a rewrite with these flags
+ * would not leave alone to cb, with its level, its block id and its size,
+ * prefetching the data blocks among them; nothing is marked.  Once cb returns
+ * B_FALSE, or the time is past the deadline, if not 0, the walk stops at the
+ * end of the part of the object that a level 1 block covers, and *blkidp is
+ * left at the level 0 block to go on from, or at UINT64_MAX once the walk is
+ * done.  Holding dn_struct_rwlock keeps the block pointers where they are.
+ */
+int
+dmu_rewrite_select(dnode_t *dn, uint64_t *blkidp, uint64_t end,
+    uint64_t rewrite_flags, hrtime_t deadline, dmu_rewrite_select_cb_t *cb,
+    void *arg)
+{
+	dmu_rewrite_walk_t drw = { 0 };
+	int epbs = dn->dn_indblkshift - SPA_BLKPTRSHIFT;
+	int error = 0;
+
+	drw.drw_dn = dn;
+	drw.drw_flags = rewrite_flags;
+	drw.drw_start = *blkidp;
+	drw.drw_end = end;
+	drw.drw_next = UINT64_MAX;
+	drw.drw_deadline = deadline;
+	drw.drw_cb = cb;
+	drw.drw_arg = arg;
+
+	rw_enter(&dn->dn_struct_rwlock, RW_READER);
+	int nlevels = dn->dn_phys->dn_nlevels;
+	for (int i = 0; error == 0 && i < dn->dn_phys->dn_nblkptr; i++) {
+		blkptr_t bp;
+
+		dmu_rewrite_get_bp(dn, NULL, i, &bp);
+		error = dmu_rewrite_select_impl(&drw, nlevels - 1, i, &bp);
+		if (nlevels > 1 && deadline != 0 && gethrtime() >= deadline)
+			drw.drw_stop = B_TRUE;
+		if (drw.drw_stop) {
+			if (drw.drw_next == UINT64_MAX) {
+				drw.drw_next = dmu_rewrite_first_l0(epbs,
+				    nlevels - 1, i + 1);
+			}
+			break;
+		}
+	}
+	rw_exit(&dn->dn_struct_rwlock);
+
+	if (error == 0)
+		*blkidp = drw.drw_next;
+	return (error);
+}
+
+/*
+ * In syncing context, mark block (level, blkid) of dn, an object that only
+ * syncing context changes, for rewrite, unless it is dirty already or a
+ * rewrite with these flags would now leave it alone, as decided from its
+ * block pointer.  Return its size if it was marked, else 0.
+ */
+uint64_t
+dmu_rewrite_block_sync(dnode_t *dn, int level, uint64_t blkid,
+    uint64_t rewrite_flags, dmu_tx_t *tx)
+{
+	dmu_buf_impl_t *db;
+	uint64_t size = 0;
+	blkptr_t bp;
+
+	ASSERT(dmu_tx_is_syncing(tx));
+
+	rw_enter(&dn->dn_struct_rwlock, RW_READER);
+	if (level >= dn->dn_nlevels ||
+	    (level == 0 && dnode_block_freed(dn, blkid))) {
+		rw_exit(&dn->dn_struct_rwlock);
+		return (0);
+	}
+	db = dbuf_hold_level(dn, level, blkid, FTAG);
+	rw_exit(&dn->dn_struct_rwlock);
+	if (db == NULL)
+		return (0);
+
+	if (dmu_rewrite_get_db_bp(db, &bp) &&
+	    !dmu_rewrite_skip(dn->dn_objset, &bp, rewrite_flags,
+	    dmu_tx_get_txg(tx), NULL) && !dmu_buf_is_dirty(&db->db, tx)) {
+		dmu_buf_will_dirty(&db->db, tx);
+		size = db->db.db_size;
+	}
+	dbuf_rele(db, FTAG);
+
+	return (size);
+}
+
 void
 dmu_write_embedded(objset_t *os, uint64_t object, uint64_t offset,
     void *data, uint8_t etype, uint8_t comp, int uncompressed_size,
