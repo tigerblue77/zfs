@@ -2715,8 +2715,6 @@ spa_vdev_remove_empty(vdev_t *vd, uint64_t *txg)
 	/* The leaf ZAPs should have been destroyed by vdev_dtl_sync. */
 	ASSERT0(vd->vdev_leaf_zap);
 
-	vdev_remove_empty_label_remove(vd);
-
 	if (list_link_active(&vd->vdev_state_dirty_node))
 		vdev_state_clean(vd);
 	if (list_link_active(&vd->vdev_config_dirty_node))
@@ -2733,6 +2731,18 @@ spa_vdev_remove_empty(vdev_t *vd, uint64_t *txg)
 	vdev_remove_empty_features(vd, *txg);
 
 	vdev_remove_replace_with_hole(vd);
+
+	/*
+	 * Erase the labels only once the hole is on disk, as
+	 * vdev_remove_complete() does.  An import that scans the devices
+	 * ignores an erased label, so a crash before the hole is written
+	 * would otherwise lose a vdev that the pool still has.  The vdev is
+	 * out of the tree, so nothing uses it meanwhile.
+	 */
+	spa_vdev_config_exit(spa, NULL, *txg, 0, FTAG);
+	*txg = spa_vdev_config_enter(spa);
+
+	vdev_remove_empty_label_remove(vd);
 	vdev_free(vd);
 
 	if (ev != NULL)
