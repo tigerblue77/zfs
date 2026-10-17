@@ -3365,9 +3365,13 @@ vdev_dtl_should_excise(vdev_t *vd, boolean_t rebuild_done)
 		 * then it is not eligible for excision.
 		 */
 		if (vdev_dtl_max(vd) <= scn->scn_phys.scn_max_txg) {
+			/*
+			 * vdev_resilver_txg may exceed scn_max_txg: an earlier
+			 * scan that could not repair some txgs left them alone
+			 * in the DTL, and this scan only had to cover them.
+			 */
 			ASSERT3U(scnp->scn_min_txg, <=, vdev_dtl_min(vd));
 			ASSERT3U(scnp->scn_min_txg, <, vd->vdev_resilver_txg);
-			ASSERT3U(vd->vdev_resilver_txg, <=, scnp->scn_max_txg);
 			return (B_TRUE);
 		}
 	}
@@ -6095,17 +6099,22 @@ vdev_defer_resilver(vdev_t *vd)
 /*
  * Clears the resilver deferred flag on all leaf devs under vd. Returns
  * B_TRUE if we have devices that need to be resilvered and are available to
- * accept resilver I/Os.
+ * accept resilver I/Os.  A device that was not deferred, and whose DTL lies
+ * within (min_txg, max_txg], the range of the scan that just completed, is
+ * not counted: that scan could not repair what is left, and another one now
+ * would fail on it the same way.
  */
 boolean_t
-vdev_clear_resilver_deferred(vdev_t *vd, dmu_tx_t *tx)
+vdev_clear_resilver_deferred(vdev_t *vd, uint64_t min_txg, uint64_t max_txg,
+    dmu_tx_t *tx)
 {
 	boolean_t resilver_needed = B_FALSE;
 	spa_t *spa = vd->vdev_spa;
 
 	for (int c = 0; c < vd->vdev_children; c++) {
 		vdev_t *cvd = vd->vdev_child[c];
-		resilver_needed |= vdev_clear_resilver_deferred(cvd, tx);
+		resilver_needed |= vdev_clear_resilver_deferred(cvd, min_txg,
+		    max_txg, tx);
 	}
 
 	if (vd == spa->spa_root_vdev &&
@@ -6120,10 +6129,14 @@ vdev_clear_resilver_deferred(vdev_t *vd, dmu_tx_t *tx)
 	    !vd->vdev_ops->vdev_op_leaf)
 		return (resilver_needed);
 
+	boolean_t deferred = vd->vdev_resilver_deferred;
+	uint64_t min, max;
+
 	vd->vdev_resilver_deferred = B_FALSE;
 
 	return (!vdev_is_dead(vd) && !vd->vdev_offline &&
-	    vdev_resilver_needed(vd, NULL, NULL));
+	    vdev_resilver_needed(vd, &min, &max) &&
+	    (deferred || min < min_txg || max > max_txg));
 }
 
 boolean_t

@@ -1331,10 +1331,16 @@ dsl_scan_done(dsl_scan_t *scn, boolean_t complete, dmu_tx_t *tx)
 		 * before the resilver can restart. In the event of
 		 * a crash during this period, the spa loading code
 		 * will find the drives that need to be resilvered
-		 * and start the resilver then.
+		 * and start the resilver then.  A drive whose DTL lies within
+		 * the range this scan has just excised does not count: what is
+		 * left there, the scan could not repair.
 		 */
+		boolean_t excised = complete &&
+		    !spa_feature_is_active(spa, SPA_FEATURE_POOL_CHECKPOINT);
 		if (spa_feature_is_enabled(spa, SPA_FEATURE_RESILVER_DEFER) &&
-		    vdev_clear_resilver_deferred(spa->spa_root_vdev, tx)) {
+		    vdev_clear_resilver_deferred(spa->spa_root_vdev,
+		    excised ? scn->scn_phys.scn_min_txg : UINT64_MAX,
+		    excised ? scn->scn_phys.scn_max_txg : 0, tx)) {
 			spa_history_log_internal(spa,
 			    "starting deferred resilver", tx, "errors=%llu",
 			    (u_longlong_t)spa_approx_errlog_size(spa));
@@ -5052,6 +5058,43 @@ dsl_scan_scrub_cb(dsl_pool_t *dp,
 }
 
 static void
+dsl_scan_dtl_unreadable_impl(vdev_t *vd, uint64_t txg)
+{
+	for (uint64_t c = 0; c < vd->vdev_children; c++)
+		dsl_scan_dtl_unreadable_impl(vd->vdev_child[c], txg);
+
+	if (vd->vdev_ops->vdev_op_leaf &&
+	    vdev_dtl_contains(vd, DTL_MISSING, txg, 1))
+		vdev_dtl_dirty(vd, DTL_SCRUB, txg, 1);
+}
+
+/*
+ * A block the scan could not read was not repaired either, so every leaf that
+ * lacks its txg still lacks it.  Record it in their DTL_SCRUB, as
+ * vdev_stat_update() does for a repair write that fails, or vdev_dtl_reassess()
+ * would excise the txg from DTL_MISSING when the scan completes and let the
+ * only remaining copy be detached.  The leaves holding a gang block's members,
+ * or an indirect vdev's remapped data, are not known here: look at all leaves.
+ */
+static void
+dsl_scan_dtl_unreadable(spa_t *spa, const blkptr_t *bp)
+{
+	uint64_t txg = BP_GET_PHYSICAL_BIRTH(bp);
+
+	for (int d = 0; d < BP_GET_NDVAS(bp); d++) {
+		vdev_t *vd = vdev_lookup_top(spa,
+		    DVA_GET_VDEV(&bp->blk_dva[d]));
+
+		if (vd == NULL || BP_IS_GANG(bp) ||
+		    vd->vdev_ops == &vdev_indirect_ops) {
+			dsl_scan_dtl_unreadable_impl(spa->spa_root_vdev, txg);
+			return;
+		}
+		dsl_scan_dtl_unreadable_impl(vd, txg);
+	}
+}
+
+static void
 dsl_scan_scrub_done(zio_t *zio)
 {
 	spa_t *spa = zio->io_spa;
@@ -5097,6 +5140,7 @@ dsl_scan_scrub_done(zio_t *zio)
 		} else {
 			atomic_inc_64(&spa->spa_dsl_pool->dp_scan->scn_phys
 			    .scn_errors);
+			dsl_scan_dtl_unreadable(spa, zio->io_bp);
 		}
 	}
 }

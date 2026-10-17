@@ -194,7 +194,8 @@ extern void vdev_state_dirty(vdev_t *vd);
 extern void vdev_state_clean(vdev_t *vd);
 
 extern void vdev_defer_resilver(vdev_t *vd);
-extern boolean_t vdev_clear_resilver_deferred(vdev_t *vd, dmu_tx_t *tx);
+extern boolean_t vdev_clear_resilver_deferred(vdev_t *vd, uint64_t min_txg,
+    uint64_t max_txg, dmu_tx_t *tx);
 
 typedef enum vdev_config_flag {
 	VDEV_CONFIG_SPARE = 1 << 0,
