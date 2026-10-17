@@ -8418,7 +8418,12 @@ ztest_import_impl(void)
 	searchdirs[0] = ztest_opts.zo_dir;
 	args.paths = nsearch;
 	args.path = searchdirs;
-	args.can_be_active = B_FALSE;
+	/*
+	 * The pool belongs to this process, not to the kernel: do not ask
+	 * the kernel whether a pool of this name is imported, a question
+	 * that fails when the zfs module is not loaded.
+	 */
+	args.can_be_active = B_TRUE;
 
 	libpc_handle_t lpch = {
 		.lpc_lib_handle = NULL,
