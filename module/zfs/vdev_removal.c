@@ -2797,6 +2797,13 @@ spa_vdev_remove_top(vdev_t *vd, uint64_t *txg, boolean_t *emptied)
 	error = spa_vdev_remove_top_check(vd);
 
 	/*
+	 * EINVAL means that the pool cannot be evacuated, so that only an
+	 * empty vdev can be removed from it.  Say that this one is not.
+	 */
+	if (error == EINVAL && vd->vdev_stat.vs_alloc != 0)
+		error = SET_ERROR(ZFS_ERR_VDEV_NOT_EMPTY);
+
+	/*
 	 * Stop allocating from this vdev.  Note that we must check
 	 * that this is not the only device in the pool before
 	 * passivating, otherwise we will not be able to make
