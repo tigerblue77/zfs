@@ -4424,6 +4424,9 @@ zpool_vdev_remove(zpool_handle_t *zhp, const char *path)
 	boolean_t avail_spare, l2cache, islog;
 	libzfs_handle_t *hdl = zhp->zpool_hdl;
 	uint64_t version;
+	vdev_stat_t *vs;
+	uint_t c;
+	char alloc[32];
 
 	(void) snprintf(errbuf, sizeof (errbuf),
 	    "cannot remove %s", path);
@@ -4463,6 +4466,22 @@ zpool_vdev_remove(zpool_handle_t *zhp, const char *path)
 		zfs_error_aux(hdl,
 		    "invalid config; all top-level vdevs must "
 		    "have the same sector size and not be raidz.");
+		(void) zfs_error(hdl, EZFS_INVALCONFIG, errbuf);
+		break;
+
+	case ZFS_ERR_VDEV_NOT_EMPTY:
+		if (nvlist_lookup_uint64_array(tgt, ZPOOL_CONFIG_VDEV_STATS,
+		    (uint64_t **)&vs, &c) == 0 && vs->vs_alloc != 0) {
+			zfs_nicebytes(vs->vs_alloc, alloc, sizeof (alloc));
+			zfs_error_aux(hdl, "it still holds %s; data can be "
+			    "evacuated only if all top-level vdevs have the "
+			    "same sector size and none is raidz or dRAID.",
+			    alloc);
+		} else {
+			zfs_error_aux(hdl, "it is not empty; data can be "
+			    "evacuated only if all top-level vdevs have the "
+			    "same sector size and none is raidz or dRAID.");
+		}
 		(void) zfs_error(hdl, EZFS_INVALCONFIG, errbuf);
 		break;
 
