@@ -20,6 +20,8 @@
 #include <sys/nvpair.h>
 #include <sys/zap.h>
 #include <sys/dmu_tx.h>
+#include <sys/dsl_pool.h>
+#include <sys/dsl_synctask.h>
 #include "zfeature_common.h"
 #include <sys/spa_impl.h>
 
@@ -70,9 +72,17 @@
  *
  * Each feature may depend on other features. The only effect of this
  * relationship is that when a feature is enabled all of its dependencies are
- * automatically enabled as well. Any future work to support disabling of
- * features would need to ensure that features cannot be disabled if other
- * enabled features depend on them.
+ * automatically enabled as well, and that a feature cannot be disabled again
+ * while an enabled feature depends on it.
+ *
+ * Disabling
+ * ---------
+ *
+ * A feature registered with ZFEATURE_FLAG_DISABLE_OK can be disabled again
+ * while its reference count is 0: spa_feature_disable() removes what
+ * feature_enable_sync() wrote, and the feature reads as never enabled.  Other
+ * features cannot be disabled, because code may check that a feature is
+ * enabled and only take a reference on it in a later transaction group.
  *
  * On-disk Format
  * --------------
@@ -472,6 +482,104 @@ void
 spa_feature_decr(spa_t *spa, spa_feature_t fid, dmu_tx_t *tx)
 {
 	feature_do_action(spa, fid, FEATURE_ACTION_DECR, tx);
+}
+
+/*
+ * Can this enabled feature be disabled now?
+ */
+int
+spa_feature_disable_check(spa_t *spa, spa_feature_t fid)
+{
+	zfeature_info_t *feature = &spa_feature_table[fid];
+	uint64_t refcount;
+
+	ASSERT(VALID_FEATURE_FID(fid));
+
+	if (!(feature->fi_flags & ZFEATURE_FLAG_DISABLE_OK))
+		return (SET_ERROR(ENOTSUP));
+	if (feature_get_refcount(spa, feature, &refcount) != 0)
+		return (SET_ERROR(ENOENT));
+	if (refcount != 0)
+		return (SET_ERROR(EBUSY));
+	for (spa_feature_t f = 0; f < SPA_FEATURES; f++) {
+		if (zfeature_depends_on(f, fid) &&
+		    spa_feature_is_enabled(spa, f))
+			return (SET_ERROR(EBUSY));
+	}
+	return (0);
+}
+
+static void
+feature_disable_sync(void *arg, dmu_tx_t *tx)
+{
+	spa_t *spa = dmu_tx_pool(tx)->dp_spa;
+	spa_feature_t fid = (spa_feature_t)(uintptr_t)arg;
+	zfeature_info_t *feature = &spa_feature_table[fid];
+	objset_t *mos = spa->spa_meta_objset;
+	uint64_t zapobj = (feature->fi_flags & ZFEATURE_FLAG_READONLY_COMPAT) ?
+	    spa->spa_feat_for_write_obj : spa->spa_feat_for_read_obj;
+
+	/*
+	 * A "zpool set feature@...=enabled" of a dependent feature may have
+	 * synced since spa_feature_disable() checked; the caller sees that the
+	 * feature is still enabled.
+	 */
+	if (spa_feature_disable_check(spa, fid) != 0)
+		return;
+
+	VERIFY0(zap_remove(mos, zapobj, feature->fi_guid, tx));
+	(void) zap_remove(mos, spa->spa_feat_desc_obj, feature->fi_guid, tx);
+	if (spa->spa_feat_enabled_txg_obj != 0 &&
+	    zap_remove(mos, spa->spa_feat_enabled_txg_obj, feature->fi_guid,
+	    tx) == 0)
+		spa_feature_decr(spa, SPA_FEATURE_ENABLED_TXG, tx);
+
+	mutex_enter(&spa->spa_feat_stats_lock);
+	VERIFY0(atomic_swap_64(&spa->spa_feat_refcount_cache[fid],
+	    SPA_FEATURE_DISABLED));
+	if (spa->spa_feat_stats != NULL)
+		(void) nvlist_remove_all(spa->spa_feat_stats, feature->fi_guid);
+	mutex_exit(&spa->spa_feat_stats_lock);
+
+	spa_history_log_internal(spa, "set", tx, "feature@%s=disabled",
+	    feature->fi_uname);
+}
+
+/*
+ * Disable an enabled feature that nothing uses, so that it reads as never
+ * enabled.  Disabling a feature that is not enabled does nothing.
+ *
+ * spa_vdev_enter() serializes this with the vdev operations that check and
+ * activate the ZFEATURE_FLAG_DISABLE_OK features, and spa_vdev_exit() waits
+ * for the txg to sync.
+ */
+int
+spa_feature_disable(spa_t *spa, spa_feature_t fid)
+{
+	uint64_t txg;
+	int error;
+
+	ASSERT(VALID_FEATURE_FID(fid));
+
+	if (spa_version(spa) < SPA_VERSION_FEATURES)
+		return (SET_ERROR(ENOTSUP));
+	if (!spa_writeable(spa))
+		return (SET_ERROR(EROFS));
+
+	txg = spa_vdev_enter(spa);
+	if (!spa_feature_is_enabled(spa, fid))
+		return (spa_vdev_exit(spa, NULL, txg, 0));
+	error = spa_feature_disable_check(spa, fid);
+	if (error == 0) {
+		dmu_tx_t *tx = dmu_tx_create_assigned(spa->spa_dsl_pool, txg);
+		dsl_sync_task_nowait(spa->spa_dsl_pool, feature_disable_sync,
+		    (void *)(uintptr_t)fid, tx);
+		dmu_tx_commit(tx);
+	}
+	error = spa_vdev_exit(spa, NULL, txg, error);
+	if (error == 0 && spa_feature_is_enabled(spa, fid))
+		error = SET_ERROR(EBUSY);
+	return (error);
 }
 
 /*

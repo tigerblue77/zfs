@@ -381,7 +381,7 @@ zpool_feature_init(void)
 	zfeature_register(SPA_FEATURE_MULTI_VDEV_CRASH_DUMP,
 	    "com.joyent:multi_vdev_crash_dump", "multi_vdev_crash_dump",
 	    "Crash dumps to multiple vdev pools.",
-	    0, ZFEATURE_TYPE_BOOLEAN, NULL, sfeatures);
+	    ZFEATURE_FLAG_DISABLE_OK, ZFEATURE_TYPE_BOOLEAN, NULL, sfeatures);
 
 	zfeature_register(SPA_FEATURE_SPACEMAP_HISTOGRAM,
 	    "com.delphix:spacemap_histogram", "spacemap_histogram",
@@ -683,7 +683,8 @@ zpool_feature_init(void)
 
 	zfeature_register(SPA_FEATURE_DRAID,
 	    "org.openzfs:draid", "draid", "Support for distributed spare RAID",
-	    ZFEATURE_FLAG_MOS, ZFEATURE_TYPE_BOOLEAN, NULL, sfeatures);
+	    ZFEATURE_FLAG_MOS | ZFEATURE_FLAG_DISABLE_OK, ZFEATURE_TYPE_BOOLEAN,
+	    NULL, sfeatures);
 
 	{
 		static const spa_feature_t draid_fdomain_deps[] = {
@@ -694,8 +695,8 @@ zpool_feature_init(void)
 		    "com.seagate:draid_failure_domains",
 		    "draid_failure_domains",
 		    "Support for failure domains in dRAID",
-		    ZFEATURE_FLAG_MOS, ZFEATURE_TYPE_BOOLEAN,
-		    draid_fdomain_deps, sfeatures);
+		    ZFEATURE_FLAG_MOS | ZFEATURE_FLAG_DISABLE_OK,
+		    ZFEATURE_TYPE_BOOLEAN, draid_fdomain_deps, sfeatures);
 	}
 
 	{
@@ -761,7 +762,8 @@ zpool_feature_init(void)
 	zfeature_register(SPA_FEATURE_RAIDZ_EXPANSION,
 	    "org.openzfs:raidz_expansion", "raidz_expansion",
 	    "Support for raidz expansion",
-	    ZFEATURE_FLAG_MOS, ZFEATURE_TYPE_BOOLEAN, NULL, sfeatures);
+	    ZFEATURE_FLAG_MOS | ZFEATURE_FLAG_DISABLE_OK, ZFEATURE_TYPE_BOOLEAN,
+	    NULL, sfeatures);
 
 	zfeature_register(SPA_FEATURE_FAST_DEDUP,
 	    "com.klarasystems:fast_dedup", "fast_dedup",

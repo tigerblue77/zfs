@@ -104,7 +104,14 @@ typedef enum zfeature_flags {
 	 * from a given feature once support is sufficiently widespread, or
 	 * worries about backwards compatibility are no longer relevant.
 	 */
-	ZFEATURE_FLAG_NO_UPGRADE = 		(1 << 4)
+	ZFEATURE_FLAG_NO_UPGRADE = 		(1 << 4),
+	/*
+	 * This feature can be disabled again while it is not active.  Every
+	 * path that activates it must check that it is enabled under
+	 * spa_namespace_lock, in the txg that activates it, so that it cannot
+	 * interleave with spa_feature_disable().
+	 */
+	ZFEATURE_FLAG_DISABLE_OK =		(1 << 5)
 } zfeature_flags_t;
 
 typedef enum zfeature_type {
