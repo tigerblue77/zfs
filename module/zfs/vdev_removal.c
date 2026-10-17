@@ -2121,33 +2121,6 @@ vdev_remove_replace_with_hole(vdev_t *vd)
 }
 
 /*
- * Put a hole in place of a top-level vdev, and leave the vdev out of the tree
- * for the caller to free.
- */
-static void
-vdev_remove_replace_with_hole(vdev_t *vd)
-{
-	uint64_t id = vd->vdev_id;
-	spa_t *spa = vd->vdev_spa;
-	vdev_t *rvd = spa->spa_root_vdev;
-	vdev_t *hvd;
-
-	ASSERT(spa_namespace_held());
-	ASSERT(spa_config_held(spa, SCL_ALL, RW_WRITER) == SCL_ALL);
-
-	vdev_remove_child(rvd, vd);
-
-	hvd = vdev_alloc_common(spa, id, 0, &vdev_hole_ops);
-	vdev_add_child(rvd, hvd);
-	vdev_config_dirty(rvd);
-
-	/*
-	 * Reassess the health of our root vdev.
-	 */
-	vdev_reopen(rvd);
-}
-
-/*
  * Remove a log device.  The config lock is held for the specified TXG.
  */
 static int
