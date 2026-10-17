@@ -16,7 +16,7 @@
 .\" Copyright (c) 2019, Allan Jude
 .\" Copyright (c) 2021, Colm Buckley <colm@tuatha.org>
 .\"
-.Dd July 23, 2025
+.Dd October 17, 2026
 .Dt ZPOOL-FEATURES 7
 .Os
 .
@@ -99,7 +99,12 @@ This feature's on-disk format changes have not been made and will not be made
 unless an administrator moves the feature to the
 .Sy enabled
 state.
-Features cannot be disabled once they have been enabled.
+Most features cannot be disabled once they have been enabled.
+Those whose description below says so can be moved back to the
+.Sy disabled
+state while they are not
+.Sy active
+and no other enabled feature depends on them.
 .El
 .Pp
 The state of supported features is exposed through pool properties of the form
@@ -500,6 +505,11 @@ when creating a pool which uses the
 vdev type, or when adding a new
 .Sy draid
 vdev to an existing pool.
+.Pp
+This feature can be disabled again while it is not
+.Sy active ,
+see
+.Xr zpoolprops 7 .
 .
 .feature com.seagate draid_failure_domains no draid
 This feature enables use of failure domains in
@@ -527,6 +537,11 @@ when creating a pool which uses the
 vdev type with failure domains configured, or when adding a new
 .Sy draid
 vdev with failure domains to an existing pool.
+.Pp
+This feature can be disabled again while it is not
+.Sy active ,
+see
+.Xr zpoolprops 7 .
 .
 .feature com.klarasystems dynamic_gang_header no
 This feature enables larger gang headers based on the sector size of the pool.
@@ -860,6 +875,11 @@ as this functionality is not required for crash dump support.
 Existing pools where this feature is
 .Sy active
 can be imported.
+.Pp
+This feature can be disabled again while it is not
+.Sy active ,
+see
+.Xr zpoolprops 7 .
 .
 .feature com.delphix obsolete_counts yes device_removal
 This feature is an enhancement of
@@ -926,6 +946,11 @@ subcommand to attach a new device to a RAID-Z group, expanding the total
 amount usable space in the pool.
 See
 .Xr zpool-attach 8 .
+.Pp
+This feature can be disabled again while it is not
+.Sy active ,
+see
+.Xr zpoolprops 7 .
 .
 .feature com.delphix redaction_bookmarks no bookmarks extensible_dataset
 This feature enables the use of redacted

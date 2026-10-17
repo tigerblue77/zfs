@@ -658,16 +658,10 @@ zpool_valid_proplist(libzfs_handle_t *hdl, const char *poolname,
 				goto error;
 			}
 
-			if (!flags.create &&
-			    strcmp(strval, ZFS_FEATURE_DISABLED) == 0) {
-				zfs_error_aux(hdl,
-				    "property '%s' can only be set to "
-				    "'disabled' at creation time", propname);
-				(void) zfs_error(hdl, EZFS_BADPROP, errbuf);
-				goto error;
-			}
-
-			if (nvlist_add_uint64(retprops, propname, 0) != 0) {
+			if (nvlist_add_uint64(retprops, propname,
+			    !flags.create &&
+			    strcmp(strval, ZFS_FEATURE_DISABLED) == 0 ?
+			    ZPOOL_FEATURE_DISABLE : 0) != 0) {
 				(void) no_memory(hdl);
 				goto error;
 			}
@@ -985,6 +979,16 @@ zpool_set_prop(zpool_handle_t *zhp, const char *propname, const char *propval)
 	zcmd_free_nvlists(&zc);
 	nvlist_free(nvl);
 
+	if (ret && zpool_prop_feature(propname) &&
+	    strcmp(propval, ZFS_FEATURE_DISABLED) == 0) {
+		if (errno == ENOTSUP) {
+			zfs_error_aux(zhp->zpool_hdl,
+			    "this feature cannot be disabled");
+		} else if (errno == EBUSY) {
+			zfs_error_aux(zhp->zpool_hdl, "the feature is active, "
+			    "or an enabled feature depends on it");
+		}
+	}
 	if (ret)
 		(void) zpool_standard_error(zhp->zpool_hdl, errno, errbuf);
 	else
