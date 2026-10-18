@@ -923,7 +923,12 @@ vdev_trim_thread(void *arg)
 		}
 
 		spa_config_exit(spa, SCL_CONFIG, FTAG);
-		metaslab_disable(msp);
+		if (!metaslab_disable_or_stop(msp,
+		    &vd->vdev_trim_exit_wanted)) {
+			spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
+			error = SET_ERROR(EINTR);
+			break;
+		}
 
 		/*
 		 * Translating the ranges walks up the vdev tree, so hold the
@@ -1084,6 +1089,9 @@ vdev_trim_stop(vdev_t *vd, vdev_trim_state_t tgt_state, list_t *vd_list)
 
 	vdev_trim_change_state(vd, tgt_state, 0, 0, 0);
 	vd->vdev_trim_exit_wanted = B_TRUE;
+	/* The top-level vdev of a detached leaf may already be freed. */
+	if (!vd->vdev_detached)
+		metaslab_disable_wakeup(vd->vdev_top);
 
 	if (vd_list == NULL) {
 		vdev_trim_stop_wait_impl(vd);
@@ -1274,7 +1282,12 @@ vdev_autotrim_thread(void *arg)
 			boolean_t wait_aborted = B_FALSE;
 
 			spa_config_exit(spa, SCL_CONFIG, FTAG);
-			metaslab_disable(msp);
+			if (!metaslab_disable_or_stop(msp,
+			    &vd->vdev_autotrim_exit_wanted)) {
+				spa_config_enter(spa, SCL_CONFIG, FTAG,
+				    RW_READER);
+				break;
+			}
 			spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
 
 			mutex_enter(&msp->ms_lock);
@@ -1539,6 +1552,7 @@ vdev_autotrim_stop_wait(vdev_t *tvd)
 	if (tvd->vdev_autotrim_thread != NULL) {
 		tvd->vdev_autotrim_exit_wanted = B_TRUE;
 		cv_broadcast(&tvd->vdev_autotrim_kick_cv);
+		metaslab_disable_wakeup(tvd);
 		cv_wait(&tvd->vdev_autotrim_cv,
 		    &tvd->vdev_autotrim_lock);
 

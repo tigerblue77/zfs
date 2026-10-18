@@ -560,7 +560,12 @@ vdev_initialize_thread(void *arg)
 		}
 
 		spa_config_exit(spa, SCL_CONFIG, FTAG);
-		metaslab_disable(msp);
+		if (!metaslab_disable_or_stop(msp,
+		    &vd->vdev_initialize_exit_wanted)) {
+			spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
+			error = SET_ERROR(EINTR);
+			break;
+		}
 
 		/*
 		 * Translating the ranges walks up the vdev tree, so hold the
@@ -752,6 +757,9 @@ vdev_initialize_stop(vdev_t *vd, vdev_initializing_state_t tgt_state,
 
 	vdev_initialize_change_state(vd, tgt_state);
 	vd->vdev_initialize_exit_wanted = B_TRUE;
+	/* The top-level vdev of a detached leaf may already be freed. */
+	if (!vd->vdev_detached)
+		metaslab_disable_wakeup(vd->vdev_top);
 
 	if (vd_list == NULL) {
 		vdev_initialize_stop_wait_impl(vd);

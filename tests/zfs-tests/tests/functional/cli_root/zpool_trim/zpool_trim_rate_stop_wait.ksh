@@ -1,0 +1,109 @@
+#!/bin/ksh -p
+# SPDX-License-Identifier: CDDL-1.0
+#
+# This file and its contents are supplied under the terms of the
+# Common Development and Distribution License ("CDDL"), version 1.0.
+# You may only use this file in accordance with the terms of version
+# 1.0 of the CDDL.
+#
+# A full copy of the text of the CDDL should have accompanied this
+# source.  A copy of the CDDL is also available via the Internet at
+# https://opensource.org/license/CDDL-1.0.
+#
+
+. $STF_SUITE/include/libtest.shlib
+. $STF_SUITE/tests/functional/cli_root/zpool_trim/zpool_trim.kshlib
+
+#
+# DESCRIPTION:
+#	Stopping an initialize or an autotrim does not wait for a
+#	rate-limited manual TRIM, when the three metaslabs a top-level vdev
+#	allows to be disabled at once are held by manual TRIMs.
+#
+# STRATEGY:
+#	1. Create a pool on a four-way mirror of 1 GiB files, whose metaslabs
+#	   are 32 MiB, and start a manual TRIM at 256 KiB/s on the first file.
+#	   It trims the first metaslab, then holds the second one disabled
+#	   for about two minutes before trimming it.
+#	2. Trim the second and third files quickly to 30% and 60%, suspend
+#	   them and resume them at 256 KiB/s, so that each holds another
+#	   metaslab for about two minutes.
+#	3. Start initializing the fourth file, whose thread waits for a
+#	   metaslab, and verify that suspending it does not wait for the
+#	   manual TRIMs.
+#	4. Enable autotrim, whose thread waits for a metaslab, and verify
+#	   that attaching a fifth file, which stops autotrim, does not wait
+#	   for the manual TRIMs.
+#
+
+verify_runnable "global"
+
+function cleanup
+{
+	if poolexists $TESTPOOL; then
+		destroy_pool $TESTPOOL
+	fi
+
+	if [[ -d "$TESTDIR" ]]; then
+		rm -rf "$TESTDIR"
+	fi
+}
+log_onexit cleanup
+
+# Trim a file quickly to the given progress, then resume it slowly.
+function trim_to_then_slow # file progress
+{
+	typeset file=$1
+	typeset -i target=$2
+	typeset -i progress=0
+	typeset -i i
+
+	log_must zpool trim -r 64M $TESTPOOL $file
+	for (( i = 0; i < 600; i++ )); do
+		progress=$(trim_progress $TESTPOOL $file)
+		(( progress >= target )) && break
+		log_must sleep 0.1
+	done
+	log_must zpool trim -s $TESTPOOL $file
+	progress=$(trim_progress $TESTPOOL $file)
+	(( progress >= target && progress < 100 )) || \
+	    log_fail "TRIM of $file suspended at $progress%"
+	log_must zpool trim -r $SLOW $TESTPOOL $file
+}
+
+# Run a command and fail if it takes 30 seconds or more.
+function must_be_quick # command...
+{
+	typeset -i start=$SECONDS
+
+	log_must "$@"
+	(( SECONDS - start < 30 )) || \
+	    log_fail "'$*' took $(( SECONDS - start ))s"
+}
+
+SLOW=256K
+typeset -a FILES
+for i in 1 2 3 4 5; do
+	FILES[$i]="$TESTDIR/trim-stop-wait-$i"
+done
+
+log_must mkdir "$TESTDIR"
+log_must truncate -s 1G ${FILES[1]} ${FILES[2]} ${FILES[3]} ${FILES[4]} \
+    ${FILES[5]}
+log_must zpool create -f -o autotrim=off $TESTPOOL \
+    mirror ${FILES[1]} ${FILES[2]} ${FILES[3]} ${FILES[4]}
+
+log_must zpool trim -r $SLOW $TESTPOOL ${FILES[1]}
+trim_to_then_slow ${FILES[2]} 30
+trim_to_then_slow ${FILES[3]} 60
+log_must sleep 5
+
+log_must zpool initialize $TESTPOOL ${FILES[4]}
+log_must sleep 2
+must_be_quick zpool initialize -s $TESTPOOL ${FILES[4]}
+
+log_must zpool set autotrim=on $TESTPOOL
+log_must sleep 2
+must_be_quick zpool attach $TESTPOOL ${FILES[1]} ${FILES[5]}
+
+log_pass "Stopping initialize and autotrim does not wait for a manual TRIM"
