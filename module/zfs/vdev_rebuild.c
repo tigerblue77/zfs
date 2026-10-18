@@ -833,7 +833,12 @@ vdev_rebuild_thread(void *arg)
 
 		/* Disable any new allocations to this metaslab */
 		spa_config_exit(spa, SCL_CONFIG, FTAG);
-		metaslab_disable(msp);
+		if (!metaslab_disable_or_stop(msp,
+		    &vd->vdev_rebuild_exit_wanted)) {
+			spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
+			error = SET_ERROR(EINTR);
+			break;
+		}
 
 		/*
 		 * Wait for remaining sync passes and outstanding allocations
@@ -1121,6 +1126,7 @@ vdev_rebuild_stop_wait(vdev_t *vd)
 		mutex_enter(&vd->vdev_rebuild_lock);
 		if (vd->vdev_rebuild_thread != NULL) {
 			vd->vdev_rebuild_exit_wanted = B_TRUE;
+			metaslab_disable_wakeup(vd);
 			while (vd->vdev_rebuilding) {
 				cv_wait(&vd->vdev_rebuild_cv,
 				    &vd->vdev_rebuild_lock);

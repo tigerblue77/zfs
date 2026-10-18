@@ -6327,26 +6327,32 @@ metaslab_check_free(spa_t *spa, const blkptr_t *bp)
 	spa_config_exit(spa, SCL_VDEV, FTAG);
 }
 
-static void
-metaslab_group_disable_wait(metaslab_group_t *mg)
+static boolean_t
+metaslab_group_disable_wait(metaslab_group_t *mg, const boolean_t *stop)
 {
 	ASSERT(MUTEX_HELD(&mg->mg_ms_disabled_lock));
 	while (mg->mg_disabled_updating) {
+		if (stop != NULL && *stop)
+			return (B_FALSE);
 		cv_wait(&mg->mg_ms_disabled_cv, &mg->mg_ms_disabled_lock);
 	}
+	return (B_TRUE);
 }
 
-static void
-metaslab_group_disabled_increment(metaslab_group_t *mg)
+static boolean_t
+metaslab_group_disabled_increment(metaslab_group_t *mg, const boolean_t *stop)
 {
 	ASSERT(MUTEX_HELD(&mg->mg_ms_disabled_lock));
 	ASSERT(mg->mg_disabled_updating);
 
 	while (mg->mg_ms_disabled >= max_disabled_ms) {
+		if (stop != NULL && *stop)
+			return (B_FALSE);
 		cv_wait(&mg->mg_ms_disabled_cv, &mg->mg_ms_disabled_lock);
 	}
 	mg->mg_ms_disabled++;
 	ASSERT3U(mg->mg_ms_disabled, <=, max_disabled_ms);
+	return (B_TRUE);
 }
 
 /*
@@ -6354,12 +6360,19 @@ metaslab_group_disabled_increment(metaslab_group_t *mg)
  * We must also track how many metaslabs are currently disabled within a
  * metaslab group and limit them to prevent allocation failures from
  * occurring because all metaslabs are disabled.
+ *
+ * The threads holding the disabled metaslabs can keep them for a long time,
+ * a rate-limited manual TRIM for one.  A thread which may have to wait for
+ * them can pass the flag that asks it to exit: it then gives up, and B_FALSE
+ * is returned, once *stop is set.  Whoever sets it must then call
+ * metaslab_disable_wakeup().
  */
-void
-metaslab_disable(metaslab_t *msp)
+boolean_t
+metaslab_disable_or_stop(metaslab_t *msp, const boolean_t *stop)
 {
 	ASSERT(!MUTEX_HELD(&msp->ms_lock));
 	metaslab_group_t *mg = msp->ms_group;
+	boolean_t disabled = B_FALSE;
 
 	mutex_enter(&mg->mg_ms_disabled_lock);
 
@@ -6372,18 +6385,52 @@ metaslab_disable(metaslab_t *msp)
 	 * to wait till the metaslab's mg_disabled_updating flag is no
 	 * longer set.
 	 */
-	metaslab_group_disable_wait(mg);
-	mg->mg_disabled_updating = B_TRUE;
-	if (msp->ms_disabled == 0) {
-		metaslab_group_disabled_increment(mg);
+	if (!metaslab_group_disable_wait(mg, stop)) {
+		mutex_exit(&mg->mg_ms_disabled_lock);
+		return (B_FALSE);
 	}
-	mutex_enter(&msp->ms_lock);
-	msp->ms_disabled++;
-	mutex_exit(&msp->ms_lock);
+	mg->mg_disabled_updating = B_TRUE;
+	if (msp->ms_disabled > 0 ||
+	    metaslab_group_disabled_increment(mg, stop)) {
+		mutex_enter(&msp->ms_lock);
+		msp->ms_disabled++;
+		mutex_exit(&msp->ms_lock);
+		disabled = B_TRUE;
+	}
 
 	mg->mg_disabled_updating = B_FALSE;
 	cv_broadcast(&mg->mg_ms_disabled_cv);
 	mutex_exit(&mg->mg_ms_disabled_lock);
+
+	return (disabled);
+}
+
+void
+metaslab_disable(metaslab_t *msp)
+{
+	VERIFY(metaslab_disable_or_stop(msp, NULL));
+}
+
+static void
+metaslab_group_disable_wakeup(metaslab_group_t *mg)
+{
+	if (mg == NULL)
+		return;
+
+	mutex_enter(&mg->mg_ms_disabled_lock);
+	cv_broadcast(&mg->mg_ms_disabled_cv);
+	mutex_exit(&mg->mg_ms_disabled_lock);
+}
+
+/*
+ * Wake the threads waiting in metaslab_disable_or_stop() for the metaslabs
+ * of a top-level vdev, so that they check whether they should stop.
+ */
+void
+metaslab_disable_wakeup(vdev_t *tvd)
+{
+	metaslab_group_disable_wakeup(tvd->vdev_mg);
+	metaslab_group_disable_wakeup(tvd->vdev_log_mg);
 }
 
 void
