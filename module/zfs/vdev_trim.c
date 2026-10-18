@@ -472,12 +472,14 @@ vdev_trim_simple_cb(zio_t *zio)
 	spa_config_exit(vd->vdev_spa, SCL_STATE_ALL, vd);
 }
 /*
- * Returns the average trim rate in bytes/sec for the ta->trim_vdev.
+ * Returns the average trim rate in bytes/sec for the ta->trim_vdev, counting
+ * the next I/O of the given size as done, so that the first I/O of each
+ * metaslab waits for the rate too.
  */
 static uint64_t
-vdev_trim_calculate_rate(trim_args_t *ta)
+vdev_trim_calculate_rate(trim_args_t *ta, uint64_t size)
 {
-	return (ta->trim_bytes_done * 1000 /
+	return ((ta->trim_bytes_done + size) * 1000 /
 	    (NSEC2MSEC(gethrtime() - ta->trim_start_time) + 1));
 }
 
@@ -500,7 +502,7 @@ vdev_trim_range(trim_args_t *ta, uint64_t start, uint64_t size)
 	 */
 	if (ta->trim_type == TRIM_TYPE_MANUAL) {
 		while (vd->vdev_trim_rate != 0 && !vdev_trim_should_stop(vd) &&
-		    vdev_trim_calculate_rate(ta) > vd->vdev_trim_rate) {
+		    vdev_trim_calculate_rate(ta, size) > vd->vdev_trim_rate) {
 			cv_timedwait_idle(&vd->vdev_trim_io_cv,
 			    &vd->vdev_trim_io_lock, ddi_get_lbolt() +
 			    MSEC_TO_TICK(10));

@@ -22,10 +22,9 @@
 #
 # STRATEGY:
 #	1. Create a pool on a four-way mirror of 1 GiB files, whose metaslabs
-#	   are 32 MiB, and limit TRIM I/Os to 16 MiB.  The rate of a manual
-#	   TRIM is kept over each metaslab, whose first I/O is not delayed,
-#	   so at 90 KiB/s one holds a metaslab disabled for about three
-#	   minutes before its second I/O.
+#	   are 32 MiB, and limit TRIM I/Os to 16 MiB, so that at 90 KiB/s a
+#	   manual TRIM holds a metaslab disabled for about three minutes
+#	   before each I/O.
 #	2. Trim the first three files quickly to 10%, 40% and 70%, suspend
 #	   them and resume them at 90 KiB/s, so that each holds a different
 #	   metaslab, and verify that they are still trimming.

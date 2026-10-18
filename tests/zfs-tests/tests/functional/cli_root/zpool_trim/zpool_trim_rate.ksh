@@ -28,6 +28,8 @@
 #	2. Manually TRIM the pool with rate limiting.
 #	3. Verify the TRIM can be suspended.
 #	4. Restart the TRIM and verify the rate is preserved.
+#	5. Repeat step 2 on a 2 GiB disk, whose metaslabs are small enough
+#	   to be trimmed in one I/O each.
 #
 # NOTE: Rate limiting caps the maximum trim rate; a busy system can trim
 # more slowly. Check the minimum elapsed time to reach a given progress,
@@ -56,8 +58,8 @@ function trim_to_progress # target rate [resume]
 	typeset -i elapsed
 	typeset -i i
 
-	progress=$(trim_progress $TESTPOOL $LARGEFILE)
-	(( minimum = (target - progress) * 10240 / 100 / rate ))
+	progress=$(trim_progress $TESTPOOL $VDEV)
+	(( minimum = (target - progress) * VDEV_MB / 100 / rate ))
 	start=$(date +%s)
 
 	if [[ "$3" == resume ]]; then
@@ -67,16 +69,16 @@ function trim_to_progress # target rate [resume]
 	fi
 
 	for (( i = 0; i < 60; i++ )); do
-		progress=$(trim_progress $TESTPOOL $LARGEFILE)
+		progress=$(trim_progress $TESTPOOL $VDEV)
 		if (( progress >= target )); then
 			(( target < 100 )) && break
-			trim_prog_line $TESTPOOL $LARGEFILE | \
+			trim_prog_line $TESTPOOL $VDEV | \
 			    grep -q complete && break
 		fi
 		log_must sleep 1
 	done
 	(( progress >= target )) || log_fail \
-	    "TRIM did not reach $target%: $(trim_prog_line $TESTPOOL $LARGEFILE)"
+	    "TRIM did not reach $target%: $(trim_prog_line $TESTPOOL $VDEV)"
 
 	(( elapsed = $(date +%s) - start ))
 	# Allow one second for timestamp rounding and percentage truncation.
@@ -85,17 +87,20 @@ function trim_to_progress # target rate [resume]
 
 	if (( target < 100 )); then
 		log_must zpool trim -s $TESTPOOL
-		log_must eval "trim_prog_line $TESTPOOL $LARGEFILE | grep suspended"
+		log_must eval "trim_prog_line $TESTPOOL $VDEV | grep suspended"
 	else
-		log_must eval "trim_prog_line $TESTPOOL $LARGEFILE | grep complete"
+		log_must eval "trim_prog_line $TESTPOOL $VDEV | grep complete"
 	fi
 }
 
 LARGEFILE="$TESTDIR/largefile"
+SMALLFILE="$TESTDIR/smallfile"
 
 log_must mkdir "$TESTDIR"
 log_must truncate -s 10G "$LARGEFILE"
 log_must zpool create -f $TESTPOOL "$LARGEFILE"
+VDEV=$LARGEFILE
+VDEV_MB=10240
 
 # Start at 200M/s, then resume without specifying a new rate.
 trim_to_progress 10 200
@@ -104,5 +109,13 @@ trim_to_progress 20 200 resume
 # Increase the rate and finally allow trimming at the maximum rate.
 trim_to_progress 50 600
 trim_to_progress 100 1048576
+
+# The 64 MiB metaslabs of a 2 GiB disk are each trimmed in one I/O.
+destroy_pool $TESTPOOL
+log_must truncate -s 2G "$SMALLFILE"
+log_must zpool create -f $TESTPOOL "$SMALLFILE"
+VDEV=$SMALLFILE
+VDEV_MB=2048
+trim_to_progress 10 32
 
 log_pass "Manual TRIM rate throttles as expected"
