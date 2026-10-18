@@ -120,6 +120,10 @@ tags = ['functional', 'devices']
 tests = ['dio_loopback_dev', 'dio_read_verify_decline', 'dio_write_verify']
 tags = ['functional', 'direct']
 
+[tests/functional/dirsync:Linux]
+tests = ['dirsync_mount']
+tags = ['functional', 'dirsync']
+
 [tests/functional/events:Linux]
 tests = ['events_001_pos', 'events_002_pos', 'zed_rc_filter', 'zed_fd_spill',
     'zed_cksum_reported', 'zed_cksum_config', 'zed_io_config',
