@@ -6431,6 +6431,13 @@ vdev_prop_set(spa_t *spa, nvlist_t *innvl, nvlist_t *outnvl)
 		return (SET_ERROR(EINVAL));
 	}
 
+	/*
+	 * Check every property before applying any: one refused after others
+	 * had been applied would leave those in memory but not on disk, as
+	 * the sync task below never runs.  The second pass applies them.
+	 */
+	boolean_t apply = B_FALSE;
+again:
 	while ((elem = nvlist_next_nvpair(nvprops, elem)) != NULL) {
 		const char *propname = nvpair_name(elem);
 		vdev_prop_t prop = vdev_name_to_prop(propname);
@@ -6463,6 +6470,8 @@ vdev_prop_set(spa_t *spa, nvlist_t *innvl, nvlist_t *outnvl)
 				error = EINVAL;
 				break;
 			}
+			if (!apply)
+				break;
 			/*
 			 * spa_vdev_setpath() takes SCL_ALL as a writer, so we
 			 * must not hold SCL_CONFIG across it (see above).  Drop
@@ -6480,7 +6489,7 @@ vdev_prop_set(spa_t *spa, nvlist_t *innvl, nvlist_t *outnvl)
 				error = EINVAL;
 				break;
 			}
-			if (intval != vd->vdev_noalloc)
+			if (intval != vd->vdev_noalloc || !apply)
 				break;
 			/*
 			 * spa_vdev_noalloc()/spa_vdev_alloc() take SCL_ALL as a
@@ -6504,7 +6513,8 @@ vdev_prop_set(spa_t *spa, nvlist_t *innvl, nvlist_t *outnvl)
 				error = EINVAL;
 				break;
 			}
-			vd->vdev_failfast = intval;
+			if (apply)
+				vd->vdev_failfast = intval;
 			break;
 		case VDEV_PROP_SIT_OUT:
 			/* Only expose this for a draid or raidz leaf */
@@ -6537,10 +6547,10 @@ vdev_prop_set(spa_t *spa, nvlist_t *innvl, nvlist_t *outnvl)
 					error = ZFS_ERR_TOO_MANY_SITOUTS;
 					break;
 				}
-				if (error == 0)
+				if (apply)
 					vdev_raidz_sit_child(vd,
 					    INT64_MAX - gethrestime_sec());
-			} else {
+			} else if (apply) {
 				vdev_raidz_unsit_child(vd);
 			}
 			break;
@@ -6554,63 +6564,72 @@ vdev_prop_set(spa_t *spa, nvlist_t *innvl, nvlist_t *outnvl)
 				error = EINVAL;
 				break;
 			}
-			vd->vdev_autosit = intval == 1;
+			if (apply)
+				vd->vdev_autosit = intval == 1;
 			break;
 		case VDEV_PROP_CHECKSUM_N:
 			if (nvpair_value_uint64(elem, &intval) != 0) {
 				error = EINVAL;
 				break;
 			}
-			vd->vdev_checksum_n = intval;
+			if (apply)
+				vd->vdev_checksum_n = intval;
 			break;
 		case VDEV_PROP_CHECKSUM_T:
 			if (nvpair_value_uint64(elem, &intval) != 0) {
 				error = EINVAL;
 				break;
 			}
-			vd->vdev_checksum_t = intval;
+			if (apply)
+				vd->vdev_checksum_t = intval;
 			break;
 		case VDEV_PROP_IO_N:
 			if (nvpair_value_uint64(elem, &intval) != 0) {
 				error = EINVAL;
 				break;
 			}
-			vd->vdev_io_n = intval;
+			if (apply)
+				vd->vdev_io_n = intval;
 			break;
 		case VDEV_PROP_IO_T:
 			if (nvpair_value_uint64(elem, &intval) != 0) {
 				error = EINVAL;
 				break;
 			}
-			vd->vdev_io_t = intval;
+			if (apply)
+				vd->vdev_io_t = intval;
 			break;
 		case VDEV_PROP_SLOW_IO_EVENTS:
 			if (nvpair_value_uint64(elem, &intval) != 0) {
 				error = EINVAL;
 				break;
 			}
-			vd->vdev_slow_io_events = intval != 0;
+			if (apply)
+				vd->vdev_slow_io_events = intval != 0;
 			break;
 		case VDEV_PROP_SLOW_IO_N:
 			if (nvpair_value_uint64(elem, &intval) != 0) {
 				error = EINVAL;
 				break;
 			}
-			vd->vdev_slow_io_n = intval;
+			if (apply)
+				vd->vdev_slow_io_n = intval;
 			break;
 		case VDEV_PROP_SLOW_IO_T:
 			if (nvpair_value_uint64(elem, &intval) != 0) {
 				error = EINVAL;
 				break;
 			}
-			vd->vdev_slow_io_t = intval;
+			if (apply)
+				vd->vdev_slow_io_t = intval;
 			break;
 		case VDEV_PROP_SCHEDULER:
 			if (nvpair_value_uint64(elem, &intval) != 0) {
 				error = EINVAL;
 				break;
 			}
-			vd->vdev_scheduler = intval;
+			if (apply)
+				vd->vdev_scheduler = intval;
 			break;
 		case VDEV_PROP_ALLOC_BIAS:
 			if (nvpair_value_uint64(elem, &intval) != 0) {
@@ -6657,7 +6676,8 @@ vdev_prop_set(spa_t *spa, nvlist_t *innvl, nvlist_t *outnvl)
 					break;
 				}
 			}
-			vd->vdev_alloc_bias = (vdev_alloc_bias_t)intval;
+			if (apply)
+				vd->vdev_alloc_bias = (vdev_alloc_bias_t)intval;
 			break;
 		default:
 			/* Most processing is done in vdev_props_set_sync */
@@ -6669,6 +6689,11 @@ end:
 			vdev_prop_add_list(outnvl, propname, strval, intval, 0);
 			break;
 		}
+	}
+
+	if (error == 0 && !apply) {
+		apply = B_TRUE;
+		goto again;
 	}
 
 	spa_config_exit(spa, SCL_CONFIG, FTAG);
