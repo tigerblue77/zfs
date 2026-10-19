@@ -962,7 +962,22 @@ unalloc_seg(void *arg, uint64_t start, uint64_t size)
 {
 	vdev_copy_segment_arg_t *vcsa = arg;
 	spa_t *spa = vcsa->vcsa_spa;
+	vdev_t *dest_vd = vdev_lookup_top(spa,
+	    DVA_GET_VDEV(vcsa->vcsa_dest_dva));
 	blkptr_t bp = { { { {0} } } };
+
+	/*
+	 * The copy has been written, and spa_sync() waits for it before it
+	 * syncs the metaslabs of vcsa_txg, so the gaps it spanned are still
+	 * allocated in that txg and can be given back at once.  Freed, they
+	 * would be allocatable again only TXG_DEFER_SIZE txgs later, and a
+	 * removal that copies much of a vdev in a few txgs could meanwhile
+	 * run a small destination out of space.
+	 */
+	if (metaslab_unalloc_range(dest_vd,
+	    DVA_GET_OFFSET(vcsa->vcsa_dest_dva) + start, size,
+	    vcsa->vcsa_txg))
+		return;
 
 	BP_SET_BIRTH(&bp, TXG_INITIAL, TXG_INITIAL);
 	BP_SET_LSIZE(&bp, size);
