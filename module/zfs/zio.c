@@ -4102,33 +4102,6 @@ zio_ddt_child_write_done(zio_t *zio)
 	mutex_exit(&dde->dde_io->dde_io_lock);
 }
 
-static boolean_t
-zio_ddt_child_write_layout_matches(zio_t *zio, uint64_t phys_birth)
-{
-	blkptr_t *bp = zio->io_bp;
-
-	ASSERT3U(phys_birth, !=, 0);
-	ASSERT3U(BP_GET_PHYSICAL_BIRTH(bp), ==, zio->io_txg);
-
-	/*
-	 * DDT writes run only in syncing context, under spa_sync()'s
-	 * SCL_CONFIG hold, so the vdev configuration is stable and
-	 * vdev_lookup_top() is safe without taking the lock here.
-	 */
-	for (int d = 0; d < BP_GET_NDVAS(bp); d++) {
-		vdev_t *vd = vdev_lookup_top(zio->io_spa,
-		    DVA_GET_VDEV(&bp->blk_dva[d]));
-		ASSERT3P(vd, !=, NULL);
-
-		if (vd->vdev_ops == &vdev_raidz_ops &&
-		    !vdev_raidz_same_logical_width(vd, phys_birth,
-		    zio->io_txg))
-			return (B_FALSE);
-	}
-
-	return (B_TRUE);
-}
-
 static void
 zio_ddt_child_write_reject(zio_t *zio)
 {
@@ -4170,10 +4143,18 @@ zio_ddt_child_write_ready(zio_t *zio)
 
 	mutex_enter(&dde->dde_io->dde_io_lock);
 
+	/*
+	 * The entry keeps one birth for all its DVAs, which is also the
+	 * physical birth of every BP filled from it, so DVAs added in a
+	 * later txg would pass for older than they are: a resilver from a
+	 * txg after the entry's birth would skip them, they would go to the
+	 * checkpoint when freed if it was taken in between, and RAID-Z
+	 * would read them with the width of the entry's txg.  Only extend
+	 * an entry born in this txg.
+	 */
 	uint64_t phys_birth = ddt_phys_birth(dde->dde_phys, v);
 	boolean_t reject = ddt_phys_is_gang(dde->dde_phys, v) ||
-	    (phys_birth != 0 &&
-	    !zio_ddt_child_write_layout_matches(zio, phys_birth));
+	    (phys_birth != 0 && phys_birth != zio->io_txg);
 
 	if (reject) {
 		mutex_exit(&dde->dde_io->dde_io_lock);
@@ -6099,11 +6080,11 @@ zio_done(zio_t *zio)
 	 * The DDT extension path deliberately produces EAGAIN at two
 	 * sites: at allocation, when extending would require ganging
 	 * (zio_write_gang_block()), and at READY, when the live phys is
-	 * already ganged or RAIDZ geometry differs across an expansion
-	 * boundary. Disable dedup and reexecute as a plain write;
-	 * zp_dedup transitions monotonically to false, so the retry
-	 * terminates. A backend EAGAIN can also take this path; it gets
-	 * one non-dedup retry before ordinary error handling.
+	 * already ganged or was born in an earlier txg. Disable dedup and
+	 * reexecute as a plain write; zp_dedup transitions monotonically
+	 * to false, so the retry terminates. A backend EAGAIN can also take
+	 * this path; it gets one non-dedup retry before ordinary error
+	 * handling.
 	 */
 	if (zio->io_error == EAGAIN &&
 	    zio == zio->io_logical && IO_IS_ALLOCATING(zio) &&

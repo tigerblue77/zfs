@@ -19,18 +19,18 @@
 #	Fast dedup must not add a copy allocated after a RAID-Z expansion to
 #	a dedup entry written before it: a block pointer has one birth, from
 #	which RAID-Z takes the width of every copy. Such a write must become
-#	an ordinary block, while extending an entry within one width still
-#	works.
+#	an ordinary block, as must one that would extend an entry born in an
+#	earlier txg within one width.
 #
 # STRATEGY:
-#	1. Before expansion, a second copy of deduplicated data extends its
-#	   entry.
+#	1. Before expansion, a second copy of deduplicated data, written in a
+#	   later txg, becomes an ordinary two-copy block.
 #	2. Write a 128K and a 16K block, expand the RAID-Z1 from three to four
 #	   devices, and write each again with copies=2. Each must become an
 #	   ordinary two-copy block at the new width. A 16K block allocates the
 #	   same size at both widths but is laid out differently.
 #	3. Scrub, and compare the data.
-#	4. After expansion, a new entry can still be extended.
+#	4. After expansion, the same holds for a new entry.
 #
 
 . "$STF_SUITE"/include/libtest.shlib
@@ -85,7 +85,7 @@ log_must zpool create -f -o ashift=12 -o feature@fast_dedup=enabled \
     "$TESTPOOL" raidz1 "${disks[0]}" "${disks[1]}" "${disks[2]}"
 
 write_pair before-1 128k before-2
-check_bp before-2 'DVA\[0\]=<0:[0-9a-f]+:30000> DVA\[1\]=<0:[0-9a-f]+:30000> .* dedup double '
+check_bp before-2 'DVA\[0\]=<0:[0-9a-f]+:30000> DVA\[1\]=<0:[0-9a-f]+:30000> .* unique double '
 
 log_must zfs set copies=1 "$TESTPOOL"
 log_must dd if=/dev/urandom of="$mnt/large-1" bs=128k count=1
@@ -113,6 +113,6 @@ log_must cmp "$mnt/large-1" "$mnt/large-2"
 log_must cmp "$mnt/small-1" "$mnt/small-2"
 
 write_pair after-1 128k after-2
-check_bp after-2 'DVA\[0\]=<0:[0-9a-f]+:2c000> DVA\[1\]=<0:[0-9a-f]+:2c000> .* dedup double '
+check_bp after-2 'DVA\[0\]=<0:[0-9a-f]+:2c000> DVA\[1\]=<0:[0-9a-f]+:2c000> .* unique double '
 
 log_pass "Fast dedup does not mix RAID-Z widths in one block pointer"

@@ -2306,30 +2306,6 @@ vdev_raidz_get_logical_width(vdev_raidz_t *vdrz, uint64_t txg)
 }
 
 /*
- * Return whether allocations born in these txgs use the same logical
- * RAIDZ column width.
- */
-boolean_t
-vdev_raidz_same_logical_width(vdev_t *vd, uint64_t txg1, uint64_t txg2)
-{
-	ASSERT3P(vd->vdev_ops, ==, &vdev_raidz_ops);
-	ASSERT3U(txg1, !=, 0);
-	ASSERT3U(txg2, !=, 0);
-
-	if (txg1 == txg2)
-		return (B_TRUE);
-
-	vdev_raidz_t *vdrz = vd->vdev_tsd;
-	mutex_enter(&vdrz->vd_expand_lock);
-	boolean_t same = avl_is_empty(&vdrz->vd_expand_txgs) ||
-	    vdev_raidz_get_logical_width_locked(vdrz, txg1) ==
-	    vdev_raidz_get_logical_width_locked(vdrz, txg2);
-	mutex_exit(&vdrz->vd_expand_lock);
-
-	return (same);
-}
-
-/*
  * This code converts an asize into the largest psize that can safely be written
  * to an allocation of that size for this vdev.
  *

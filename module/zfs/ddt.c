@@ -81,7 +81,9 @@
  * slot. If a write is issued for an entry that exists, but has fewer DVAs,
  * then only as many new DVAs are allocated and written to make up the
  * shortfall. The existing entry is then extended (ddt_phys_extend()) with the
- * new DVAs.
+ * new DVAs, if it was born in the same txg: the entry has one birth for all
+ * its DVAs, so an older one is not extended, and the block is written as an
+ * ordinary block instead.
  *
  * ## Lifetime of an entry
  *
