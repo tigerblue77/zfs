@@ -514,12 +514,6 @@ zpl_readpage(struct file *filp, struct page *pp)
 }
 #endif
 
-static int
-zpl_readpage_filler(void *data, struct page *pp)
-{
-	return (zpl_readpage_common(pp));
-}
-
 /*
  * Populate a set of pages with data for the Linux page cache.  This
  * function will only be called for read ahead and never for demand
@@ -527,6 +521,12 @@ zpl_readpage_filler(void *data, struct page *pp)
  * correctly lock each page for IO and call zpl_readpage().
  */
 #ifdef HAVE_VFS_READPAGES
+static int
+zpl_readpage_filler(void *data, struct page *pp)
+{
+	return (zpl_readpage_common(pp));
+}
+
 static int
 zpl_readpages(struct file *filp, struct address_space *mapping,
     struct list_head *pages, unsigned nr_pages)
@@ -537,16 +537,9 @@ zpl_readpages(struct file *filp, struct address_space *mapping,
 static void
 zpl_readahead(struct readahead_control *ractl)
 {
-	struct page *page;
-
-	while ((page = readahead_page(ractl)) != NULL) {
-		int ret;
-
-		ret = zpl_readpage_filler(NULL, page);
-		put_page(page);
-		if (ret)
-			break;
-	}
+	fstrans_cookie_t cookie = spl_fstrans_mark();
+	zfs_readahead(ractl->mapping->host, ractl);
+	spl_fstrans_unmark(cookie);
 }
 #endif
 

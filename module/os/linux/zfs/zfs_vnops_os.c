@@ -62,6 +62,7 @@
 #include <sys/zil.h>
 #include <sys/sa_impl.h>
 #include <linux/mm_compat.h>
+#include <linux/pagemap_compat.h>
 
 /*
  * Programming rules.
@@ -4338,6 +4339,51 @@ zfs_getpage(struct inode *ip, struct page *pp)
 
 	return (error);
 }
+
+#ifndef HAVE_VFS_READPAGES
+/*
+ * Fill the pages of a readahead batch.  The kernel locks every page of the
+ * batch before calling us, so unlike zfs_getpage() we must not wait for the
+ * range lock: its holder may be waiting in update_pages() or truncation for
+ * a page still locked here.  Readahead is only a hint, so stop at the first
+ * busy page, before taking it, and let read_pages() release the rest.
+ */
+void
+zfs_readahead(struct inode *ip, struct readahead_control *ractl)
+{
+	zfsvfs_t *zfsvfs = ITOZSB(ip);
+	znode_t *zp = ITOZ(ip);
+	loff_t off = readahead_pos(ractl);
+	unsigned int nr = readahead_count(ractl);
+
+	if (zfs_enter_verify_zp(zfsvfs, zp, FTAG) != 0)
+		return;
+
+	/*
+	 * readahead_pos() only advances when the next page is taken, so
+	 * track the offset here; our mappings use single-page folios.
+	 */
+	for (unsigned int i = 0; i < nr; i++, off += PAGE_SIZE) {
+		zfs_locked_range_t *lr = zfs_rangelock_tryenter(
+		    &zp->z_rangelock, off, PAGE_SIZE, RL_READER);
+		if (lr == NULL)
+			break;
+
+		struct page *pp = readahead_page(ractl);
+		ASSERT3U(page_offset(pp), ==, off);
+		int error = zfs_fillpage(ip, pp);
+		zfs_rangelock_exit(lr);
+		unlock_page(pp);
+		put_page(pp);
+
+		if (error != 0)
+			break;
+		dataset_kstats_update_read_kstats(&zfsvfs->z_kstat, PAGE_SIZE);
+	}
+
+	zfs_exit(zfsvfs, FTAG);
+}
+#endif
 
 /*
  * Check ZFS specific permissions to memory map a section of a file.
