@@ -60,6 +60,9 @@ log_note "dbuf count is $dbuf, mru count is $mru, mfu count is $mfu"
 verify_ne "0" "$mru" "mru count"
 verify_eq "0" "$mfu" "mfu count"
 
+# The ARC moves a buffer to the MFU list only when it is accessed again
+# more than ARC_MINTIME (1/16 s) after the previous access.
+log_must sleep 1
 log_must eval "cat $TESTDIR/file > /dev/null"
 log_must eval "kstat dbufs > $DBUFS_FILE"
 dbuf=$(dbufstat -bxn -i "$DBUFS_FILE" -F "object=$objid" | wc -l)
