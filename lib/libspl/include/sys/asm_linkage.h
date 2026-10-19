@@ -26,7 +26,4 @@
 #define	FRAME_BEGIN
 #define	FRAME_END
 
-#endif
-
-
 #endif	/* _SYS_ASM_LINKAGE_H */
