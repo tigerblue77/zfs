@@ -6417,6 +6417,21 @@ vdev_props_set_sync(void *arg, dmu_tx_t *tx)
 	mutex_exit(&spa->spa_props_lock);
 }
 
+/*
+ * The passes that vdev_prop_set() makes over the properties of a call, so
+ * that a call which fails leaves no value in memory that was not written
+ * to disk.  The path and the allocating state can still be refused while
+ * they are set, so they are set before the values that are only kept in
+ * memory, and as setting them drops the config lock, every property is
+ * checked again after that.
+ */
+typedef enum {
+	VPS_CHECK,	/* check every property, change nothing */
+	VPS_ACT,	/* set the path and the allocating state */
+	VPS_RECHECK,	/* check every property again */
+	VPS_APPLY	/* set the values kept in memory */
+} vdev_prop_set_pass_t;
+
 int
 vdev_prop_set(spa_t *spa, nvlist_t *innvl, nvlist_t *outnvl)
 {
@@ -6460,6 +6475,8 @@ vdev_prop_set(spa_t *spa, nvlist_t *innvl, nvlist_t *outnvl)
 		return (SET_ERROR(EINVAL));
 	}
 
+	vdev_prop_set_pass_t pass = VPS_CHECK;
+again:
 	while ((elem = nvlist_next_nvpair(nvprops, elem)) != NULL) {
 		const char *propname = nvpair_name(elem);
 		vdev_prop_t prop = vdev_name_to_prop(propname);
@@ -6492,6 +6509,8 @@ vdev_prop_set(spa_t *spa, nvlist_t *innvl, nvlist_t *outnvl)
 				error = EINVAL;
 				break;
 			}
+			if (pass != VPS_ACT)
+				break;
 			/*
 			 * spa_vdev_setpath() takes SCL_ALL as a writer, so we
 			 * must not hold SCL_CONFIG across it (see above).  Drop
@@ -6509,7 +6528,7 @@ vdev_prop_set(spa_t *spa, nvlist_t *innvl, nvlist_t *outnvl)
 				error = EINVAL;
 				break;
 			}
-			if (intval != vd->vdev_noalloc)
+			if (intval != vd->vdev_noalloc || pass != VPS_ACT)
 				break;
 			/*
 			 * spa_vdev_noalloc()/spa_vdev_alloc() take SCL_ALL as a
@@ -6533,7 +6552,8 @@ vdev_prop_set(spa_t *spa, nvlist_t *innvl, nvlist_t *outnvl)
 				error = EINVAL;
 				break;
 			}
-			vd->vdev_failfast = intval;
+			if (pass == VPS_APPLY)
+				vd->vdev_failfast = intval;
 			break;
 		case VDEV_PROP_SIT_OUT:
 			/* Only expose this for a draid or raidz leaf */
@@ -6566,10 +6586,10 @@ vdev_prop_set(spa_t *spa, nvlist_t *innvl, nvlist_t *outnvl)
 					error = ZFS_ERR_TOO_MANY_SITOUTS;
 					break;
 				}
-				if (error == 0)
+				if (pass == VPS_APPLY)
 					vdev_raidz_sit_child(vd,
 					    INT64_MAX - gethrestime_sec());
-			} else {
+			} else if (pass == VPS_APPLY) {
 				vdev_raidz_unsit_child(vd);
 			}
 			break;
@@ -6583,63 +6603,72 @@ vdev_prop_set(spa_t *spa, nvlist_t *innvl, nvlist_t *outnvl)
 				error = EINVAL;
 				break;
 			}
-			vd->vdev_autosit = intval == 1;
+			if (pass == VPS_APPLY)
+				vd->vdev_autosit = intval == 1;
 			break;
 		case VDEV_PROP_CHECKSUM_N:
 			if (nvpair_value_uint64(elem, &intval) != 0) {
 				error = EINVAL;
 				break;
 			}
-			vd->vdev_checksum_n = intval;
+			if (pass == VPS_APPLY)
+				vd->vdev_checksum_n = intval;
 			break;
 		case VDEV_PROP_CHECKSUM_T:
 			if (nvpair_value_uint64(elem, &intval) != 0) {
 				error = EINVAL;
 				break;
 			}
-			vd->vdev_checksum_t = intval;
+			if (pass == VPS_APPLY)
+				vd->vdev_checksum_t = intval;
 			break;
 		case VDEV_PROP_IO_N:
 			if (nvpair_value_uint64(elem, &intval) != 0) {
 				error = EINVAL;
 				break;
 			}
-			vd->vdev_io_n = intval;
+			if (pass == VPS_APPLY)
+				vd->vdev_io_n = intval;
 			break;
 		case VDEV_PROP_IO_T:
 			if (nvpair_value_uint64(elem, &intval) != 0) {
 				error = EINVAL;
 				break;
 			}
-			vd->vdev_io_t = intval;
+			if (pass == VPS_APPLY)
+				vd->vdev_io_t = intval;
 			break;
 		case VDEV_PROP_SLOW_IO_EVENTS:
 			if (nvpair_value_uint64(elem, &intval) != 0) {
 				error = EINVAL;
 				break;
 			}
-			vd->vdev_slow_io_events = intval != 0;
+			if (pass == VPS_APPLY)
+				vd->vdev_slow_io_events = intval != 0;
 			break;
 		case VDEV_PROP_SLOW_IO_N:
 			if (nvpair_value_uint64(elem, &intval) != 0) {
 				error = EINVAL;
 				break;
 			}
-			vd->vdev_slow_io_n = intval;
+			if (pass == VPS_APPLY)
+				vd->vdev_slow_io_n = intval;
 			break;
 		case VDEV_PROP_SLOW_IO_T:
 			if (nvpair_value_uint64(elem, &intval) != 0) {
 				error = EINVAL;
 				break;
 			}
-			vd->vdev_slow_io_t = intval;
+			if (pass == VPS_APPLY)
+				vd->vdev_slow_io_t = intval;
 			break;
 		case VDEV_PROP_SCHEDULER:
 			if (nvpair_value_uint64(elem, &intval) != 0) {
 				error = EINVAL;
 				break;
 			}
-			vd->vdev_scheduler = intval;
+			if (pass == VPS_APPLY)
+				vd->vdev_scheduler = intval;
 			break;
 		case VDEV_PROP_ALLOC_BIAS:
 			if (nvpair_value_uint64(elem, &intval) != 0) {
@@ -6686,7 +6715,8 @@ vdev_prop_set(spa_t *spa, nvlist_t *innvl, nvlist_t *outnvl)
 					break;
 				}
 			}
-			vd->vdev_alloc_bias = (vdev_alloc_bias_t)intval;
+			if (pass == VPS_APPLY)
+				vd->vdev_alloc_bias = (vdev_alloc_bias_t)intval;
 			break;
 		default:
 			/* Most processing is done in vdev_props_set_sync */
@@ -6698,6 +6728,11 @@ end:
 			vdev_prop_add_list(outnvl, propname, strval, intval, 0);
 			break;
 		}
+	}
+
+	if (error == 0 && pass != VPS_APPLY) {
+		pass++;
+		goto again;
 	}
 
 	spa_config_exit(spa, SCL_CONFIG, FTAG);
