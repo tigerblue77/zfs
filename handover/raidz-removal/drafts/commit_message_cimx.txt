@@ -1,0 +1,15 @@
+CI: install linux-modules-extra only where it exists
+
+Runner image 20261018 boots kernel 7.0.0-1017-azure, for which Ubuntu
+has linux-modules but no linux-modules-extra package.  qemu-1-setup.sh
+installs linux-modules-extra-$(uname -r) on the runner, and so does
+qemu-3-deps-vm.sh for ubuntu22 and ubuntu24, which the unit-tests,
+smatch and ARM build jobs also run on the runner.  On that image apt
+cannot find the package and the job fails, so which jobs fail depends
+on which image their runner has.
+
+Install linux-modules-extra only when apt has it.  The ubuntu26 case
+already does without it.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>
+

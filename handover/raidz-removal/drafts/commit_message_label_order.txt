@@ -1,0 +1,15 @@
+zpool remove: erase the labels once the hole is on disk
+
+spa_vdev_remove_empty() erased the labels of the removed vdev before
+the txg that writes the hole had synced.  An import that scans the
+devices ignores an erased label, so a crash in between left a pool
+whose config still has the vdev and whose devices no longer show it.
+The pool then imports only while the paths recorded in its config
+still lead to the devices.
+
+Put the hole in place first, wait for it to sync, and only then erase
+the labels and free the vdev, as vdev_remove_complete() does for an
+indirect vdev.  A crash before the labels are erased leaves labels
+older than the hole, which the import already prefers to them.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>

@@ -1,0 +1,33 @@
+Allow an inactive pool feature to be disabled again
+
+A feature enabled by mistake, by "zpool upgrade" or by "zpool create"
+without -d or a compatibility file, can only be taken back by creating
+the pool again, even while nothing uses it.  A pool that has stopped
+using a feature, such as one whose last dRAID vdev was removed, cannot
+match its compatibility file again either.
+
+Let "zpool set feature@<name>=disabled" move an enabled feature back to
+the disabled state while its reference count is 0 and no enabled
+feature depends on it.  The sync task removes what feature_enable_sync()
+wrote: the entry in features_for_read or features_for_write, the
+description, and the entry in feature_enabled_txg with its reference.
+The feature then reads as never enabled, which every implementation
+already handles, so the on-disk format does not change.
+
+Being inactive does not make a feature unused, though.  Code may check
+that a feature is enabled in open context and activate it in a later
+txg, and spa_feature_incr() panics on a disabled feature.  So only the
+features registered with the new ZFEATURE_FLAG_DISABLE_OK can be
+disabled, and the others are refused with ENOTSUP.  The first ones are
+draid, draid_failure_domains and raidz_expansion, which spa_vdev_add()
+and spa_vdev_attach() check and activate under spa_vdev_enter(), and
+multi_vdev_crash_dump, which nothing activates.  The disable runs under
+spa_vdev_enter() too, so it cannot interleave with them, and its sync
+task checks again for a dependent feature enabled in between.
+
+The value ZPOOL_FEATURE_DISABLE of a feature property asks
+ZFS_IOC_POOL_SET_PROPS to disable it; older kernels refuse it with
+EINVAL.  The new flag adds an enumerator to zfeature_flags_t, hence the
+update of libzfs.abi.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>

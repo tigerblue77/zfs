@@ -1,0 +1,40 @@
+Allow an inactive pool feature to be disabled again
+
+A feature enabled by mistake, by "zpool upgrade" or by "zpool create"
+without -d or a compatibility file, can only be taken back by creating
+the pool again, even while nothing uses it.  Until then, "zpool status"
+also keeps reporting that the pool has features enabled outside its
+compatibility property, although its on-disk format is still the one
+the compatibility file describes.
+
+Let "zpool set feature@<name>=disabled" move an enabled feature back to
+the disabled state while its reference count is 0 and no enabled
+feature depends on it, directly or through other dependencies.  A sync
+task checks this and removes what feature_enable_sync() wrote: the
+entry in features_for_read or features_for_write, the description, and
+the entry in feature_enabled_txg with its reference.  The feature then
+reads as never enabled, which every implementation already handles, so
+the on-disk format does not change.  Features that become active when
+they are enabled, and enabled_txg, never drop to 0 and are refused like
+any active feature.
+
+A reference count of 0 does not mean that nothing is about to use the
+feature, though.  Code may check that a feature is enabled and take a
+reference only in a later transaction group: a dataset whose checksum
+property selects sha512 activates the feature when it first writes a
+block, which can be long after the property was set.  So
+spa_feature_incr() now enables a feature that is not enabled, with its
+dependencies, instead of failing a VERIFY, and records it in the pool
+history like an explicit enable: whatever needs the feature later
+enables it again.  spa_feature_incr() also runs on dp_sync_taskq
+threads, so a new spa_feat_enable_lock serializes these enables with
+each other and with the disable sync task.  The assertions that a
+feature is enabled right before it is referenced no longer hold, and
+are removed.
+
+The value ZPOOL_FEATURE_DISABLE of a feature property asks
+ZFS_IOC_POOL_SET_PROPS to disable it; older kernels refuse it with
+EINVAL.  "zpool import -o" and "zpool split -o" still refuse
+feature@<name>=disabled.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>

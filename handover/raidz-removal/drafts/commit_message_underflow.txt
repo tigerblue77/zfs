@@ -1,0 +1,11 @@
+Reload only when the provided config misses top-level vdevs
+
+spa_ld_trusted_config() reloads the pool with the MOS config when the
+config it was given has SPA_SYNC_MIN_VDEVS healthy top-level vdevs
+fewer than the MOS config, since the latest uberblock may then be on
+vdevs that were not opened.  The difference is computed in uint64_t:
+a provided config with more healthy top-level vdevs than the MOS
+config, as when rewinding to a checkpoint after vdevs were added,
+wraps around and also causes a reload, though no vdev was missed.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>

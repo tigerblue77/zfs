@@ -1,0 +1,31 @@
+Pass the kernel the paths of leaves the import config does not name
+
+After a crash right before the uberblocks of the txg that detaches one
+side of a mirror, the newest labels of the remaining device describe it
+alone as the top-level vdev, and the labels of the detached device are
+erased.  An import that scans the devices builds its config from those
+newest labels, so the detached leaf appears nowhere in it, while the
+MOS config, still mirrored, names it.  vdev_copy_path_relaxed() finds
+no device for it and keeps the path recorded in the MOS config: when
+device names have changed across the crash, the leaf does not open and
+the pool imports degraded.
+
+The scan knows where the device is, as it now notes the guids of labels
+with txg 0.  Have get_configs() add to the config, as
+ZPOOL_CONFIG_LEAF_PATHS, the paths of the devices of the pool that its
+vdev tree does not name, keyed by vdev guid in decimal.  After
+vdev_copy_path_relaxed(), spa_ld_trusted_config() gives each leaf of
+the MOS config that the provided config does not name, by guid or
+former guid, the path listed for its guid, if any; the device still has
+to pass vdev_validate().  "zpool import" passes the key to the tryimport
+only, whose config already has the path.  It is not stored on disk, as
+the config is regenerated from the MOS config right after.  Older
+kernels ignore it, and without it nothing changes.
+
+zpool_detach_002_pos now expects the pool to import healthy, with the
+detached device online.  best_name() picks the best of several names
+when given no path to prefer, rather than the first; fix_paths() does
+so only for leaves without a path, such as distributed spares, for
+which no device is found anyway.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>

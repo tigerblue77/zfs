@@ -1,0 +1,103 @@
+diff --git a/module/zfs/spa.c b/module/zfs/spa.c
+index 2a4c3a7cb..46f3ef93a 100644
+--- a/module/zfs/spa.c
++++ b/module/zfs/spa.c
+@@ -11293,6 +11293,10 @@ spa_sync_rewrite_vdev_config(spa_t *spa, dmu_tx_t *tx)
+  * Sync the specified transaction group.  New blocks may be dirtied as
+  * part of the process, so we iterate until it converges.
+  */
++/* SCRATCH toggles for rebuild_wait_probe; not for upstream. */
++int rbw_no_sync_notify = 0;
++int rbw_complete_notify = 1;
++
+ void
+ spa_sync(spa_t *spa, uint64_t txg)
+ {
+@@ -11487,7 +11491,8 @@ spa_sync(spa_t *spa, uint64_t txg)
+ 	 * the pool now that the txg is on disk, so let the waiters look
+ 	 * again (see spa_activity_in_progress()).
+ 	 */
+-	spa_notify_waiters(spa);
++	if (!rbw_no_sync_notify)	/* SCRATCH: toggled by the probe */
++		spa_notify_waiters(spa);
+ 
+ 	spa_handle_ignored_writes(spa);
+ 
+diff --git a/module/zfs/vdev_rebuild.c b/module/zfs/vdev_rebuild.c
+index 6e5069da2..8d884e9fe 100644
+--- a/module/zfs/vdev_rebuild.c
++++ b/module/zfs/vdev_rebuild.c
+@@ -290,6 +290,36 @@ vdev_rebuild_initiate(vdev_t *vd, uint64_t txg)
+ /*
+  * Update the on-disk state to completed when a rebuild finishes.
+  */
++extern int rbw_complete_notify;
++
++/* SCRATCH diagnostics and toggle for rebuild_wait_probe. */
++int rbw_cancel_fix = 1;
++uint64_t rbw_cancels;
++uint64_t rbw_cancel_pre_state;	/* leaf with DTL_MISSING, before check */
++uint64_t rbw_cancel_post_state;	/* same leaf, after the check */
++int rbw_cancel_reopening;
++
++/* State of the (last) leaf below vd that has DTL_MISSING entries. */
++static uint64_t
++rbw_leaf_state(vdev_t *vd, int *reopening)
++{
++	uint64_t st = UINT64_MAX;
++
++	if (vd->vdev_ops->vdev_op_leaf) {
++		if (!zfs_range_tree_is_empty(vd->vdev_dtl[DTL_MISSING])) {
++			st = vd->vdev_state;
++			*reopening = vd->vdev_reopening;
++		}
++		return (st);
++	}
++	for (uint64_t c = 0; c < vd->vdev_children; c++) {
++		uint64_t cst = rbw_leaf_state(vd->vdev_child[c], reopening);
++		if (cst != UINT64_MAX)
++			st = cst;
++	}
++	return (st);
++}
++
+ static void
+ vdev_rebuild_complete_sync(void *arg, dmu_tx_t *tx)
+ {
+@@ -331,6 +361,10 @@ vdev_rebuild_complete_sync(void *arg, dmu_tx_t *tx)
+ 	vd->vdev_rebuilding = B_FALSE;
+ 	mutex_exit(&vd->vdev_rebuild_lock);
+ 
++	/* SCRATCH: candidate fix, toggled by the probe. */
++	if (rbw_complete_notify)
++		spa_notify_waiters(spa);
++
+ 	/*
+ 	 * While we're in syncing context take the opportunity to
+ 	 * setup the scrub when there are no more active rebuilds.
+@@ -823,7 +857,24 @@ vdev_rebuild_thread(void *arg)
+ 		 * vdev_rebuild_cancel_wanted flag is set until the sync task
+ 		 * completes.  This may be after the rebuild thread exits.
+ 		 */
+-		if (vdev_rebuild_should_cancel(vd)) {
++		/*
++		 * SCRATCH: rbw_cancel_fix holds SCL_STATE so that a
++		 * concurrent vdev_reopen() cannot show a leaf as CLOSED.
++		 */
++		if (rbw_cancel_fix)
++			spa_config_enter(spa, SCL_STATE, FTAG, RW_READER);
++		int rb_reop = 0, rb_dummy = 0;
++		uint64_t rb_pre = rbw_leaf_state(vd, &rb_reop);
++		boolean_t cancel = vdev_rebuild_should_cancel(vd);
++		if (cancel) {
++			rbw_cancels++;
++			rbw_cancel_pre_state = rb_pre;
++			rbw_cancel_reopening = rb_reop;
++			rbw_cancel_post_state = rbw_leaf_state(vd, &rb_dummy);
++		}
++		if (rbw_cancel_fix)
++			spa_config_exit(spa, SCL_STATE, FTAG);
++		if (cancel) {
+ 			vd->vdev_rebuild_cancel_wanted = B_TRUE;
+ 			error = EINTR;
+ 			break;

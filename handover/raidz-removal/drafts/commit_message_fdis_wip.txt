@@ -1,0 +1,13 @@
+WIP: allow disabling an inactive feature (prototype, #19439)
+
+Local prototype, not for upstream as is: the interface (zpool set or a
+separate command, the ioctl) waits for the discussion on #19439.
+
+spa_feature_disable() removes what feature_enable_sync() wrote, for a
+feature registered with ZFEATURE_FLAG_DISABLE_OK whose reference count
+is 0 and on which no enabled feature depends.  It runs its sync task
+under spa_vdev_enter(), which serializes it with the vdev operations
+that check and activate draid, draid_failure_domains and
+raidz_expansion.  multi_vdev_crash_dump is never activated.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>

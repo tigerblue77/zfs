@@ -1,0 +1,32 @@
+Hold SCL_STATE in the rebuild initiate and reset sync tasks
+
+vdev_rebuild_initiate_sync() and vdev_rebuild_reset_sync() VERIFY
+that vdev_resilver_needed() finds a writeable leaf with missing data.
+They run in syncing context, which holds SCL_CONFIG but no longer
+SCL_STATE once spa_sync() has gone through the dirty state list, and
+vdev_reopen() closes every leaf with only SCL_STATE_ALL held as
+writer.  A reopen that overlaps one of these sync tasks fails the
+VERIFY, and panics the system.
+
+In userspace (libzpool, file vdevs), the overlap is not rare: with a
+thread repeating the reopen that "zpool scrub" does, a few
+milliseconds apart, the VERIFY of vdev_rebuild_initiate_sync()
+stopped each of 4 runs within 30 attaches; counted instead of
+asserted, it failed in 12 of 80, and the one of
+vdev_rebuild_reset_sync() in 2 of 600 resets.  In the kernel, the
+attach that initiates a rebuild holds spa_namespace_lock until its
+txg has synced, which keeps out the commands that would reopen,
+unless they had opened the pool before it began.  A reset, though, is
+requested later by the rebuild thread, in any txg, and any
+"zpool scrub" or "zpool reopen", or "zpool online" of a device of
+that top-level vdev, can overlap it.
+
+Take SCL_STATE as reader in both sync tasks, before
+vdev_rebuild_lock as everywhere else.  Syncing context already waits
+for SCL_STATE as reader at the start of every spa_sync(), and sync
+tasks such as spa_change_guid_check() take it with dp_config_rwlock
+held, so this adds no new wait.  With it, the same userspace runs
+went through 120 attaches and 600 resets without a failure or a
+hang.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>

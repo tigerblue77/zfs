@@ -1,0 +1,21 @@
+Activate a vdev only if it is not allocating yet
+
+spa_vdev_alloc() activates the vdev whenever it is not being removed,
+without checking that it is non-allocating, while spa_vdev_noalloc()
+does check that the vdev is allocating before it passivates it.
+vdev_prop_set() looks at vdev_noalloc before calling spa_vdev_alloc(),
+but it has to drop SCL_CONFIG first, so two "zpool set allocating=on"
+issued at the same time on the same vdev can both pass that check, and
+the second one activates a vdev that is already allocating.
+
+Debug builds then fail ASSERT(vd->vdev_noalloc) in vdev_activate().
+Without assertions, metaslab_group_activate() raises the activation
+count to 2 and links the group into the rotor a second time, and the
+non-allocating space of the vdev is subtracted a second time, so
+spa_nonallocating_dspace wraps around.  The next "allocating=off" only
+brings the activation count back to 1, and the vdev keeps allocating.
+
+Check vdev_noalloc in spa_vdev_alloc(), under spa_vdev_enter(), as
+spa_vdev_noalloc() does.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>

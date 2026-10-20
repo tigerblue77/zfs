@@ -1,0 +1,117 @@
+--- vm_zts_pr1.sh
++++ vm_zts_noalloc.sh
+@@ -1,10 +1,10 @@
+ #!/usr/bin/env bash
+ #
+-# vm_zts_pr1.sh - build and test the "zpool remove of an empty vdev beside
+-# raidz" change (branch zpool-remove-empty-vdev) on a DISPOSABLE Debian 13
+-# (trixie) x86_64 VM, with the OpenZFS test suite (ZTS).
++# vm_zts_noalloc.sh - build and test the "account a growing non-allocating
++# vdev only once" fix (branch noalloc-expand-accounting) on a DISPOSABLE
++# Debian 13 (trixie) x86_64 VM, with the OpenZFS test suite (ZTS).
+ #
+-# Install as root:  /opt/zts/vm_zts_pr1.sh  (root:root, 0755), run as root.
++# Install as root:  /opt/zts/vm_zts_noalloc.sh  (root:root, 0755), run as root.
+ #
+ # NOTE: the branch is NOT on the remote until the maintainer pushes it
+ # (https://github.com/tigerblue77/zfs, branch zpool-remove-empty-vdev).  Until
+@@ -12,13 +12,14 @@
+ # test: 4e0c3a2d7238b3085c0d9b65935a49c7080f8668, parent 4542a317e2fa.
+ #
+ # Subcommands (re-runnable; completed steps are recorded in
+-# /var/lib/zts-pr1/state and skipped; "reset" clears them):
++# /var/lib/zts-noalloc/state and skipped; "reset" clears them):
+ #   prepare   apt dependencies and kernel headers, XFS on the ZTSTESTS disk
+ #             mounted on /var/tmp, sysctl/journald/rcu settings, test user
+ #             (exit 3 = reboot needed, then run prepare again)
+ #   build     clone patched + base trees, autogen/configure --enable-debug/make
+-#   test      BASE tree: the two new tests (expected to FAIL before the fix);
+-#             PATCHED tree: the two new tests plus neighbouring tests
++#   test      BASE tree: the new test (expected to FAIL before the fix);
++#             PATCHED tree: the new test, the zpool_set, zpool_expand and
++#             raidz groups, plus neighbouring tests
+ #   demo      OPTIONAL manual demonstration on the six ZTSD1..6 disks
+ #   all       prepare, build, test
+ #   status    show recorded state and results
+@@ -28,8 +29,8 @@
+ # Facts that shape this script:
+ #  - zfs-tests.sh refuses to run as root and needs passwordless sudo, so a
+ #    local user "zts" (with a sudoers drop-in) owns the trees and runs the
+-#    suite.  /root is mode 0700, hence the trees live in /var/tmp/zts-pr1
+-#    (the XFS disk) and not in /root/zts-pr1.
++#    suite.  /root is mode 0700, hence the trees live in /var/tmp/zts-noalloc
++#    (the XFS disk) and not in /root/zts-noalloc.
+ #  - Tests run through "zfs-tests.sh -vKO -s 3GB -t <path>" from /var/tmp,
+ #    as the upstream CI does; modules come from the in-tree build via
+ #    scripts/zfs.sh.  scripts/zfs-helpers.sh is NOT run (no changes under
+@@ -39,7 +40,7 @@
+ #    absent.  Never uses "zfs-tests.sh -x".  Only the ZTSTESTS disk (once, if
+ #    blank) and, in "demo", the ZTSD1..6 disks are written by this script.
+ #
+-# Logs: /var/log/zts-pr1/ (run.log, build-*.log, <tree>-<test>.zts.log,
++# Logs: /var/log/zts-noalloc/ (run.log, build-*.log, <tree>-<test>.zts.log,
+ # .dmesg.before/.after, .results/, results.tsv).
+ 
+ set -eEuo pipefail
+@@ -48,15 +49,15 @@
+ export LC_ALL=C DEBIAN_FRONTEND=noninteractive
+ 
+ REPO_URL=https://github.com/tigerblue77/zfs
+-BRANCH=zts-check-unified
+-PATCHED_COMMIT=62848708d7dde50f0a9e1fb5566960f29fac2aaa
+-BASE_COMMIT=c27dff0c3
++BRANCH=noalloc-expand-accounting
++PATCHED_COMMIT=5b0057819e656b3de166d099591b4c813dcd5fb3
++BASE_COMMIT=22013c391
+ TESTS_SERIAL=ZTSTESTS
+ DEMO_SERIALS="ZTSD1 ZTSD2 ZTSD3 ZTSD4 ZTSD5 ZTSD6"
+ TEST_USER=zts
+-WORK=/var/tmp/zts-pr1
+-LOG=/var/log/zts-pr1
+-STATE_DIR=/var/lib/zts-pr1
++WORK=/var/tmp/zts-noalloc
++LOG=/var/log/zts-noalloc
++STATE_DIR=/var/lib/zts-noalloc
+ STATE=$STATE_DIR/state
+ RESULTS=$LOG/results.tsv
+ FUNC=tests/functional
+@@ -66,24 +67,10 @@
+ REBOOT_NEEDED=0
+ SCRIPT=$0
+ 
+-NEW_TESTS="removal/remove_raidz_empty removal/remove_raidz_busy
+-    removal/remove_empty_vdev"
+-NEIGHBOURS="pool_checkpoint/checkpoint_removal pool_checkpoint/checkpoint_vdev_add
+-    pool_checkpoint/checkpoint_discard_busy pool_checkpoint/checkpoint_conf_change
+-    history/history_001_pos events/events_001_pos
+-    block_cloning/block_cloning_after_device_removal
+-    cli_root/zfs_destroy/zfs_destroy_dev_removal
+-    cli_root/zfs_destroy/zfs_destroy_dev_removal_condense
+-    cli_root/zpool_wait/zpool_wait_remove cli_root/zpool_wait/zpool_wait_remove_cancel
+-    cli_root/zpool_import/import_cachefile_device_removed
+-    cli_root/zpool_import/import_rewind_config_changed
+-    cli_root/zpool_trim/zpool_trim_attach_detach_add_remove
+-    cli_root/zpool_initialize/zpool_initialize_attach_detach_add_remove
+-    cli_root/zpool_labelclear/zpool_labelclear_removed
+-    cli_root/zpool_labelclear/zpool_labelclear_active
+-    cli_root/zpool_split/zpool_split_indirect
+-    alloc_class/alloc_class_012_pos alloc_class/alloc_class_013_pos
+-    dedup/dedup_log_zdb_leak"
++NEW_TESTS="cli_root/zpool_set/vdev_set_allocating_expand"
++NEIGHBOURS="alloc_class/alloc_class_012_pos alloc_class/alloc_class_013_pos
++    removal/removal_sanity removal/removal_with_add removal/remove_expanded
++    removal/removal_cancel"
+ KERN_BAD='BUG:|Oops|Call Trace|general protection|Kernel panic|VERIFY|PANIC|blocked for more than|rcu_sched.*stall|WARNING: CPU:'
+ 
+ trap 'rc=$?; printf "FAILED: step=%s line=%s exit=%s (logs: %s)\n" "$STEP" "$LINENO" "$rc" "$LOG" >&2' ERR
+@@ -445,8 +432,8 @@
+ 		as_zts cp -p "$WORK/patched/$FUNCDIR/$t.ksh" "$WORK/base/$FUNCDIR/$t.ksh"
+ 		[ -x "$WORK/base/$FUNCDIR/$t.ksh" ] || die "copied test is not executable: $t.ksh"
+ 	done
+-	base_list="$NEW_TESTS cli_root/zpool_add/zpool_add_004_pos"
+-	for d in removal cli_root/zpool_remove cli_root/zpool_add; do
++	base_list="$NEW_TESTS"
++	for d in cli_root/zpool_set cli_root/zpool_expand raidz; do
+ 		for f in "$WORK/patched/$FUNCDIR/$d"/*.ksh; do
+ 			case ${f##*/} in setup.ksh | cleanup.ksh) continue ;; esac
+ 			patched_list="$patched_list $d/$(basename "$f" .ksh)"

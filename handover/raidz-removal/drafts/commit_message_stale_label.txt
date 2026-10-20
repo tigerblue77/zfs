@@ -1,0 +1,18 @@
+libzutil: keep the latest label when two vdevs claim one id
+
+When it builds a pool's config from the labels found by a scan,
+get_configs() puts each top-level vdev at the id its label gives,
+replacing whatever was there, and leaking it.  A device can keep the
+label of a top-level vdev that the pool no longer has, such as one
+added after a checkpoint that the pool was then rewound to, while a
+vdev added since has the same id.  Whichever comes last wins, so the
+stale vdev can replace the current one in the config.  The import, or
+"zdb -e", then fails with an I/O error when the pool's metadata has
+blocks on that vdev.  When it has none there, the import falls back
+on the config stored in the pool, which works only while the paths
+recorded there still lead to the devices.
+
+For each id, keep the top-level vdev whose label has the latest txg,
+and free the one it replaces.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>

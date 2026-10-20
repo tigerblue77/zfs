@@ -1,0 +1,18 @@
+ztest: do not ask the kernel whether its pool is imported
+
+When the cache file is missing or empty, ztest imports its pool by
+scanning its directory.  zpool_find_config() then asks the kernel,
+through /dev/zfs, whether a pool of that name is imported.  Without
+the zfs module loaded that call fails and no pool is returned, so
+ztest stops with "failed to find config for pool 'ztest'".  With the
+module loaded and a kernel pool named like ztest's, the pool would be
+skipped as already imported.
+
+The cache file is left empty when a pass is killed while
+spa_config_write() rewrites it in place, so on a host without the
+module long runs stop at random.
+
+The pool belongs to ztest's process, never to the kernel: skip the
+check, as zdb does.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>

@@ -1,0 +1,13 @@
+ZTS: detach: pass the pool to the zpool detach that must fail
+
+The check that "zpool detach" fails on stripe, raidz and dRAID pools
+ran "zpool detach $TESTDIR/$TESTFILE1.1" with no pool name.  zpool
+then stops at "missing <device> specification" before it opens any
+pool, so the check passed whatever a detach of that device would have
+done.  Pass the pool name, as the detach earlier in the test does.
+
+While here, set "options" rather than "ptions", so that file_trunc
+gets -r as in the other replacement tests, and have the assertion
+describe a detach rather than a replace.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>

@@ -1,0 +1,20 @@
+Account a growing non-allocating vdev only once
+
+vdev_metaslab_init() adds the whole space of a top-level vdev with
+allocating=off to spa_nonallocating_dspace.  When such a vdev grows,
+through a raidz expansion, "zpool online -e" or autoexpand, it is called
+again for the new metaslabs and adds the whole new size, without taking
+the old size out, so the vdev is accounted twice.
+
+The pool then reports too little available space.  In a test where the
+disk was as large as the rest of the pool before it grew, the usable
+space of the pool fell to zero.  When the old size exceeds the rest of
+the normal class, debug builds fail ASSERT3U(spa_rdspace, >=,
+spa_nonallocating_dspace) in spa_update_dspace() and release builds
+underflow spa_rdspace.  Setting allocating=on afterwards leaves the old
+size counted until the pool is exported and imported.
+
+Take the old size out before the vdev is accounted again with its new
+size.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>

@@ -1,0 +1,352 @@
+diff --git a/include/sys/fs/zfs.h b/include/sys/fs/zfs.h
+index 8ad542ed9..7756a39ec 100644
+--- a/include/sys/fs/zfs.h
++++ b/include/sys/fs/zfs.h
+@@ -954,6 +954,7 @@ typedef struct zpool_load_policy {
+ #define	ZPOOL_CONFIG_DDT_STATS		"ddt_stats"
+ #define	ZPOOL_CONFIG_SPLIT		"splitcfg"
+ #define	ZPOOL_CONFIG_ORIG_GUID		"orig_guid"
++#define	ZPOOL_CONFIG_LEAF_PATHS		"leaf_paths"	/* PROTO */
+ #define	ZPOOL_CONFIG_SPLIT_GUID		"split_guid"
+ #define	ZPOOL_CONFIG_SPLIT_LIST		"guid_list"
+ #define	ZPOOL_CONFIG_NONALLOCATING	"non_allocating"
+diff --git a/include/sys/spa.h b/include/sys/spa.h
+index d5582a9bf..4fe784fcf 100644
+--- a/include/sys/spa.h
++++ b/include/sys/spa.h
+@@ -1060,6 +1060,7 @@ extern int spa_config_held(spa_t *spa, int locks, krw_t rw);
+ 
+ /* Pool vdev add/remove lock */
+ extern uint64_t spa_vdev_enter(spa_t *spa);
++extern int zproto_delay_erase(void);
+ extern uint64_t spa_vdev_detach_enter(spa_t *spa, uint64_t guid);
+ extern uint64_t spa_vdev_config_enter(spa_t *spa);
+ extern void spa_vdev_config_exit(spa_t *spa, vdev_t *vd, uint64_t txg,
+diff --git a/include/sys/vdev.h b/include/sys/vdev.h
+index bd8a8a9f9..1c805859e 100644
+--- a/include/sys/vdev.h
++++ b/include/sys/vdev.h
+@@ -54,6 +54,7 @@ extern void vdev_open_children_subset(vdev_t *, cred_t *,
+ extern int vdev_validate(vdev_t *);
+ extern int vdev_copy_path_strict(vdev_t *, vdev_t *);
+ extern void vdev_copy_path_relaxed(vdev_t *, vdev_t *);
++extern void vdev_copy_path_extra(vdev_t *, vdev_t *, nvlist_t *);
+ extern void vdev_close(vdev_t *);
+ extern int vdev_create(vdev_t *, uint64_t txg, boolean_t isreplace);
+ extern void vdev_reopen(vdev_t *);
+diff --git a/lib/libzutil/os/linux/zutil_import_os.c b/lib/libzutil/os/linux/zutil_import_os.c
+index 57492090c..c2234fd2b 100644
+--- a/lib/libzutil/os/linux/zutil_import_os.c
++++ b/lib/libzutil/os/linux/zutil_import_os.c
+@@ -172,6 +172,9 @@ zpool_open_func(void *arg)
+ 	}
+ 
+ 	if (num_labels == 0) {
++		if (getenv("ZPROTO_TXG0") != NULL)
++			(void) zutil_read_txg0_label(fd, &rn->rn_txg0_pool,
++			    &rn->rn_txg0_guid);
+ 		(void) close(fd);
+ 		nvlist_free(config);
+ 		return;
+diff --git a/lib/libzutil/zutil_import.c b/lib/libzutil/zutil_import.c
+index 005639684..5a0e95952 100644
+--- a/lib/libzutil/zutil_import.c
++++ b/lib/libzutil/zutil_import.c
+@@ -211,8 +211,57 @@ typedef struct name_entry {
+ typedef struct pool_list {
+ 	pool_entry_t		*pools;
+ 	name_entry_t		*names;
++	name_entry_t		*txg0_names;	/* PROTO */
+ } pool_list_t;
+ 
++/* PROTO: whether the vdev tree names this vdev guid */
++static boolean_t
++tree_has_guid(nvlist_t *nv, uint64_t guid)
++{
++	nvlist_t **child;
++	uint_t c, children;
++	uint64_t g;
++
++	if (nvlist_lookup_uint64(nv, ZPOOL_CONFIG_GUID, &g) == 0 && g == guid)
++		return (B_TRUE);
++	if (nvlist_lookup_nvlist_array(nv, ZPOOL_CONFIG_CHILDREN,
++	    &child, &children) != 0)
++		return (B_FALSE);
++	for (c = 0; c < children; c++)
++		if (tree_has_guid(child[c], guid))
++			return (B_TRUE);
++	return (B_FALSE);
++}
++
++/*
++ * PROTO: paths of the devices of this pool that the scan found but that the
++ * assembled tree does not name, keyed by vdev guid.
++ */
++static void
++add_leaf_paths(nvlist_t *config, nvlist_t *nvroot, name_entry_t *names,
++    name_entry_t *txg0_names, uint64_t pool_guid)
++{
++	nvlist_t *paths = fnvlist_alloc();
++	name_entry_t *lists[2] = { names, txg0_names };
++	char key[32];
++
++	for (int i = 0; i < 2; i++) {
++		for (name_entry_t *ne = lists[i]; ne != NULL;
++		    ne = ne->ne_next) {
++			if (ne->ne_pool_guid != pool_guid ||
++			    tree_has_guid(nvroot, ne->ne_guid))
++				continue;
++			(void) snprintf(key, sizeof (key), "%llu",
++			    (u_longlong_t)ne->ne_guid);
++			if (!nvlist_exists(paths, key))
++				fnvlist_add_string(paths, key, ne->ne_name);
++		}
++	}
++	if (!nvlist_empty(paths))
++		fnvlist_add_nvlist(config, ZPOOL_CONFIG_LEAF_PATHS, paths);
++	fnvlist_free(paths);
++}
++
+ /*
+  * Find the best name for the leaf vdev with the given guid.  With
+  * pool_guid != 0, only consider devices whose label has that pool guid
+@@ -259,6 +308,9 @@ best_name(name_entry_t *names, uint64_t guid, const char *path,
+ 	return (best);
+ }
+ 
++/* PROTO: devices with a txg 0 label, the last resort of fix_paths() */
++static name_entry_t *proto_txg0_names;
++
+ /*
+  * Go through and fix up any path and/or devid information for the given vdev
+  * configuration of the pool with the given guid.
+@@ -306,6 +358,8 @@ fix_paths(libpc_handle_t *hdl, nvlist_t *nv, name_entry_t *names,
+ 	best = best_name(names, guid, path, pool_guid);
+ 	if (best == NULL && pool_guid != 0)
+ 		best = best_name(names, guid, path, 0);
++	if (best == NULL && pool_guid != 0)
++		best = best_name(proto_txg0_names, guid, path, pool_guid);
+ 
+ 	if (best == NULL)
+ 		return (0);
+@@ -875,10 +929,17 @@ get_configs(libpc_handle_t *hdl, pool_list_t *pl, boolean_t active_ok,
+ 		 * Go through and fix up any paths and/or devids based on our
+ 		 * known list of vdev GUID -> path mappings.
+ 		 */
++		proto_txg0_names = pl->txg0_names;
+ 		if (fix_paths(hdl, nvroot, pl->names, pe->pe_guid) != 0) {
++			proto_txg0_names = NULL;
+ 			nvlist_free(nvroot);
+ 			goto nomem;
+ 		}
++		proto_txg0_names = NULL;
++
++		if (getenv("ZPROTO_LEAFPATHS") != NULL)
++			add_leaf_paths(config, nvroot, pl->names,
++			    pl->txg0_names, pe->pe_guid);
+ 
+ 		/*
+ 		 * Add the root vdev to this pool's configuration.
+@@ -1022,6 +1083,47 @@ label_offset(uint64_t size, int l)
+ 	    0 : size - VDEV_LABELS * sizeof (vdev_label_t)));
+ }
+ 
++/*
++ * PROTO: the pool and vdev guids of a label left with txg 0, as the labels a
++ * detach or a removal "erases" are.  Returns 0 when one is found.
++ */
++int
++zutil_read_txg0_label(int fd, uint64_t *pool_guid, uint64_t *guid)
++{
++	struct stat64 statbuf;
++	vdev_phys_t *label;
++	uint64_t size, txg;
++	nvlist_t *nv;
++	int ret = -1;
++
++	if (fstat64_blk(fd, &statbuf) == -1)
++		return (-1);
++	size = P2ALIGN_TYPED(statbuf.st_size, sizeof (vdev_label_t), uint64_t);
++	label = (vdev_phys_t *)kmem_alloc_aligned(sizeof (*label), PAGESIZE,
++	    KM_NOSLEEP);
++	if (label == NULL)
++		return (-1);
++	for (int l = 0; l < VDEV_LABELS && ret != 0; l++) {
++		if (pread64(fd, label, sizeof (vdev_phys_t),
++		    label_offset(size, l) + VDEV_SKIP_SIZE) !=
++		    sizeof (vdev_phys_t))
++			continue;
++		if (nvlist_unpack(label->vp_nvlist,
++		    sizeof (label->vp_nvlist), &nv, 0) != 0)
++			continue;
++		if (nvlist_lookup_uint64(nv, ZPOOL_CONFIG_POOL_TXG,
++		    &txg) == 0 && txg == 0 &&
++		    nvlist_lookup_uint64(nv, ZPOOL_CONFIG_POOL_GUID,
++		    pool_guid) == 0 &&
++		    nvlist_lookup_uint64(nv, ZPOOL_CONFIG_GUID, guid) == 0 &&
++		    *pool_guid != 0 && *guid != 0)
++			ret = 0;
++		nvlist_free(nv);
++	}
++	kmem_free_aligned(label, sizeof (*label));
++	return (ret);
++}
++
+ /*
+  * The same description applies as to zpool_read_label below,
+  * except here we do it without aio, presumably because an aio call
+@@ -1649,6 +1751,16 @@ zpool_find_import_impl(libpc_handle_t *hdl, importargs_t *iarg,
+ 				}
+ 			}
+ 			nvlist_free(config);
++		} else if (slice->rn_txg0_guid != 0) {
++			name_entry_t *ne = zutil_alloc(hdl, sizeof (*ne));
++
++			if (ne != NULL) {
++				ne->ne_name = zutil_strdup(hdl, slice->rn_name);
++				ne->ne_guid = slice->rn_txg0_guid;
++				ne->ne_pool_guid = slice->rn_txg0_pool;
++				ne->ne_next = pools.txg0_names;
++				pools.txg0_names = ne;
++			}
+ 		}
+ 		free(slice->rn_name);
+ 		free(slice);
+@@ -1685,6 +1797,11 @@ zpool_find_import_impl(libpc_handle_t *hdl, importargs_t *iarg,
+ 		free(ne->ne_name);
+ 		free(ne);
+ 	}
++	for (ne = pools.txg0_names; ne != NULL; ne = nenext) {
++		nenext = ne->ne_next;
++		free(ne->ne_name);
++		free(ne);
++	}
+ 
+ 	return (ret);
+ }
+diff --git a/lib/libzutil/zutil_import.h b/lib/libzutil/zutil_import.h
+index 7881ee09c..cb56d1587 100644
+--- a/lib/libzutil/zutil_import.h
++++ b/lib/libzutil/zutil_import.h
+@@ -43,8 +43,12 @@ typedef struct rdsk_node {
+ 	avl_node_t rn_node;
+ 	pthread_mutex_t *rn_lock;
+ 	boolean_t rn_labelpaths;
++	uint64_t rn_txg0_pool;		/* PROTO: txg 0 label pool guid */
++	uint64_t rn_txg0_guid;		/* PROTO: txg 0 label vdev guid */
+ } rdsk_node_t;
+ 
++int zutil_read_txg0_label(int, uint64_t *, uint64_t *);
++
+ int slice_cache_compare(const void *, const void *);
+ 
+ boolean_t zpool_dev_probe_ok(const char *path);
+diff --git a/module/zfs/spa.c b/module/zfs/spa.c
+index 2a4c3a7cb..8484aa267 100644
+--- a/module/zfs/spa.c
++++ b/module/zfs/spa.c
+@@ -5137,6 +5137,10 @@ spa_ld_trusted_config(spa_t *spa, spa_import_type_t type,
+ 		spa_load_note(spa, "vdev_copy_path_strict failed, falling "
+ 		    "back to vdev_copy_path_relaxed");
+ 		vdev_copy_path_relaxed(rvd, mrvd);
++		nvlist_t *lp;
++		if (nvlist_lookup_nvlist(spa->spa_config,
++		    ZPOOL_CONFIG_LEAF_PATHS, &lp) == 0)
++			vdev_copy_path_extra(rvd, mrvd, lp);
+ 	}
+ 
+ 	vdev_close(rvd);
+@@ -8995,7 +8999,8 @@ spa_vdev_detach(spa_t *spa, uint64_t guid, uint64_t pguid, int replace_done)
+ 	 * it may be that the unwritability of the disk is the reason
+ 	 * it's being detached!
+ 	 */
+-	(void) vdev_label_init(vd, 0, VDEV_LABEL_REMOVE);
++	if (!zproto_delay_erase())
++		(void) vdev_label_init(vd, 0, VDEV_LABEL_REMOVE);
+ 
+ 	/*
+ 	 * Remove vd from its parent and compact the parent's children.
+diff --git a/module/zfs/spa_misc.c b/module/zfs/spa_misc.c
+index b9f5a92ef..e21386bb7 100644
+--- a/module/zfs/spa_misc.c
++++ b/module/zfs/spa_misc.c
+@@ -1337,6 +1337,17 @@ spa_l2cache_activate(vdev_t *vd)
+ 	mutex_exit(&spa_l2cache_lock);
+ }
+ 
++/* PROTO: delay the erase of a detached leaf's labels (ZPROTO_DELAYERASE) */
++int
++zproto_delay_erase(void)
++{
++#ifndef _KERNEL
++	return (getenv("ZPROTO_DELAYERASE") != NULL);
++#else
++	return (0);
++#endif
++}
++
+ /*
+  * ==========================================================================
+  * SPA vdev locking
+@@ -1473,6 +1484,22 @@ spa_vdev_config_exit(spa_t *spa, vdev_t *vd, uint64_t txg, int error,
+ 		 */
+ 		vdev_autotrim_stop_wait(vd);
+ 
++		/*
++		 * PROTO: erase the labels of a detached leaf only now that
++		 * the txg that detaches it is on disk.  Its top-level vdev
++		 * may be gone, so let the label describe the leaf alone.
++		 */
++		if (error == 0 && zproto_delay_erase() && vd->vdev_detached &&
++		    vd->vdev_ops->vdev_op_leaf) {
++			vdev_t *top = vd->vdev_top;
++
++			vd->vdev_top = vd;
++			spa_config_enter(spa, SCL_ALL, spa, RW_WRITER);
++			(void) vdev_label_init(vd, 0, VDEV_LABEL_REMOVE);
++			spa_config_exit(spa, SCL_ALL, spa);
++			vd->vdev_top = top;
++		}
++
+ 		spa_config_enter(spa, SCL_STATE_ALL, spa, RW_WRITER);
+ 		vdev_free(vd);
+ 		spa_config_exit(spa, SCL_STATE_ALL, spa);
+diff --git a/module/zfs/vdev.c b/module/zfs/vdev.c
+index fba058c54..0da112ab1 100644
+--- a/module/zfs/vdev.c
++++ b/module/zfs/vdev.c
+@@ -2945,6 +2945,34 @@ vdev_copy_path_relaxed(vdev_t *srvd, vdev_t *drvd)
+ 	}
+ }
+ 
++/*
++ * PROTO: give a leaf of the destination tree that the source tree does not
++ * name, by guid or former guid, the path the scan found its device at.
++ */
++void
++vdev_copy_path_extra(vdev_t *srvd, vdev_t *dvd, nvlist_t *paths)
++{
++	const char *path;
++	char key[32];
++
++	for (uint64_t c = 0; c < dvd->vdev_children; c++)
++		vdev_copy_path_extra(srvd, dvd->vdev_child[c], paths);
++
++	if (!dvd->vdev_ops->vdev_op_leaf || !vdev_is_concrete(dvd) ||
++	    vdev_lookup_by_guid(srvd, dvd->vdev_guid) != NULL ||
++	    vdev_lookup_by_orig_guid(srvd, dvd->vdev_guid) != NULL)
++		return;
++
++	(void) snprintf(key, sizeof (key), "%llu",
++	    (u_longlong_t)dvd->vdev_guid);
++	if (nvlist_lookup_string(paths, key, &path) != 0)
++		return;
++	zfs_dbgmsg("vdev_copy_path_extra: vdev %llu from leaf_paths",
++	    (u_longlong_t)dvd->vdev_guid);
++	vdev_update_path("vdev_path", (char *)path, &dvd->vdev_path,
++	    dvd->vdev_guid);
++}
++
+ /*
+  * Close a virtual device.
+  */

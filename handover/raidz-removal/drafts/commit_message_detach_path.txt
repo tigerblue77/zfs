@@ -1,0 +1,38 @@
+Record the former guid of a leaf that takes its parent's guid
+
+When a detach leaves a mirror, replacing or spare vdev with a single
+child, vdev_remove_parent() puts that child in its place as top-level
+vdev and gives it the guid of the parent.  The txg that does so writes
+labels 0 and 2 of the device before its uberblocks, so a crash in
+between leaves a device whose newest labels name it by the new guid,
+while the uberblocks and the MOS config still describe the parent and
+the child under its old guid.
+
+An import that scans the devices builds its config from those newest
+labels.  vdev_copy_path_relaxed() then looks the leaves of the MOS
+config up in it by guid, finds no device for the old guid, and keeps
+the path recorded in the MOS config.  When that path no longer leads to
+the device, as when device names change across a reboot, no child of
+the top-level vdev opens, since the labels of the detached device were
+erased before the txg, and the pool fails to import with ENXIO.  It
+imports again once the devices are back at their old paths.
+
+"zpool split" has the same window, and gives the label of such a leaf
+its former guid as ZPOOL_CONFIG_ORIG_GUID, which vdev_validate()
+accepts in place of the guid.  Do so for every leaf that took the guid
+of its parent, and look a leaf of the MOS config up by it when its guid
+is not found.  Only labels need the key, so leave it out of the MOS
+config, which also keeps it from being read back once the change has
+synced.  The pool now imports, degraded by the detached device, and so
+does a pool left by a crash in the middle of a split, whose labels
+already carry the key.  In place, it imports healthy where
+vdev_validate() rejected the remaining device for the guid in its
+newest label.  Older code already accepts the key in vdev_validate()
+and ignores it elsewhere.
+
+Erasing the labels of the detached device only once the detach has
+synced would not help on its own: the scan keeps the newest label of
+each top-level vdev, which leaves the detached device out of the config
+even when its labels are intact.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>

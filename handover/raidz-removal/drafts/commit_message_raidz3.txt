@@ -1,0 +1,8 @@
+Test the removal of an empty raidz3 vdev
+
+The code that removes an empty vdev from a pool with a raidz vdev does
+not depend on the parity level, but remove_raidz_empty only exercised
+raidz1 and raidz2 vdevs.  Add a raidz3 vdev to the vdevs it adds and
+removes, so all three parity levels are covered.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>

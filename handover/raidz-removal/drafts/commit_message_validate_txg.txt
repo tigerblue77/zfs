@@ -1,0 +1,28 @@
+Validate child vdevs against the label of the loaded txg
+
+vdev_validate() reads a leaf's label up to the last synced txg, so that
+a label written in a txg that never completed is not taken for the
+state of the pool.  It reads the newest label instead when the config
+lock is not held as writer, for callers that race with spa_sync().
+Since the children of a vdev are validated in taskq threads, which
+never hold the lock, the bound has applied to no leaf at all.
+
+A crash during "zpool reguid" can then leave a pool that cannot be
+imported.  The txg that writes the new guid writes labels 0 and 2 of
+every device before its uberblocks, so a crash in between leaves the
+new guid in those labels, and the old one in the uberblocks and in the
+MOS config.  Once the pool is reloaded with the MOS config, every leaf
+is invalidated with "vdev label pool_guid doesn't match config".
+"zpool import -F" and "-FX" fail the same way, and so does the open
+from the cache file at boot.
+
+Choose the txg in the thread that calls vdev_validate(), which holds
+the lock, and hand it to the children.  Labels are ordered by txg only
+within one pool, though: a device split off into a new pool can still
+carry a label of the pool it came from within the bound, while the new
+pool's own label, from another sequence of txgs, is beyond it.  So when
+the label within the bound names another pool, or when none is within
+it, as after a rewind to before the labels of a vdev were last written,
+check the newest label, as is done now.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>

@@ -1,0 +1,27 @@
+Use devices whose labels have txg 0 as last-resort import paths
+
+spa_vdev_detach() erases the labels of the detached device with
+vdev_label_init(VDEV_LABEL_REMOVE) before the txg that detaches it is
+synced.  The erased labels have txg 0 but still carry the pool and vdev
+guids, and vdev_validate() accepts them, so after a crash in between
+the pool, still mirrored on disk, opens healthy in place.
+
+An import that scans for the devices skips such labels altogether:
+zpool_read_label() does not count them, so nothing records where the
+device is.  When device names change across the crash, as /dev/sdX
+names do, fix_paths() finds no device for the leaf and keeps the path
+recorded in the labels of the other side of the mirror, which leads
+nowhere or to another device, and the pool imports degraded.  This
+happens to "zpool detach" and to the detach that completes a "zpool
+replace".
+
+While reading the labels of a device that has no valid label, note the
+pool and vdev guids of a label with txg 0, and let fix_paths() use such
+a device as a last resort, only for a leaf of the same pool.  These
+devices are never added as members of a pool, so the list of pools to
+import does not change, and zpool_read_label() returns what it did.
+They go through the same exclusive open test that prunes multipath
+components.  The label checks that the aio and non-aio readers
+duplicated now live in label_unpack().
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>

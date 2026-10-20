@@ -1,0 +1,13 @@
+zpool remove: say that a vdev is not empty when it cannot be evacuated
+
+Only an empty vdev can be removed from a pool whose data cannot be
+evacuated: one with raidz or dRAID top-level vdevs, or with vdevs of
+different sector sizes.  Removing one that still holds data failed with
+the EINVAL of the evacuation checks, and zpool printed "invalid config;
+all top-level vdevs must have the same sector size and not be raidz",
+which does not say that the vdev is the problem.
+
+Return ZFS_ERR_VDEV_NOT_EMPTY for such a vdev instead, and have zpool
+say how much is still allocated on it.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>

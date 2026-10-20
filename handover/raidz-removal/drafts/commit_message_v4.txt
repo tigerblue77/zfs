@@ -1,0 +1,41 @@
+zpool remove: turn any empty top-level vdev into a hole
+
+Removing a top-level vdev copies its data to the other vdevs and leaves
+an indirect vdev behind.  This needs the device_removal feature, and it
+is refused with "invalid config" when the pool has a raidz or dRAID
+top-level vdev, or vdevs with different ashifts.  None of this is needed
+when the vdev holds no data, for example a vdev added by mistake, or a
+special or dedup vdev that was never used.
+
+Turn any top-level vdev that has no allocated space into a hole instead,
+through the mechanism already used for log vdevs, whatever its type and
+whatever else is in the pool.  Nothing is copied, no indirect vdev is
+created, device_removal does not become active and the on-disk format
+does not change.  The removal is complete when the command returns.
+The vdev is made non-allocating first, initialize, TRIM and rebuild are
+stopped, and the conditions are checked again under the config lock; if
+data was allocated from it meanwhile, it is evacuated as before.  A new
+in-memory flag, vdev_removing_empty, lets the log removal code destroy
+the vdev and its labels; it is never written to disk.
+
+The distributed spares of a dRAID vdev are removed with it, which is
+refused while one of them is in use.  The draid, draid_failure_domains
+and raidz_expansion feature references that the vdev took when it was
+added or expanded are given back in the txg that writes the hole, so
+these features return to enabled when no other vdev uses them.
+
+The removal is refused if the vdev is not healthy or fully resilvered,
+if a checkpoint exists, if another removal is running or if the pool
+version predates holes, and with a distinct error while a raidz
+expansion is in progress.  A missing metaslab group on a vdev that was
+just added is now reported as unsupported instead of dereferencing NULL.
+
+Limits, as measured: an unused special or dedup vdev stays empty.  A
+normal-class vdev stays empty only until the first txg that writes data
+to it, so removing one added by mistake works only if "zpool set
+allocating=off" was run before that, or if the pool is idle.
+
+Part of openzfs/zfs#9013.  Also answers the request in
+openzfs/zfs#17194.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>

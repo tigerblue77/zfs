@@ -1,0 +1,34 @@
+Don't cancel a rebuild over a leaf that is being reopened
+
+Once per metaslab, the sequential resilver (rebuild) thread asks
+vdev_resilver_needed() whether any leaf still needs it, and cancels
+itself when none does.  vdev_resilver_needed() only counts writeable
+leaves, and the thread holds only SCL_CONFIG while asking.
+vdev_reopen() runs with SCL_STATE_ALL held as writer, closes every
+leaf and only then opens them again, so a check that lands in between
+finds the new leaf closed and cancels the rebuild.  Nothing restarts
+it: the replacing vdev stays, and "zpool wait" never returns.
+
+Every "zpool scrub" reopens all vdevs before it checks whether it may
+start, so a scrub that is refused because a resilver is running is
+enough to trigger this.  So is "zpool reopen", and "zpool online" of a
+device of the same top-level vdev.  That is how
+functional/replacement/scrub_cancel hung on a CI VM until it was
+killed after 600 seconds: it refuses a scrub right after
+"zpool replace -s".  Replaying that test in userspace (libzpool, file
+vdevs), the rebuild was canceled and the replace hung once in 152
+iterations.
+
+Hold SCL_STATE as reader around the check, as vdev_rebuild_range()
+already does around its own vdev_writeable() check before it issues
+I/O.  vdev_rebuild_should_cancel() is only called by the rebuild
+thread, with SCL_CONFIG held and vdev_rebuild_lock not held, so the
+lock order is unchanged.
+
+rebuild_reopen runs sequential resilvers on vdevs with many metaslabs
+while scrubs are requested in a loop, and fails if one is canceled or
+does not finish in time.  Replayed in userspace, it failed in each of
+12 runs on master, at the first rebuild, and passed in each of 12
+with this change.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>

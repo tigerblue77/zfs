@@ -1,0 +1,19 @@
+Write the rewound checkpoint uberblock to checkpointed vdevs
+
+spa_ld_checkpoint_rewind() writes the checkpointed uberblock to
+SPA_SYNC_MIN_VDEVS top-level vdevs picked at random in the current
+vdev tree.  When top-level vdevs were added after the checkpoint, all
+of the picked ones can be among them.  The pool is then reloaded with
+the checkpointed config, which does not have those vdevs, so the
+rewound uberblock is not found: the latest uberblock is used with the
+checkpointed vdev tree, its root block cannot be read, and the import
+fails with EIO.  The pool can then no longer be imported at all;
+"zpool import -F" fails too, and only "-FX" brings it back.
+
+With one disk at checkpoint time and six disks added after it, 18 of
+30 rewinds failed this way in userspace.
+
+Leave out the vdevs created after the checkpoint when picking where
+to write the rewound uberblock.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>

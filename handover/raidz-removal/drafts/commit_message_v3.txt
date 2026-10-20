@@ -1,0 +1,40 @@
+zpool remove: allow removing an empty vdev beside raidz
+
+Removing a top-level vdev is refused with "invalid config" when the
+pool has a raidz or dRAID top-level vdev, even if the vdev to remove
+holds no data.  That makes a vdev added by mistake, or a special or
+dedup vdev that was never used, impossible to take out again.
+
+When the existing checks fail with EINVAL, the vdev is not a log or
+dRAID vdev, vs_alloc is zero and the pool has a raidz or dRAID
+top-level vdev, turn the vdev into a hole through the mechanism that
+is already used for log vdevs.  Nothing is copied, no indirect vdev
+is created, no feature becomes active and the on-disk format does not
+change.  The removal is complete when the command returns.  The vdev
+is made non-allocating first, initialize, TRIM and rebuild are
+stopped, and the conditions are checked again under the config lock.
+A new in-memory flag, vdev_removing_empty, lets the log removal code
+destroy the vdev and its labels; it is never written to disk.
+
+The request is refused with the old error if the vdev holds any
+allocation, if a checkpoint exists, if the pool was created without
+holes support (the device_removal feature must be enabled), or if the
+vdev is a dRAID vdev, and with a distinct error while a raidz
+expansion is in progress.  Pools without a raidz or dRAID top-level
+vdev keep the current behavior, including the indirect vdev.  A
+missing metaslab group on a vdev that was just added is now reported
+as unsupported instead of dereferencing NULL.
+
+Limits, as measured on userspace pools: an unused special or dedup
+vdev stays empty and can be removed.  A normal-class vdev stays empty
+only until the first txg that writes data to it, about 64 KB of
+history and metadata in the test, so removing a vdev added by mistake
+works only if "zpool set allocating=off" was run before that, or if
+the pool is idle.
+
+Part of openzfs/zfs#9013.  Also answers the request in
+openzfs/zfs#17194.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>
+
+

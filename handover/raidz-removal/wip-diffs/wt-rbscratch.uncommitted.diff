@@ -1,0 +1,143 @@
+diff --git a/module/zfs/vdev_rebuild.c b/module/zfs/vdev_rebuild.c
+index 6e5069da2..7d8190b63 100644
+--- a/module/zfs/vdev_rebuild.c
++++ b/module/zfs/vdev_rebuild.c
+@@ -127,6 +127,49 @@ static int zfs_rebuild_scrub_enabled = 1;
+  * For vdev_rebuild_initiate_sync() and vdev_rebuild_reset_sync().
+  */
+ static __attribute__((noreturn)) void vdev_rebuild_thread(void *arg);
++
++/* SCRATCH toggles and counters for the rebuild probes; not for upstream. */
++int rbw_thread_fix = 0;
++int rbw_sync_fix = 0;
++int rbw_verify_soft = 0;
++uint64_t rbw_cancels;
++uint64_t rbw_initiates;
++uint64_t rbw_resets;
++uint64_t rbw_initiate_unneeded;
++uint64_t rbw_reset_unneeded;
++uint64_t rbw_unneeded_closed;
++hrtime_t rbw_fail_ns;
++hrtime_t rbw_task_start_ns;
++uint64_t rbw_unneeded_other;
++
++/* SCRATCH: classify the leaves holding DTL_MISSING when a check fails. */
++static void
++rbw_note_unneeded(vdev_t *vd)
++{
++	int closed = 0, other = 0;
++	vdev_t *stack[64];
++	int n = 0;
++
++	stack[n++] = vd;
++	while (n > 0) {
++		vdev_t *v = stack[--n];
++		if (v->vdev_ops->vdev_op_leaf) {
++			if (zfs_range_tree_is_empty(v->vdev_dtl[DTL_MISSING]))
++				continue;
++			if (v->vdev_state == VDEV_STATE_CLOSED)
++				closed++;
++			else
++				other++;
++			continue;
++		}
++		for (uint64_t c = 0; c < v->vdev_children && n < 64; c++)
++			stack[n++] = v->vdev_child[c];
++	}
++	if (closed > 0 && other == 0)
++		rbw_unneeded_closed++;
++	else
++		rbw_unneeded_other++;
++}
+ static void vdev_rebuild_reset_sync(void *arg, dmu_tx_t *tx);
+ 
+ /*
+@@ -216,10 +259,13 @@ vdev_rebuild_initiate_sync(void *arg, dmu_tx_t *tx)
+ 	vdev_rebuild_t *vr = &vd->vdev_rebuild_config;
+ 	vdev_rebuild_phys_t *vrp = &vr->vr_rebuild_phys;
+ 
++	rbw_task_start_ns = gethrtime();
+ 	ASSERT(vd->vdev_rebuilding);
+ 
+ 	spa_feature_incr(vd->vdev_spa, SPA_FEATURE_DEVICE_REBUILD, tx);
+ 
++	if (rbw_sync_fix)
++		spa_config_enter(spa, SCL_STATE, FTAG, RW_READER);
+ 	mutex_enter(&vd->vdev_rebuild_lock);
+ 	memset(vrp, 0, sizeof (uint64_t) * REBUILD_PHYS_ENTRIES);
+ 	vrp->vrp_rebuild_state = VDEV_REBUILD_ACTIVE;
+@@ -236,7 +282,14 @@ vdev_rebuild_initiate_sync(void *arg, dmu_tx_t *tx)
+ 	 * be useful because it would allow us to rebuild the space used by
+ 	 * pool checkpoints.
+ 	 */
+-	VERIFY(vdev_resilver_needed(vd, &vrp->vrp_min_txg, &vrp->vrp_max_txg));
++	rbw_initiates++;
++	if (rbw_verify_soft) {
++		if (!vdev_resilver_needed(vd, &vrp->vrp_min_txg,
++		    &vrp->vrp_max_txg))
++			{ rbw_initiate_unneeded++; rbw_note_unneeded(vd); rbw_fail_ns = gethrtime(); }
++	} else {
++		VERIFY(vdev_resilver_needed(vd, &vrp->vrp_min_txg, &vrp->vrp_max_txg));
++	}
+ 
+ 	VERIFY0(zap_update(vd->vdev_spa->spa_meta_objset, vd->vdev_top_zap,
+ 	    VDEV_TOP_ZAP_VDEV_REBUILD_PHYS, sizeof (uint64_t),
+@@ -251,6 +304,8 @@ vdev_rebuild_initiate_sync(void *arg, dmu_tx_t *tx)
+ 	    vdev_rebuild_thread, vd, 0, &p0, TS_RUN, maxclsyspri);
+ 
+ 	mutex_exit(&vd->vdev_rebuild_lock);
++	if (rbw_sync_fix)
++		spa_config_exit(spa, SCL_STATE, FTAG);
+ }
+ 
+ static void
+@@ -399,6 +454,8 @@ vdev_rebuild_reset_sync(void *arg, dmu_tx_t *tx)
+ 	vdev_rebuild_t *vr = &vd->vdev_rebuild_config;
+ 	vdev_rebuild_phys_t *vrp = &vr->vr_rebuild_phys;
+ 
++	if (rbw_sync_fix)
++		spa_config_enter(spa, SCL_STATE, FTAG, RW_READER);
+ 	mutex_enter(&vd->vdev_rebuild_lock);
+ 
+ 	ASSERT(vrp->vrp_rebuild_state == VDEV_REBUILD_ACTIVE);
+@@ -415,7 +472,14 @@ vdev_rebuild_reset_sync(void *arg, dmu_tx_t *tx)
+ 	vr->vr_prev_scan_time_ms = 0;
+ 
+ 	/* See vdev_rebuild_initiate_sync comment */
+-	VERIFY(vdev_resilver_needed(vd, &vrp->vrp_min_txg, &vrp->vrp_max_txg));
++	rbw_resets++;
++	if (rbw_verify_soft) {
++		if (!vdev_resilver_needed(vd, &vrp->vrp_min_txg,
++		    &vrp->vrp_max_txg))
++			{ rbw_reset_unneeded++; rbw_note_unneeded(vd); rbw_fail_ns = gethrtime(); }
++	} else {
++		VERIFY(vdev_resilver_needed(vd, &vrp->vrp_min_txg, &vrp->vrp_max_txg));
++	}
+ 
+ 	VERIFY0(zap_update(vd->vdev_spa->spa_meta_objset, vd->vdev_top_zap,
+ 	    VDEV_TOP_ZAP_VDEV_REBUILD_PHYS, sizeof (uint64_t),
+@@ -432,6 +496,8 @@ vdev_rebuild_reset_sync(void *arg, dmu_tx_t *tx)
+ 	    vdev_rebuild_thread, vd, 0, &p0, TS_RUN, maxclsyspri);
+ 
+ 	mutex_exit(&vd->vdev_rebuild_lock);
++	if (rbw_sync_fix)
++		spa_config_exit(spa, SCL_STATE, FTAG);
+ }
+ 
+ /*
+@@ -823,7 +889,14 @@ vdev_rebuild_thread(void *arg)
+ 		 * vdev_rebuild_cancel_wanted flag is set until the sync task
+ 		 * completes.  This may be after the rebuild thread exits.
+ 		 */
+-		if (vdev_rebuild_should_cancel(vd)) {
++		if (rbw_thread_fix)
++			spa_config_enter(spa, SCL_STATE, FTAG, RW_READER);
++		boolean_t rbw_c = vdev_rebuild_should_cancel(vd);
++		if (rbw_thread_fix)
++			spa_config_exit(spa, SCL_STATE, FTAG);
++		if (rbw_c)
++			rbw_cancels++;
++		if (rbw_c) {
+ 			vd->vdev_rebuild_cancel_wanted = B_TRUE;
+ 			error = EINTR;
+ 			break;

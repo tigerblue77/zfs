@@ -1,0 +1,19 @@
+--- a/module/zfs/vdev_rebuild.c	2026-10-19 10:04:25.871676457 +0000
++++ b/module/zfs/vdev_rebuild.c	2026-10-19 10:04:25.886811304 +0000
+@@ -822,8 +822,15 @@
+ 		 * for the rebuild, in which case it should be canceled.  The
+ 		 * vdev_rebuild_cancel_wanted flag is set until the sync task
+ 		 * completes.  This may be after the rebuild thread exits.
++		 *
++		 * vdev_reopen() closes every leaf under SCL_STATE alone, so
++		 * hold it while checking: a leaf being reopened is not one
++		 * that stopped needing the rebuild.
+ 		 */
+-		if (vdev_rebuild_should_cancel(vd)) {
++		spa_config_enter(spa, SCL_STATE, FTAG, RW_READER);
++		boolean_t cancel = vdev_rebuild_should_cancel(vd);
++		spa_config_exit(spa, SCL_STATE, FTAG);
++		if (cancel) {
+ 			vd->vdev_rebuild_cancel_wanted = B_TRUE;
+ 			error = EINTR;
+ 			break;
