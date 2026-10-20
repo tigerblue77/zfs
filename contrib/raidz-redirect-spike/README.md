@@ -847,3 +847,15 @@ pair) and no copy without the MOS rewrite imports.  The object oracle
 (children 1 and 3 only) passes `nodva`, `noroot` at ashift 12 and `nomos`
 at ashift 12: a small block can miss both children, and one surviving copy
 is enough to read an object, which is why the DVA oracle exists.
+
+The move phase also prints what the raidz holds against what the DSL
+charges, before and after the move, once the deferred frees have synced.
+A moved block keeps its DVA, so its dsize, while the vdev now holds N and
+the kept sector instead of the old extent.  At ashift 12 the vdev's
+allocated space grew from 40.5 to 55.2 MB while the DSL's used space grew
+by 0.9 MB (the table's own MOS objects): the vdev holds 10.9 MB (deflated)
+more than any dataset is charged, for 26.8 MB of moved blocks (9.2 MB for
+26.4 MB at ashift 9).  "available" overstates the free space by that much.
+Not fixed: a real implementation would charge the deflated difference to a
+counter persisted with the table, subtract it in `spa_update_dspace()` and
+release it at free.

@@ -163,6 +163,8 @@ typedef struct shared {
 	expect_t	sh_exp[MAXEXP];
 	census_t	sh_census;
 	uint64_t	sh_pending_old;	/* old DVAs of pending frees */
+	int64_t		sh_space_gap;	/* deflated vdev alloc - DSL used */
+	int64_t		sh_gap_before;
 	/* The DVA oracle: each DVA, and the damaged pairs it failed under. */
 	struct {
 		uint64_t	dv_offset;	/* + 1, 0: empty */
@@ -1140,6 +1142,40 @@ census_pending(spa_t *spa, const char *when)
 	sh->sh_pending_old = def.pa_old + fre.pa_old;
 }
 
+/* Let the deferred frees of the last txgs reach the space maps. */
+static void
+space_settle(spa_t *spa)
+{
+	for (int i = 0; i < TXG_DEFER_SIZE + 2; i++) {
+		dmu_tx_t *tx = dmu_tx_create_dd(spa_get_dsl(spa)->dp_mos_dir);
+
+		VERIFY0(dmu_tx_assign(tx, DMU_TX_WAIT));
+		dmu_tx_commit(tx);
+		txg_wait_synced(spa_get_dsl(spa), 0);
+	}
+}
+
+/*
+ * What the DSL charges against what the raidz holds.  Datasets are charged
+ * a block's dsize from its DVA's asize at birth, and a move keeps the DVA:
+ * the gap is what "available" would overstate (accounting defect X2).
+ */
+static void
+print_space(spa_t *spa, const char *when)
+{
+	dsl_pool_t *dp = spa_get_dsl(spa);
+	vdev_t *vd = spa->spa_root_vdev->vdev_child[0];
+	uint64_t used = dsl_dir_phys(dp->dp_root_dir)->dd_used_bytes;
+	uint64_t alloc = vd->vdev_stat.vs_alloc;
+	uint64_t dalloc = vdev_deflated_space(vd, alloc);
+
+	(void) printf("INFO space %s: vdev allocated %llu (deflated %llu), "
+	    "DSL used %llu, deflated minus used %lld, dspace %llu\n", when,
+	    (u_longlong_t)alloc, (u_longlong_t)dalloc, (u_longlong_t)used,
+	    (longlong_t)(dalloc - used), (u_longlong_t)spa_get_dspace(spa));
+	sh->sh_space_gap = (int64_t)(dalloc - used);
+}
+
 static int
 child_census(void *arg)
 {
@@ -1855,6 +1891,10 @@ child_move(void *arg)
 	    "dataset's key is unavailable during the move (%d of %d)",
 	    sh->sh_nkeys_unavail, sh->sh_nkeys_checked);
 
+	space_settle(spa);
+	print_space(spa, "before the move");
+	sh->sh_gap_before = sh->sh_space_gap;
+
 	t0 = gethrtime();
 	run_census(spa, c, mv, MAXMV, &nmv);
 	(void) printf("INFO move: the census found %d old DVAs in %.2f s\n",
@@ -1919,6 +1959,13 @@ child_move(void *arg)
 			abd_free(rdm[j].rdm_data);
 		}
 	}
+	space_settle(spa);
+	print_space(spa, "after the move");
+	(void) printf("INFO space: the move grew the gap between what the vdev "
+	    "holds and what the DSL charges by %lld bytes (deflated), for "
+	    "%llu bytes of moved blocks as stored\n",
+	    (longlong_t)(sh->sh_space_gap - sh->sh_gap_before),
+	    (u_longlong_t)bytes);
 	(void) printf("INFO move: %llu bytes moved in %.2f s\n",
 	    (u_longlong_t)bytes, (double)(gethrtime() - t0) / 1e9);
 	(void) printf("INFO move: %-36s %8s %8s %8s\n", "class", "moved",
@@ -2068,6 +2115,7 @@ main(int argc, char **argv)
 
 	(void) phase("move", child_move, NULL);
 	(void) phase("census after move", child_census, (void *)"after-move");
+
 	report_residual("after the move", B_TRUE);
 	(void) phase("read", child_read, NULL);
 	check(run_zdb(dir, "zdb on the pool", &leaks) == 0 && leaks == 1,
