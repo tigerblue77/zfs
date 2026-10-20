@@ -5985,35 +5985,6 @@ vdev_is_concrete(vdev_t *vd)
 }
 
 /*
- * Return B_TRUE if a DVA of the block is on a concrete top-level vdev that does
- * not allocate (allocating=off), so that writing the block again would move
- * that copy to another vdev.  A vdev being removed does not count, since the
- * removal copies all of its data anyway.  Only the DVAs of the block pointer
- * are looked at: not those of the parts of a gang block, nor those that the
- * DVAs on a removed vdev are mapped to.
- */
-boolean_t
-vdev_bp_has_noalloc_dva(spa_t *spa, const blkptr_t *bp)
-{
-	boolean_t found = B_FALSE;
-
-	if (BP_GET_NDVAS(bp) == 0)
-		return (B_FALSE);
-
-	spa_config_enter(spa, SCL_VDEV, FTAG, RW_READER);
-	for (int d = 0; !found && d < BP_GET_NDVAS(bp); d++) {
-		vdev_t *vd = vdev_lookup_top(spa,
-		    DVA_GET_VDEV(&bp->blk_dva[d]));
-
-		found = vd != NULL && vdev_is_concrete(vd) &&
-		    vd->vdev_noalloc && !vd->vdev_removing;
-	}
-	spa_config_exit(spa, SCL_VDEV, FTAG);
-
-	return (found);
-}
-
-/*
  * Determine if a log device has valid content.  If the vdev was
  * removed or faulted in the MOS config then we know that
  * the content on the log device has already been written to the pool.

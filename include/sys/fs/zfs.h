@@ -1708,9 +1708,6 @@ typedef enum zfs_ioc {
 	ZFS_IOC_POOL_PREFETCH,			/* 0x5a58 */
 	ZFS_IOC_DDT_PRUNE,			/* 0x5a59 */
 	ZFS_IOC_POOL_CONDENSE,			/* 0x5a5a */
-	ZFS_IOC_ZVOL_REWRITE,			/* 0x5a5b */
-	ZFS_IOC_DATASET_REWRITE,		/* 0x5a5c */
-	ZFS_IOC_POOL_REWRITE,			/* 0x5a5d */
 
 	/*
 	 * Per-platform (Optional) - 8/128 numbers reserved.
@@ -1781,11 +1778,6 @@ typedef struct zfs_rewrite_args {
 #define	ZFS_REWRITE_SKIP_SNAPSHOT	0x2 /* Skip snapshot-shared blocks. */
 #define	ZFS_REWRITE_SKIP_BRT		0x4 /* Skip BRT-cloned blocks. */
 #define	ZFS_REWRITE_SKIP_CURRENT_ASIZE	0x8 /* Skip blocks of current asize. */
-#define	ZFS_REWRITE_SKIP_ALLOCATING	0x10 /* Only blocks on noalloc vdevs. */
-#define	ZFS_REWRITE_VALID_FLAGS \
-	(ZFS_REWRITE_PHYSICAL | ZFS_REWRITE_SKIP_SNAPSHOT | \
-	ZFS_REWRITE_SKIP_BRT | ZFS_REWRITE_SKIP_CURRENT_ASIZE | \
-	ZFS_REWRITE_SKIP_ALLOCATING)
 
 #define	ZFS_IOC_REWRITE		_IOW(0x83, 3, zfs_rewrite_args_t)
 
@@ -1833,6 +1825,7 @@ typedef enum {
 	ZFS_ERR_TOO_MANY_SITOUTS,
 	ZFS_ERR_NO_USER_NS_SUPPORT,
 	ZFS_ERR_CRYPTO_KEY_MISMATCH,
+	ZFS_ERR_RAIDZ_EXPAND_TOO_WIDE,
 } zfs_errno_t;
 
 /*
@@ -2007,42 +2000,6 @@ typedef enum {
  */
 #define	DDT_PRUNE_UNIT		"ddt_prune_unit"
 #define	DDT_PRUNE_AMOUNT	"ddt_prune_amount"
-
-/*
- * The following are names used when invoking ZFS_IOC_ZVOL_REWRITE.  The
- * flags are the ZFS_REWRITE_* flags of zfs_rewrite_args_t.
- */
-#define	ZVOL_REWRITE_OFFSET	"rewrite_offset"
-#define	ZVOL_REWRITE_LENGTH	"rewrite_length"
-#define	ZVOL_REWRITE_FLAGS	"rewrite_flags"
-
-/*
- * The following are names used when invoking ZFS_IOC_DATASET_REWRITE, and in
- * what it returns.  The flags are the ZFS_REWRITE_* flags of
- * zfs_rewrite_args_t.  The cursor is returned until the rewrite is done, to
- * be passed back as it is.  The counters are those of the call.
- */
-#define	DATASET_REWRITE_FLAGS		"rewrite_flags"
-#define	DATASET_REWRITE_CURSOR		"rewrite_cursor"
-#define	DATASET_REWRITE_OBJECTS		"rewrite_objects"
-#define	DATASET_REWRITE_MARKED		"rewrite_marked"	/* bytes */
-#define	DATASET_REWRITE_SHARED		"rewrite_shared"	/* blocks */
-#define	DATASET_REWRITE_CLONED		"rewrite_cloned"	/* blocks */
-#define	DATASET_REWRITE_UNLINKED	"rewrite_unlinked"	/* objects */
-#define	DATASET_REWRITE_OTHER		"rewrite_other"		/* objects */
-
-/*
- * The following are names used when invoking ZFS_IOC_POOL_REWRITE, and in
- * what it returns.  The flags are ZFS_REWRITE_* flags, of which only
- * ZFS_REWRITE_SKIP_ALLOCATING applies.  The cursor is returned until the
- * rewrite is done, to be passed back as it is.  The counters are those of
- * the call.
- */
-#define	POOL_REWRITE_FLAGS		"rewrite_flags"
-#define	POOL_REWRITE_CURSOR		"rewrite_cursor"
-#define	POOL_REWRITE_OBJECTS		"rewrite_objects"
-#define	POOL_REWRITE_BLOCKS		"rewrite_blocks"
-#define	POOL_REWRITE_MARKED		"rewrite_marked"	/* bytes */
 
 /*
  * Flags for ZFS_IOC_VDEV_SET_STATE

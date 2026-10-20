@@ -420,9 +420,6 @@ ztest_func_t ztest_dmu_object_next_chunk;
 ztest_func_t ztest_dmu_commit_callbacks;
 ztest_func_t ztest_zap;
 ztest_func_t ztest_zap_parallel;
-ztest_func_t ztest_zap_rewrite;
-ztest_func_t ztest_meta_rewrite;
-ztest_func_t ztest_pool_rewrite;
 ztest_func_t ztest_zil_commit;
 ztest_func_t ztest_zil_remount;
 ztest_func_t ztest_dmu_read_write_zcopy;
@@ -478,9 +475,6 @@ static ztest_info_t ztest_info[] = {
 	ZTI_INIT(ztest_dmu_commit_callbacks, 1, &zopt_always),
 	ZTI_INIT(ztest_zap, 30, &zopt_always),
 	ZTI_INIT(ztest_zap_parallel, 100, &zopt_always),
-	ZTI_INIT(ztest_zap_rewrite, 10, &zopt_always),
-	ZTI_INIT(ztest_meta_rewrite, 1, &zopt_often),
-	ZTI_INIT(ztest_pool_rewrite, 1, &zopt_sometimes),
 	ZTI_INIT(ztest_split_pool, 1, &zopt_sometimes),
 	ZTI_INIT(ztest_zil_commit, 1, &zopt_incessant),
 	ZTI_INIT(ztest_zil_remount, 1, &zopt_sometimes),
@@ -2963,7 +2957,7 @@ ztest_write(ztest_ds_t *zd, uint64_t object, uint64_t offset, uint64_t size,
 	lr->lr_foid = object;
 	lr->lr_offset = offset;
 	lr->lr_length = size;
-	lr->lr_blkoff = 0;
+	lr->lr_flags = 0;
 	BP_ZERO(&lr->lr_blkptr);
 
 	memcpy(&lr->lr_data[0], data, size);
@@ -4267,6 +4261,8 @@ ztest_vdev_raidz_attach(ztest_ds_t *zd, uint64_t id)
 
 	if (spa->spa_raidz_expand)
 		expected_error = ZFS_ERR_RAIDZ_EXPAND_IN_PROGRESS;
+	else
+		expected_error = vdev_raidz_attach_check(pvd);
 
 	spa_config_exit(spa, SCL_ALL, FTAG);
 
@@ -4307,6 +4303,11 @@ ztest_vdev_raidz_attach(ztest_ds_t *zd, uint64_t id)
 	if (error != 0 && error != expected_error) {
 		fatal(0, "raidz attach (%s %"PRIu64") returned %d, expected %d",
 		    newpath, newsize, error, expected_error);
+	}
+
+	if (error == 0 && expected_error == ZFS_ERR_RAIDZ_EXPAND_TOO_WIDE) {
+		fatal(0, "raidz attach (%s %"PRIu64") succeeded, expected %d",
+		    newpath, newsize, expected_error);
 	}
 
 	if (raidz_expand_pause_point) {
@@ -5964,17 +5965,6 @@ out:
 	kmem_free(od, sizeof (ztest_od_t));
 }
 
-/*
- * Set up od for the ZAP objects that ztest_zap_parallel() updates from all
- * threads: one that stays a micro ZAP if micro is set, one that turns fat.
- */
-static void
-ztest_zap_parallel_od_init(ztest_od_t *od, int micro)
-{
-	ztest_od_init(od, ID_PARALLEL, "ztest_zap_parallel", micro,
-	    DMU_OT_ZAP_OTHER, 0, 0, 0);
-}
-
 void
 ztest_zap_parallel(ztest_ds_t *zd, uint64_t id)
 {
@@ -5989,7 +5979,7 @@ ztest_zap_parallel(ztest_ds_t *zd, uint64_t id)
 	void *data;
 
 	od = kmem_alloc(sizeof (ztest_od_t), KM_SLEEP);
-	ztest_zap_parallel_od_init(od, micro);
+	ztest_od_init(od, ID_PARALLEL, FTAG, micro, DMU_OT_ZAP_OTHER, 0, 0, 0);
 
 	if (ztest_object_init(zd, od, sizeof (ztest_od_t), B_FALSE) != 0) {
 		kmem_free(od, sizeof (ztest_od_t));
@@ -6089,121 +6079,6 @@ ztest_zap_parallel(ztest_ds_t *zd, uint64_t id)
 		dmu_tx_commit(tx);
 
 	kmem_free(od, sizeof (ztest_od_t));
-}
-
-/*
- * Rewrite, with random ZFS_REWRITE_* flags, a ZAP object that other threads
- * update meanwhile: one of those of ztest_zap_parallel(), which grow, shrink
- * and turn fat, or the directory of the objects of the tests.  The pool is
- * then checked as after any other test, the kills of ztest included.
- */
-void
-ztest_zap_rewrite(ztest_ds_t *zd, uint64_t id)
-{
-	(void) id;
-	objset_t *os = zd->zd_os;
-	ztest_od_t *od;
-	uint64_t object;
-	uint64_t flags;
-	dnode_t *dn;
-	int error;
-
-	if (ztest_random(3) == 0) {
-		object = ZTEST_DIROBJ;
-	} else {
-		od = kmem_alloc(sizeof (ztest_od_t), KM_SLEEP);
-		ztest_zap_parallel_od_init(od, ztest_random(2));
-		if (ztest_object_init(zd, od, sizeof (ztest_od_t),
-		    B_FALSE) != 0) {
-			kmem_free(od, sizeof (ztest_od_t));
-			return;
-		}
-		object = od->od_object;
-		kmem_free(od, sizeof (ztest_od_t));
-	}
-
-	flags = ztest_random(ZFS_REWRITE_VALID_FLAGS + 1) &
-	    ZFS_REWRITE_VALID_FLAGS;
-
-	VERIFY0(dnode_hold(os, object, FTAG, &dn));
-	error = zap_rewrite_by_dnode(dn, flags, NULL);
-	dnode_rele(dn, FTAG);
-
-	if (error == ENOSPC)
-		ztest_record_enospc(FTAG);
-	else
-		ASSERT(error == 0 || error == EDQUOT || error == EIO);
-}
-
-/*
- * Rewrite the blocks of the meta-dnode while other threads allocate, free and
- * dirty dnodes, then ask for the block of the objset to be rewritten.
- */
-void
-ztest_meta_rewrite(ztest_ds_t *zd, uint64_t id)
-{
-	(void) id;
-	objset_t *os = zd->zd_os;
-	dmu_rewrite_stats_t drs = { 0 };
-	uint64_t blkid = 0;
-	uint64_t flags;
-	dmu_tx_t *tx;
-	int error;
-
-	flags = ztest_random(ZFS_REWRITE_VALID_FLAGS + 1) &
-	    ZFS_REWRITE_VALID_FLAGS;
-
-	error = dmu_rewrite_meta_dnode(os, &blkid, flags, 0, &drs);
-	if (error == ENOSPC) {
-		ztest_record_enospc(FTAG);
-		return;
-	}
-	ASSERT(error == 0 || error == EDQUOT || error == EIO);
-	if (error != 0)
-		return;
-	VERIFY3U(blkid, ==, UINT64_MAX);
-
-	tx = dmu_tx_create(os);
-	if (ztest_tx_assign(tx, DMU_TX_WAIT, FTAG) == 0)
-		return;
-	(void) dmu_objset_rewrite_used(os, flags, tx);
-	dmu_tx_commit(tx);
-}
-
-/*
- * Rewrite the MOS, step by step, while the other threads change it, with
- * dedup, block cloning, scrubs, checkpoints, removals and expansions under
- * way.  The rewrite refuses to run while there is a checkpoint, or while a
- * vdev is being removed.
- */
-void
-ztest_pool_rewrite(ztest_ds_t *zd, uint64_t id)
-{
-	(void) zd, (void) id;
-	dsl_pool_rewrite_t dpr = { 0 };
-	spa_t *spa = ztest_spa;
-	int error = 0;
-
-	dpr.dpr_flags = ztest_random(2) ? ZFS_REWRITE_SKIP_ALLOCATING : 0;
-
-	(void) pthread_rwlock_rdlock(&ztest_name_lock);
-	while (error == 0 && dpr.dpr_phase != DSL_POOL_REWRITE_DONE)
-		error = dsl_pool_rewrite(spa_get_dsl(spa), &dpr);
-	(void) pthread_rwlock_unlock(&ztest_name_lock);
-
-	switch (error) {
-	case 0:
-	case ZFS_ERR_CHECKPOINT_EXISTS:
-	case ZFS_ERR_DEVRM_IN_PROGRESS:
-	case EIO:
-		break;
-	case ENOSPC:
-		ztest_record_enospc(FTAG);
-		break;
-	default:
-		fatal(B_FALSE, "dsl_pool_rewrite(%s) = %d", spa_name(spa),
-		    error);
-	}
 }
 
 /*

@@ -40,15 +40,12 @@ struct mock_dbuf {
 	dmu_buf_user_t		*mdb_user;
 	mock_dnode_t		*mdb_owner;
 	void			*mdb_data;
-	uint64_t		mdb_dirtied;
-	uint64_t		mdb_rewritten;
 };
 typedef struct mock_dbuf mock_dbuf_t;
 
 /*
- * A mock dnode. a real dnode_t (must be first for casting) with dn_type,
- * dn_object, dn_datablksz, dn_maxblkid and dn_struct_rwlock set, plus a flat
- * array of mock_dbuf_t indexed by block id.
+ * A mock dnode. a real dnode_t (must be first for casting) with dn_type
+ * and dn_object set, plus a flat array of mock_dbuf_t indexed by block id.
  */
 struct mock_dnode {
 	dnode_t			mdn_dn;
@@ -99,7 +96,6 @@ mock_dnode_block_get(mock_dnode_t *mdn, uint64_t blkid)
 		}
 		mdn->mdn_blocks = new_blocks;
 		mdn->mdn_nblocks = new_n;
-		mdn->mdn_dn.dn_maxblkid = new_n - 1;
 	}
 
 	mock_dbuf_t *mdb = mdn->mdn_blocks[blkid];
@@ -119,8 +115,6 @@ mock_dnode_create(size_t blksize, dmu_object_type_t type)
 	mdn->mdn_refcount = 1;
 	mdn->mdn_dn.dn_type = type;
 	mdn->mdn_dn.dn_object = 1;	/* arbitrary non-zero object number */
-	mdn->mdn_dn.dn_datablksz = blksize;
-	rw_init(&mdn->mdn_dn.dn_struct_rwlock, NULL, RW_DEFAULT, NULL);
 	mdn->mdn_blksize = blksize;
 
 	return (mdn);
@@ -148,7 +142,6 @@ mock_dnode_destroy(mock_dnode_t *mdn)
 
 	kmem_free(mdn->mdn_blocks,
 	    mdn->mdn_nblocks * sizeof (mock_dbuf_t *));
-	rw_destroy(&mdn->mdn_dn.dn_struct_rwlock);
 	kmem_free(mdn, sizeof (mock_dnode_t));
 }
 
@@ -170,22 +163,6 @@ uint64_t
 mock_dnode_refcount(mock_dnode_t *mdn)
 {
 	return (mdn->mdn_refcount);
-}
-
-uint64_t
-mock_dnode_block_dirtied(mock_dnode_t *mdn, uint64_t blkid)
-{
-	if (blkid >= mdn->mdn_nblocks || mdn->mdn_blocks[blkid] == NULL)
-		return (0);
-	return (mdn->mdn_blocks[blkid]->mdb_dirtied);
-}
-
-uint64_t
-mock_dnode_block_rewritten(mock_dnode_t *mdn, uint64_t blkid)
-{
-	if (blkid >= mdn->mdn_nblocks || mdn->mdn_blocks[blkid] == NULL)
-		return (0);
-	return (mdn->mdn_blocks[blkid]->mdb_rewritten);
 }
 
 /* Mock transaction */
@@ -244,9 +221,7 @@ dmu_buf_set_user(dmu_buf_t *db, dmu_buf_user_t *new_user)
 void
 dmu_buf_will_dirty(dmu_buf_t *db, dmu_tx_t *tx)
 {
-	(void) tx;
-	mock_dbuf_t *mdb = (mock_dbuf_t *)db;
-	mdb->mdb_dirtied++;
+	(void) db; (void) tx;
 }
 
 objset_t *
@@ -285,7 +260,6 @@ dmu_object_set_blocksize(objset_t *os, uint64_t object, uint64_t size,
 	mdb->mdb_db.db_size = size;
 	mdb->mdb_db.db_data = new_data;
 	mdn->mdn_blksize = size;
-	mdn->mdn_dn.dn_datablksz = size;
 
 	return (0);
 }
@@ -308,67 +282,6 @@ dnode_rele(dnode_t *dn, const void *tag)
 	mock_dnode_t *mdn = (mock_dnode_t *)dn;
 	unit_gt(mdn->mdn_refcount, 0);
 	mdn->mdn_refcount--;
-}
-
-/*
- * Transactions: always assigned at once, and freed when done.
- */
-
-dmu_tx_t *
-dmu_tx_create(objset_t *os)
-{
-	(void) os;
-	return ((dmu_tx_t *)mock_tx_create());
-}
-
-void
-dmu_tx_hold_write_by_dnode(dmu_tx_t *tx, dnode_t *dn, uint64_t off, int len)
-{
-	(void) tx; (void) dn; (void) off; (void) len;
-}
-
-int
-dmu_tx_assign(dmu_tx_t *tx, dmu_tx_flag_t flags)
-{
-	(void) tx; (void) flags;
-	return (0);
-}
-
-void
-dmu_tx_abort(dmu_tx_t *tx)
-{
-	mock_tx_destroy((mock_dmu_tx_t *)tx);
-}
-
-void
-dmu_tx_commit(dmu_tx_t *tx)
-{
-	mock_tx_destroy((mock_dmu_tx_t *)tx);
-}
-
-/*
- * Count the blocks marked for rewrite, after calling mock_dmu_rewrite_cb.
- */
-void (*mock_dmu_rewrite_cb)(dnode_t *dn, uint64_t offset, uint64_t size,
-    uint64_t flags);
-
-int
-dmu_rewrite_by_dnode(dnode_t *dn, uint64_t offset, uint64_t size,
-    uint64_t rewrite_flags, dmu_tx_t *tx, dmu_rewrite_stats_t *stats)
-{
-	(void) tx; (void) stats;
-	mock_dnode_t *mdn = (mock_dnode_t *)dn;
-
-	if (mock_dmu_rewrite_cb != NULL)
-		mock_dmu_rewrite_cb(dn, offset, size, rewrite_flags);
-
-	for (uint64_t blkid = offset / mdn->mdn_blksize;
-	    blkid < mdn->mdn_nblocks &&
-	    blkid * mdn->mdn_blksize < offset + size; blkid++) {
-		if (mdn->mdn_blocks[blkid] != NULL)
-			mdn->mdn_blocks[blkid]->mdb_rewritten++;
-	}
-	return (0);
 }
 
 /*

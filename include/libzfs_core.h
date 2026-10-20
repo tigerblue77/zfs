@@ -157,13 +157,6 @@ _LIBZFS_CORE_H int lzc_scrub(zfs_ioc_t, const char *, nvlist_t *, nvlist_t **);
 _LIBZFS_CORE_H int lzc_ddt_prune(const char *, zpool_ddt_prune_unit_t,
     uint64_t);
 
-_LIBZFS_CORE_H int lzc_zvol_rewrite(const char *, uint64_t, uint64_t,
-    uint64_t);
-_LIBZFS_CORE_H int lzc_dataset_rewrite(const char *, uint64_t, nvlist_t *,
-    nvlist_t **);
-_LIBZFS_CORE_H int lzc_pool_rewrite(const char *, uint64_t, nvlist_t *,
-    nvlist_t **);
-
 #ifdef	__cplusplus
 }
 #endif

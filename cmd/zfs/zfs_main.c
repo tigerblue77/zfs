@@ -412,9 +412,8 @@ get_usage(zfs_help_t idx)
 		return ("\tredact <snapshot> <bookmark> "
 		    "<redaction_snapshot> ...\n");
 	case HELP_REWRITE:
-		return ("\trewrite [-ACPSWrvx] [-o <offset>] "
-		    "[-l <length>]\n"
-		    "\t    <directory|file|volume|filesystem ...>\n");
+		return ("\trewrite [-CPSWrvx] [-o <offset>] "
+		    "[-l <length>] <directory|file ...>\n");
 	case HELP_JAIL:
 		return ("\tjail <jailid|jailname> <filesystem>\n");
 	case HELP_UNJAIL:
@@ -9092,141 +9091,6 @@ zfs_rewrite_file(const char *path, boolean_t verbose, zfs_rewrite_args_t *args)
 }
 
 static int
-zfs_rewrite_volume(const char *name, boolean_t verbose,
-    zfs_rewrite_args_t *args)
-{
-	int ret;
-
-	ret = lzc_zvol_rewrite(name, args->off, args->len, args->flags);
-	if (ret >= ZFS_ERR_CHECKPOINT_EXISTS) {
-		/* Not an errno: libzfs knows what it means. */
-		char msg[ZFS_MAX_DATASET_NAME_LEN + 32];
-
-		(void) snprintf(msg, sizeof (msg), "cannot rewrite '%s'", name);
-		(void) zfs_standard_error(g_zfs, ret, msg);
-		ret = ENOTSUP;
-	} else if (ret != 0) {
-		(void) fprintf(stderr, "failed to rewrite %s: %s\n",
-		    name, strerror(ret));
-	} else if (verbose) {
-		printf("%s\n", name);
-	}
-
-	return (ret);
-}
-
-/*
- * Rewrite a file system whole, one step of the kernel at a time, so that an
- * interruption stops it within a step.
- */
-static int
-zfs_rewrite_filesystem(const char *name, boolean_t verbose,
-    zfs_rewrite_args_t *args)
-{
-	static const char *const keys[] = { DATASET_REWRITE_OBJECTS,
-	    DATASET_REWRITE_MARKED, DATASET_REWRITE_SHARED,
-	    DATASET_REWRITE_CLONED, DATASET_REWRITE_UNLINKED,
-	    DATASET_REWRITE_OTHER };
-	enum { OBJECTS, MARKED, SHARED, CLONED, UNLINKED, OTHER };
-	uint64_t count[ARRAY_SIZE(keys)] = { 0 };
-	nvlist_t *cursor = NULL;
-	char buf[32];
-	int ret;
-
-	if (args->off != 0 || args->len != 0) {
-		(void) fprintf(stderr, "cannot rewrite %s: an offset or a "
-		    "length only applies to a file\n", name);
-		return (EINVAL);
-	}
-
-	for (;;) {
-		nvlist_t *out = NULL, *next;
-		uint64_t v;
-
-		ret = lzc_dataset_rewrite(name, args->flags, cursor, &out);
-		fnvlist_free(cursor);
-		cursor = NULL;
-		if (out != NULL) {
-			for (int i = 0; i < ARRAY_SIZE(keys); i++) {
-				if (nvlist_lookup_uint64(out, keys[i],
-				    &v) == 0)
-					count[i] += v;
-			}
-			if (ret == 0 && nvlist_lookup_nvlist(out,
-			    DATASET_REWRITE_CURSOR, &next) == 0)
-				cursor = fnvlist_dup(next);
-			fnvlist_free(out);
-		}
-		if (ret != 0 || cursor == NULL)
-			break;
-		if (verbose) {
-			zfs_nicebytes(count[MARKED], buf, sizeof (buf));
-			(void) printf("%s: %llu objects, %s marked\n", name,
-			    (u_longlong_t)count[OBJECTS], buf);
-			(void) fflush(stdout);
-		}
-	}
-	fnvlist_free(cursor);
-
-	if (ret >= ZFS_ERR_CHECKPOINT_EXISTS) {
-		/* Not an errno: libzfs knows what it means. */
-		char msg[ZFS_MAX_DATASET_NAME_LEN + 32];
-
-		(void) snprintf(msg, sizeof (msg), "cannot rewrite '%s'", name);
-		(void) zfs_standard_error(g_zfs, ret, msg);
-		ret = ENOTSUP;
-	} else if (ret != 0) {
-		(void) fprintf(stderr, "failed to rewrite %s: %s\n",
-		    name, strerror(ret));
-	} else if (verbose) {
-		zfs_nicebytes(count[MARKED], buf, sizeof (buf));
-		(void) printf("%s: done, %llu objects, %s marked\n", name,
-		    (u_longlong_t)count[OBJECTS], buf);
-		if (count[SHARED] + count[CLONED] + count[UNLINKED] +
-		    count[OTHER] != 0)
-			(void) printf("%s: left alone: %llu blocks shared "
-			    "with snapshots, %llu cloned blocks, %llu "
-			    "unlinked objects, %llu objects of other types\n",
-			    name, (u_longlong_t)count[SHARED],
-			    (u_longlong_t)count[CLONED],
-			    (u_longlong_t)count[UNLINKED],
-			    (u_longlong_t)count[OTHER]);
-	}
-
-	return (ret);
-}
-
-/*
- * Rewrite the directory open as dir itself, unless a range is given, which
- * only applies to files.
- */
-static int
-zfs_rewrite_dir_self(const char *path, DIR *dir, boolean_t verbose,
-    zfs_rewrite_args_t *args)
-{
-	int ret = 0;
-
-	if (args->off != 0 || args->len != 0)
-		return (0);
-
-	if (ioctl(dirfd(dir), ZFS_IOC_REWRITE, args) < 0) {
-		/*
-		 * Not a ZFS directory, or a kernel module that does not
-		 * rewrite directories: leave it.
-		 */
-		if (errno == ENOTTY || errno == EBADF)
-			return (0);
-		ret = errno;
-		(void) fprintf(stderr, "failed to rewrite %s: %s\n",
-		    path, strerror(errno));
-	} else if (verbose) {
-		printf("%s\n", path);
-	}
-
-	return (ret);
-}
-
-static int
 zfs_rewrite_dir(const char *path, boolean_t verbose, boolean_t xdev, dev_t dev,
     zfs_rewrite_args_t *args, nvlist_t *dirs)
 {
@@ -9243,8 +9107,6 @@ zfs_rewrite_dir(const char *path, boolean_t verbose, boolean_t xdev, dev_t dev,
 		    path, strerror(errno));
 		return (ret);
 	}
-
-	ret = zfs_rewrite_dir_self(path, dir, verbose, args);
 
 	size_t plen = strlen(path) + 1;
 	while ((ent = readdir(dir)) != NULL) {
@@ -9311,20 +9173,8 @@ zfs_rewrite_path(const char *path, boolean_t verbose, boolean_t recurse,
 
 	if (lstat(path, &st) < 0) {
 		ret = errno;
-		/*
-		 * Not an existing path, but it may be the name of a dataset:
-		 * a volume, or a snapshot, which the kernel refuses with a
-		 * proper error, or a file system.
-		 */
-		if ((ret == ENOENT || ret == ENOTDIR) &&
-		    zfs_dataset_exists(g_zfs, path,
-		    ZFS_TYPE_VOLUME | ZFS_TYPE_SNAPSHOT))
-			return (zfs_rewrite_volume(path, verbose, args));
-		if ((ret == ENOENT || ret == ENOTDIR) &&
-		    zfs_dataset_exists(g_zfs, path, ZFS_TYPE_FILESYSTEM))
-			return (zfs_rewrite_filesystem(path, verbose, args));
 		(void) fprintf(stderr, "failed to stat %s: %s\n",
-		    path, strerror(ret));
+		    path, strerror(errno));
 		return (ret);
 	}
 
@@ -9333,23 +9183,6 @@ zfs_rewrite_path(const char *path, boolean_t verbose, boolean_t recurse,
 	} else if (S_ISDIR(st.st_mode) && recurse) {
 		ret = zfs_rewrite_dir(path, verbose, xdev, st.st_dev, args,
 		    dirs);
-	} else if (strncmp(path, ZVOL_DIR, strlen(ZVOL_DIR)) == 0) {
-		/* The device of a volume: rewrite the volume. */
-		const char *name = path + strlen(ZVOL_DIR);
-
-		if (zfs_dataset_exists(g_zfs, name,
-		    ZFS_TYPE_VOLUME | ZFS_TYPE_SNAPSHOT)) {
-			ret = zfs_rewrite_volume(name, verbose, args);
-		} else {
-			(void) fprintf(stderr,
-			    "%s is not the device of a volume\n", path);
-			ret = EINVAL;
-		}
-	} else if (stat(path, &st) == 0 &&
-	    (S_ISBLK(st.st_mode) || S_ISCHR(st.st_mode))) {
-		(void) fprintf(stderr, "%s is a device, not a volume name\n",
-		    path);
-		ret = EINVAL;
 	}
 	return (ret);
 }
@@ -9366,11 +9199,8 @@ zfs_do_rewrite(int argc, char **argv)
 	zfs_rewrite_args_t args;
 	memset(&args, 0, sizeof (args));
 
-	while ((c = getopt(argc, argv, "ACPSWl:o:rvx")) != -1) {
+	while ((c = getopt(argc, argv, "CPSWl:o:rvx")) != -1) {
 		switch (c) {
-		case 'A':
-			args.flags |= ZFS_REWRITE_SKIP_ALLOCATING;
-			break;
 		case 'C':
 			args.flags |= ZFS_REWRITE_SKIP_BRT;
 			break;
@@ -9409,8 +9239,7 @@ zfs_do_rewrite(int argc, char **argv)
 	argc -= optind;
 	if (argc == 0) {
 		(void) fprintf(stderr,
-		    "missing file, directory, volume or file system "
-		    "target(s)\n");
+		    "missing file or directory target(s)\n");
 		usage(B_FALSE);
 	}
 

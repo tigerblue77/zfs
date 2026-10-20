@@ -21,7 +21,6 @@
 #include <linux/compat.h>
 #endif
 #include <linux/fs.h>
-#include <linux/mount.h>
 #include <linux/migrate.h>
 #include <sys/file.h>
 #include <sys/dmu_objset.h>
@@ -1222,54 +1221,23 @@ zpl_ioctl_setdosflags(struct file *filp, void __user *arg)
 	return (err);
 }
 
-/*
- * A directory can not be open for writing, so its rewrite needs the permission
- * to add entries to it instead.  The VFS checks permissions for the system
- * calls, not for an ioctl, and on Linux zfs_zaccess() leaves that to the VFS.
- */
-static int
-zpl_ioctl_rewrite_dir_permission(struct file *filp)
-{
-	struct inode *ip = file_inode(filp);
-
-#if defined(HAVE_IDMAP_MNTIDMAP)
-	return (inode_permission(mnt_idmap(filp->f_path.mnt), ip,
-	    MAY_WRITE | MAY_EXEC));
-#elif defined(HAVE_IDMAP_USERNS)
-	return (inode_permission(mnt_user_ns(filp->f_path.mnt), ip,
-	    MAY_WRITE | MAY_EXEC));
-#else
-	return (inode_permission(ip, MAY_WRITE | MAY_EXEC));
-#endif
-}
-
 static int
 zpl_ioctl_rewrite(struct file *filp, void __user *arg)
 {
 	struct inode *ip = file_inode(filp);
 	zfs_rewrite_args_t args;
 	fstrans_cookie_t cookie;
-	cred_t *cr;
 	int err;
 
 	if (copy_from_user(&args, arg, sizeof (args)))
 		return (-EFAULT);
 
-	if (S_ISDIR(ip->i_mode)) {
-		err = zpl_ioctl_rewrite_dir_permission(filp);
-		if (err != 0)
-			return (err);
-	} else if (unlikely(!(filp->f_mode & FMODE_WRITE))) {
+	if (unlikely(!(filp->f_mode & FMODE_WRITE)))
 		return (-EBADF);
-	}
 
-	cr = CRED();
-	crhold(cr);
 	cookie = spl_fstrans_mark();
-	err = -zfs_rewrite(ITOZ(ip), args.off, args.len, args.flags, args.arg,
-	    cr);
+	err = -zfs_rewrite(ITOZ(ip), args.off, args.len, args.flags, args.arg);
 	spl_fstrans_unmark(cookie);
-	crfree(cr);
 
 	return (err);
 }

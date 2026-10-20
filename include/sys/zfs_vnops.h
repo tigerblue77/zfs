@@ -32,31 +32,7 @@ extern int zfs_clone_range_replay(znode_t *, uint64_t, uint64_t, uint64_t,
     const blkptr_t *, size_t);
 extern int zfs_dedupe_range(znode_t *, uint64_t, znode_t *, uint64_t,
     uint64_t *, cred_t *, boolean_t, boolean_t *);
-extern int zfs_rewrite(znode_t *, uint64_t, uint64_t, uint64_t, uint64_t,
-    cred_t *);
-
-/*
- * The rewrite of a whole file system, in steps, by zfs_rewrite_fs(): its
- * flags, its cursor, which the phase and the object start at 0, and its
- * counters.
- */
-#define	ZFS_REWRITE_FS_OBJECTS		0	/* objects */
-#define	ZFS_REWRITE_FS_DNODES		1	/* meta-dnode */
-#define	ZFS_REWRITE_FS_ACCOUNTING	2	/* accounting */
-#define	ZFS_REWRITE_FS_DONE		3
-
-typedef struct zfs_rewrite_fs {
-	uint64_t		zrf_flags;	/* ZFS_REWRITE_* flags */
-	uint64_t		zrf_phase;	/* ZFS_REWRITE_FS_* */
-	uint64_t		zrf_object;	/* object or meta-dnode block */
-	uint64_t		zrf_offset;	/* offset in the object */
-	uint64_t		zrf_objects;	/* objects rewritten */
-	uint64_t		zrf_unlinked;	/* left alone: unlinked */
-	uint64_t		zrf_other;	/* left alone: other types */
-	dmu_rewrite_stats_t	zrf_stats;
-} zfs_rewrite_fs_t;
-
-extern int zfs_rewrite_fs(zfsvfs_t *, objset_t *, zfs_rewrite_fs_t *);
+extern int zfs_rewrite(znode_t *, uint64_t, uint64_t, uint64_t, uint64_t);
 
 extern int zfs_getsecattr(znode_t *, vsecattr_t *, int, cred_t *);
 extern int zfs_setsecattr(znode_t *, vsecattr_t *, int, cred_t *);

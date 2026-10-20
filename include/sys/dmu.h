@@ -917,39 +917,6 @@ void dmu_write(objset_t *os, uint64_t object, uint64_t offset, uint64_t size,
     const void *buf, dmu_tx_t *tx, dmu_flags_t flags);
 int dmu_write_by_dnode(dnode_t *dn, uint64_t offset, uint64_t size,
     const void *buf, dmu_tx_t *tx, dmu_flags_t flags);
-
-/*
- * What a rewrite read and marked, in bytes, and the blocks that only
- * ZFS_REWRITE_SKIP_SNAPSHOT or ZFS_REWRITE_SKIP_BRT left alone.
- */
-typedef struct dmu_rewrite_stats {
-	uint64_t	drs_read;
-	uint64_t	drs_marked;
-	uint64_t	drs_shared;
-	uint64_t	drs_cloned;
-} dmu_rewrite_stats_t;
-
-int dmu_rewrite_by_dnode(dnode_t *dn, uint64_t offset, uint64_t size,
-    uint64_t rewrite_flags, dmu_tx_t *tx, dmu_rewrite_stats_t *stats);
-boolean_t dmu_rewrite_spill_by_dnode(dnode_t *dn, uint64_t rewrite_flags,
-    dmu_tx_t *tx, dmu_rewrite_stats_t *stats);
-boolean_t dmu_rewrite_dnode(dnode_t *dn, uint64_t rewrite_flags,
-    dmu_tx_t *tx);
-int dmu_rewrite_range(dnode_t *dn, uint64_t *offp, uint64_t end,
-    uint64_t rewrite_flags, uint64_t budget, dmu_rewrite_stats_t *stats);
-int dmu_rewrite_meta_dnode(objset_t *os, uint64_t *blkidp,
-    uint64_t rewrite_flags, uint64_t budget, dmu_rewrite_stats_t *stats);
-boolean_t dmu_rewrite_bp_needed(objset_t *os, const struct blkptr *bp,
-    uint64_t rewrite_flags);
-boolean_t dmu_rewrite_needed(dnode_t *dn, uint64_t rewrite_flags);
-int dmu_rewrite_wait_synced(struct dsl_pool *dp, uint64_t txg);
-typedef boolean_t (dmu_rewrite_select_cb_t)(void *arg, int level,
-    uint64_t blkid, uint64_t size);
-int dmu_rewrite_select(dnode_t *dn, uint64_t *blkidp, uint64_t end,
-    uint64_t rewrite_flags, hrtime_t deadline, dmu_rewrite_select_cb_t *cb,
-    void *arg);
-uint64_t dmu_rewrite_block_sync(dnode_t *dn, int level, uint64_t blkid,
-    uint64_t rewrite_flags, dmu_tx_t *tx);
 #ifdef _KERNEL
 int dmu_read_uio(objset_t *os, uint64_t object, zfs_uio_t *uio, uint64_t size,
     dmu_flags_t flags);

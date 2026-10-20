@@ -1250,103 +1250,6 @@ zap_get_stats(objset_t *os, uint64_t zapobj, zap_stats_t *zs)
 	return (err);
 }
 
-/* zap_rewrite */
-
-/*
- * The most data that zap_rewrite_by_dnode() marks for rewrite under one hold of
- * the lock of the ZAP, while the updates that change the set of its blocks wait
- * for it to be read.
- */
-static const uint64_t zap_rewrite_batch = 1024 * 1024;
-
-/*
- * Mark for rewrite the blocks of the ZAP object of dn that the
- * ZFS_REWRITE_SKIP_* flags do not leave alone, as dmu_rewrite_by_dnode() does
- * with those of a file: the header or the micro ZAP block, the leaves, the
- * pointer table, and the indirect blocks above them.  These are metadata,
- * rewritten without ZFS_REWRITE_PHYSICAL.
- *
- * The lock of the ZAP is held as a reader while blocks are selected and marked,
- * which keeps out the updates that change the set of its blocks, as they hold
- * it as a writer: growing the pointer table, which frees the old one, splitting
- * a leaf, or growing or upgrading a micro ZAP.  Lookups and updates within a
- * leaf of a fat ZAP go on meanwhile: every transaction that holds the object is
- * in the same transaction group (see dn_assigned_txg), so marking a block that
- * such an update changes is harmless.  The lock is taken once the transaction
- * is assigned, as by an update, and a large object is marked in several
- * transactions, each holding the lock again for at most zap_rewrite_batch
- * bytes.  The blocks that updates add meanwhile are left alone, since they have
- * just been written.  The ZAP must be one that is only updated in open context.
- * What is read, marked or left alone is counted in stats, if not NULL, as by
- * dmu_rewrite_by_dnode().
- */
-int
-zap_rewrite_by_dnode(dnode_t *dn, uint64_t rewrite_flags,
-    dmu_rewrite_stats_t *stats)
-{
-	uint64_t blkid = 0;
-	uint64_t end;
-	int err = 0;
-
-	rewrite_flags &= ~ZFS_REWRITE_PHYSICAL;
-
-	rw_enter(&dn->dn_struct_rwlock, RW_READER);
-	end = dn->dn_maxblkid + 1;
-	rw_exit(&dn->dn_struct_rwlock);
-
-	while (blkid < end) {
-		uint64_t blksz;
-		uint64_t nblks;
-		boolean_t same;
-		dmu_tx_t *tx;
-		zap_t *zap;
-
-		rw_enter(&dn->dn_struct_rwlock, RW_READER);
-		blksz = dn->dn_datablksz;
-		rw_exit(&dn->dn_struct_rwlock);
-		nblks = MIN(end - blkid, MAX(zap_rewrite_batch / blksz, 1));
-
-		/* Hold whole blocks, which does not read them. */
-		tx = dmu_tx_create(dn->dn_objset);
-		dmu_tx_hold_write_by_dnode(tx, dn, blkid * blksz,
-		    nblks * blksz);
-		err = dmu_tx_assign(tx, DMU_TX_WAIT);
-		if (err != 0) {
-			dmu_tx_abort(tx);
-			break;
-		}
-
-		err = zap_lock_by_dnode(dn, NULL, RW_READER, TRUE, FALSE,
-		    FTAG, &zap);
-		if (err != 0) {
-			dmu_tx_commit(tx);
-			break;
-		}
-
-		/* A micro ZAP may have grown meanwhile: then try again. */
-		rw_enter(&dn->dn_struct_rwlock, RW_READER);
-		same = (dn->dn_datablksz == blksz);
-		rw_exit(&dn->dn_struct_rwlock);
-		if (same) {
-			err = dmu_rewrite_by_dnode(dn, blkid * blksz,
-			    nblks * blksz, rewrite_flags, tx, stats);
-			blkid += nblks;
-		}
-
-		zap_unlock(zap, FTAG);
-		dmu_tx_commit(tx);
-
-		if (err != 0)
-			break;
-		if (blkid < end && issig()) {
-			err = SET_ERROR(EINTR);
-			break;
-		}
-	}
-
-	return (err);
-}
-
 EXPORT_SYMBOL(zap_create);
 EXPORT_SYMBOL(zap_create_dnsize);
 EXPORT_SYMBOL(zap_create_norm);
@@ -1398,4 +1301,3 @@ EXPORT_SYMBOL(zap_cursor_advance);
 EXPORT_SYMBOL(zap_cursor_serialize);
 EXPORT_SYMBOL(zap_cursor_init_serialized);
 EXPORT_SYMBOL(zap_get_stats);
-EXPORT_SYMBOL(zap_rewrite_by_dnode);

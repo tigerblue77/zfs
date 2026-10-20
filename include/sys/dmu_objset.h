@@ -179,13 +179,6 @@ struct objset {
 	/* Protects changes to DMU_{USER,GROUP,PROJECT}USED_OBJECT */
 	kmutex_t os_userused_lock;
 
-	/*
-	 * Rewrite of the {USER,GROUP,PROJECT}USED objects asked for per txg,
-	 * with its ZFS_REWRITE_* flags; protected by os_lock.
-	 */
-	uint64_t os_rewrite_used_txg[TXG_SIZE];
-	uint64_t os_rewrite_used_flags[TXG_SIZE];
-
 	/* stuff we store for the user */
 	kmutex_t os_user_ptr_lock;
 	void *os_user_ptr;
@@ -234,8 +227,6 @@ int dmu_objset_find_dp(struct dsl_pool *dp, uint64_t ddobj,
 void dmu_objset_evict_dbufs(objset_t *os);
 inode_timespec_t dmu_objset_snap_cmtime(objset_t *os);
 boolean_t dmu_objset_block_is_shared(objset_t *os, const blkptr_t *bp);
-boolean_t dmu_objset_rewrite_used(objset_t *os, uint64_t rewrite_flags,
-    dmu_tx_t *tx);
 
 /* called from dsl */
 void dmu_objset_sync(objset_t *os, zio_t *zio, dmu_tx_t *tx);

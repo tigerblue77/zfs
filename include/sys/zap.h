@@ -590,15 +590,6 @@ typedef struct zap_stats {
 int zap_get_stats(objset_t *os, uint64_t zapobj, zap_stats_t *zs);
 int zap_get_stats_by_dnode(dnode_t *dn, zap_stats_t *zs);
 
-/*
- * Mark the blocks of a ZAP object for rewrite, as dmu_rewrite_by_dnode() does
- * with those of a file, in transactions of its own, holding the lock of the ZAP
- * so that no update changes the set of its blocks meanwhile.  rewrite_flags are
- * the ZFS_REWRITE_* flags.
- */
-int zap_rewrite_by_dnode(dnode_t *dn, uint64_t rewrite_flags,
-    dmu_rewrite_stats_t *stats);
-
 /* ZAP subsystem setup/teardown */
 void zap_init(void);
 void zap_fini(void);

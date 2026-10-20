@@ -43,17 +43,6 @@ const void *mock_dnode_block_data(mock_dnode_t *mdn, uint64_t blkid);
 /* Returns the current dnode ref (hold) count. */
 uint64_t mock_dnode_refcount(mock_dnode_t *mdn);
 
-/*
- * Returns how many times the given block was dirtied, or marked for rewrite
- * by dmu_rewrite_by_dnode(), or 0 if it does not exist.
- */
-uint64_t mock_dnode_block_dirtied(mock_dnode_t *mdn, uint64_t blkid);
-uint64_t mock_dnode_block_rewritten(mock_dnode_t *mdn, uint64_t blkid);
-
-/* If set, called by dmu_rewrite_by_dnode() with its arguments. */
-extern void (*mock_dmu_rewrite_cb)(dnode_t *dn, uint64_t offset,
-    uint64_t size, uint64_t flags);
-
 /* Create/destroy a mock transaction handle. */
 mock_dmu_tx_t *mock_tx_create(void);
 void mock_tx_destroy(mock_dmu_tx_t *tx);

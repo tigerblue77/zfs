@@ -148,8 +148,6 @@ int sa_set_sa_object(objset_t *, uint64_t);
 int sa_hdrsize(void *);
 void sa_handle_lock(sa_handle_t *);
 void sa_handle_unlock(sa_handle_t *);
-boolean_t sa_rewrite_spill(sa_handle_t *, uint64_t, dmu_tx_t *,
-    dmu_rewrite_stats_t *);
 
 #ifdef _KERNEL
 int sa_lookup_uio(sa_handle_t *, sa_attr_type_t, zfs_uio_t *);

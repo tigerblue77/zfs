@@ -933,60 +933,6 @@ test_wait_fs(const char *dataset)
 	nvlist_free(required);
 }
 
-/* The working dataset is a file system, which is not a volume to rewrite. */
-static void
-test_zvol_rewrite(const char *dataset)
-{
-	nvlist_t *optional = fnvlist_alloc();
-
-	fnvlist_add_uint64(optional, ZVOL_REWRITE_OFFSET, 0);
-	fnvlist_add_uint64(optional, ZVOL_REWRITE_LENGTH, 0);
-	fnvlist_add_uint64(optional, ZVOL_REWRITE_FLAGS, 0);
-
-	IOC_INPUT_TEST(ZFS_IOC_ZVOL_REWRITE, dataset, NULL, optional, ENOTSUP);
-
-	nvlist_free(optional);
-}
-
-/* The cursor of the last step: rewrite the accounting objects only. */
-static void
-test_dataset_rewrite(const char *dataset)
-{
-	nvlist_t *optional = fnvlist_alloc();
-	nvlist_t *cursor = fnvlist_alloc();
-
-	fnvlist_add_uint64(cursor, "phase", 2);
-	fnvlist_add_uint64(cursor, "object", 0);
-	fnvlist_add_uint64(cursor, "offset", 0);
-	fnvlist_add_uint64(optional, DATASET_REWRITE_FLAGS, 0);
-	fnvlist_add_nvlist(optional, DATASET_REWRITE_CURSOR, cursor);
-
-	IOC_INPUT_TEST(ZFS_IOC_DATASET_REWRITE, dataset, NULL, optional, 0);
-
-	nvlist_free(cursor);
-	nvlist_free(optional);
-}
-
-/* The cursor of the last step: rewrite the meta-dnode of the MOS only. */
-static void
-test_pool_rewrite(const char *pool)
-{
-	nvlist_t *optional = fnvlist_alloc();
-	nvlist_t *cursor = fnvlist_alloc();
-
-	fnvlist_add_uint64(cursor, "phase", 1);
-	fnvlist_add_uint64(cursor, "object", 0);
-	fnvlist_add_uint64(cursor, "blkid", 0);
-	fnvlist_add_uint64(optional, POOL_REWRITE_FLAGS,
-	    ZFS_REWRITE_SKIP_ALLOCATING);
-	fnvlist_add_nvlist(optional, POOL_REWRITE_CURSOR, cursor);
-
-	IOC_INPUT_TEST(ZFS_IOC_POOL_REWRITE, pool, NULL, optional, 0);
-
-	nvlist_free(cursor);
-	nvlist_free(optional);
-}
-
 static void
 test_get_bootenv(const char *pool)
 {
@@ -1108,10 +1054,6 @@ zfs_ioc_input_tests(const char *pool)
 
 	test_wait(pool);
 	test_wait_fs(dataset);
-
-	test_zvol_rewrite(dataset);
-	test_dataset_rewrite(dataset);
-	test_pool_rewrite(pool);
 
 	test_set_bootenv(pool);
 	test_get_bootenv(pool);
