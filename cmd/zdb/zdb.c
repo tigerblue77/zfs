@@ -10497,9 +10497,9 @@ zdb_print_anyraid_ondisk_maps(vdev_t *vd, int verbosity)
 	int child = 0;
 	spa_config_enter(spa, SCL_ZIO, FTAG, RW_READER);
 	if (verbosity == 2) {
-		anyraid_header_t header;
+		anyraid_header_t header = {0};
 		int mapping;
-		uint64_t txg;
+		uint64_t txg = 0;
 		int error = vdev_anyraid_pick_best_mapping(
 		    vd->vdev_child[child], &txg, &header, &mapping);
 		if (error != 0) {
