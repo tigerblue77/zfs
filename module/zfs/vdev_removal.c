@@ -31,6 +31,11 @@
 #include <sys/dsl_pool.h>
 #include <sys/dsl_synctask.h>
 #include <sys/dsl_dir.h>
+#include <sys/dsl_dataset.h>
+#include <sys/dmu_objset.h>
+#include <sys/dmu_traverse.h>
+#include <sys/dbuf.h>
+#include <sys/dnode.h>
 #include <sys/arc.h>
 #include <sys/zfeature.h>
 #include <sys/vdev_indirect_births.h>
@@ -3047,6 +3052,281 @@ spa_removal_get_stats(spa_t *spa, pool_removal_stat_t *prs)
 	}
 
 	return (0);
+}
+
+typedef struct vdev_snapshots_arg {
+	uint64_t	*vsa_objs;
+	uint64_t	vsa_count;
+	uint64_t	vsa_size;
+} vdev_snapshots_arg_t;
+
+static int
+vdev_snapshots_collect_cb(dsl_pool_t *dp, dsl_dataset_t *ds, void *arg)
+{
+	(void) dp;
+	vdev_snapshots_arg_t *vsa = arg;
+
+	if (vsa->vsa_count == vsa->vsa_size) {
+		uint64_t size = MAX(vsa->vsa_size * 2, 64);
+		uint64_t *objs = kmem_alloc(size * sizeof (uint64_t), KM_SLEEP);
+
+		if (vsa->vsa_count != 0) {
+			memcpy(objs, vsa->vsa_objs,
+			    vsa->vsa_count * sizeof (uint64_t));
+			kmem_free(vsa->vsa_objs,
+			    vsa->vsa_size * sizeof (uint64_t));
+		}
+		vsa->vsa_objs = objs;
+		vsa->vsa_size = size;
+	}
+	vsa->vsa_objs[vsa->vsa_count++] = ds->ds_object;
+	return (0);
+}
+
+/*
+ * Stop the traversal of a snapshot at its first block with a copy on the
+ * vdev.  The members of a gang block are not visited, so a snapshot whose
+ * only blocks on the vdev are gang members is missed.
+ */
+static int
+vdev_snapshots_visit_cb(spa_t *spa, zilog_t *zilog, const blkptr_t *bp,
+    const zbookmark_phys_t *zb, const dnode_phys_t *dnp, void *arg)
+{
+	(void) spa, (void) zilog, (void) zb, (void) dnp;
+	uint64_t vdev_id = *(uint64_t *)arg;
+
+	if (issig())
+		return (SET_ERROR(EINTR));
+	if (bp == NULL || BP_IS_HOLE(bp) || BP_IS_EMBEDDED(bp))
+		return (0);
+	for (int d = 0; d < BP_GET_NDVAS(bp); d++) {
+		if (DVA_GET_VDEV(&bp->blk_dva[d]) == vdev_id)
+			return (SET_ERROR(EEXIST));
+	}
+	return (0);
+}
+
+static boolean_t
+vdev_bp_has_copy_on(const blkptr_t *bp, uint64_t vdev_id)
+{
+	if (BP_IS_HOLE(bp) || BP_IS_EMBEDDED(bp))
+		return (B_FALSE);
+	for (int d = 0; d < BP_GET_NDVAS(bp); d++) {
+		if (DVA_GET_VDEV(&bp->blk_dva[d]) == vdev_id)
+			return (B_TRUE);
+	}
+	return (B_FALSE);
+}
+
+/*
+ * Look for a copy on the vdev in the tree under bp, which is the block
+ * pointer of block blkid at the given level of dn.  The indirect blocks are
+ * read through the dbuf cache, which has the current version of a file
+ * system being written, and their block pointers are copied under the lock
+ * that syncing context takes to update them.  Returns EEXIST if one is
+ * found.
+ */
+static int
+vdev_dnode_tree_check(dnode_t *dn, const blkptr_t *bp, int level,
+    uint64_t blkid, uint64_t vdev_id)
+{
+	if (vdev_bp_has_copy_on(bp, vdev_id))
+		return (SET_ERROR(EEXIST));
+	if (level == 0 || BP_IS_HOLE(bp) || BP_IS_EMBEDDED(bp))
+		return (0);
+	if (issig())
+		return (SET_ERROR(EINTR));
+
+	rw_enter(&dn->dn_struct_rwlock, RW_READER);
+	dmu_buf_impl_t *db = dbuf_hold_level(dn, level, blkid, FTAG);
+	rw_exit(&dn->dn_struct_rwlock);
+	if (db == NULL)
+		return (SET_ERROR(EIO));
+	int error = dbuf_read(db, NULL, DB_RF_CANFAIL | DB_RF_NOPREFETCH |
+	    DB_RF_NO_DECRYPT);
+	if (error != 0) {
+		dbuf_rele(db, FTAG);
+		return (error);
+	}
+
+	int nbps = db->db.db_size >> SPA_BLKPTRSHIFT;
+	blkptr_t *bps = kmem_alloc(db->db.db_size, KM_SLEEP);
+	rw_enter(&db->db_rwlock, RW_READER);
+	memcpy(bps, db->db.db_data, db->db.db_size);
+	rw_exit(&db->db_rwlock);
+	dbuf_rele(db, FTAG);
+
+	for (int i = 0; error == 0 && i < nbps; i++) {
+		error = vdev_dnode_tree_check(dn, &bps[i], level - 1,
+		    blkid * nbps + i, vdev_id);
+	}
+	kmem_free(bps, nbps << SPA_BLKPTRSHIFT);
+	return (error);
+}
+
+static int
+vdev_dnode_check(dnode_t *dn, uint64_t vdev_id)
+{
+	blkptr_t bps[DN_MAX_NBLKPTR];
+	blkptr_t spill;
+	boolean_t has_spill;
+	int nbps, level;
+	int error = 0;
+
+	rw_enter(&dn->dn_struct_rwlock, RW_READER);
+	nbps = dn->dn_phys->dn_nblkptr;
+	level = dn->dn_phys->dn_nlevels - 1;
+	memcpy(bps, dn->dn_phys->dn_blkptr, nbps * sizeof (blkptr_t));
+	has_spill = (dn->dn_phys->dn_flags & DNODE_FLAG_SPILL_BLKPTR) != 0;
+	if (has_spill)
+		spill = *DN_SPILL_BLKPTR(dn->dn_phys);
+	rw_exit(&dn->dn_struct_rwlock);
+
+	if (has_spill && vdev_bp_has_copy_on(&spill, vdev_id))
+		return (SET_ERROR(EEXIST));
+	for (int i = 0; error == 0 && i < nbps; i++)
+		error = vdev_dnode_tree_check(dn, &bps[i], level, i, vdev_id);
+	return (error);
+}
+
+/*
+ * Look for a block with a copy on the vdev in a file system or volume,
+ * which may be written meanwhile: its objset block, the trees of the
+ * meta-dnode and of the accounting objects, and those of every object.
+ * Blocks written since the last txg that are not synced yet have no copy
+ * anywhere, and the ZIL is not looked at: its blocks are freed once their
+ * txg is synced.  Returns EEXIST if one is found.
+ */
+static int
+vdev_head_check(dsl_dataset_t *ds, objset_t *os, uint64_t vdev_id)
+{
+	dnode_t *special[] = { DMU_META_DNODE(os), DMU_USERUSED_DNODE(os),
+	    DMU_GROUPUSED_DNODE(os), DMU_PROJECTUSED_DNODE(os) };
+	blkptr_t rootbp = *dsl_dataset_get_blkptr(ds);
+	int error = 0;
+
+	if (vdev_bp_has_copy_on(&rootbp, vdev_id))
+		return (SET_ERROR(EEXIST));
+	for (int i = 0; error == 0 && i < ARRAY_SIZE(special); i++) {
+		if (special[i] != NULL)
+			error = vdev_dnode_check(special[i], vdev_id);
+	}
+
+	for (uint64_t obj = 0; error == 0; ) {
+		dnode_t *dn;
+
+		if (issig())
+			return (SET_ERROR(EINTR));
+		error = dmu_object_next(os, &obj, B_FALSE, 0);
+		if (error != 0) {
+			if (error == ESRCH)
+				error = 0;
+			break;
+		}
+		error = dnode_hold(os, obj, FTAG, &dn);
+		if (error != 0) {
+			/* Freed meanwhile. */
+			if (error == ENOENT)
+				error = 0;
+			continue;
+		}
+		error = vdev_dnode_check(dn, vdev_id);
+		dnode_rele(dn, FTAG);
+	}
+	return (error);
+}
+
+/*
+ * Add to snaps the name of every snapshot of the pool that refers to a
+ * block with a copy on the top-level vdev of the given guid, and to heads
+ * the name of every file system or volume that does.  Such a block stays
+ * allocated as long as one of them exists, which keeps the vdev from being
+ * emptied.  A file system or volume that could not be read is added to
+ * unchecked with the error.  Each dataset is read until its first block on
+ * the vdev, without the pool config lock, as zfs send reads a snapshot.
+ * Snapshots are read without decrypting anything; file systems and volumes
+ * need their key.
+ */
+int
+spa_vdev_snapshots(const char *pool, uint64_t guid, nvlist_t *snaps,
+    nvlist_t *heads, nvlist_t *unchecked)
+{
+	vdev_snapshots_arg_t vsa = { 0 };
+	dsl_pool_t *dp;
+	spa_t *spa;
+	uint64_t vdev_id;
+	int error;
+
+	error = dsl_pool_hold(pool, FTAG, &dp);
+	if (error != 0)
+		return (error);
+	spa = dp->dp_spa;
+
+	spa_config_enter(spa, SCL_VDEV, FTAG, RW_READER);
+	vdev_t *vd = spa_lookup_by_guid(spa, guid, B_FALSE);
+	if (vd == NULL || vd->vdev_ishole)
+		error = SET_ERROR(ENOENT);
+	else if (vd != vd->vdev_top)
+		error = SET_ERROR(ENOTSUP);
+	else
+		vdev_id = vd->vdev_id;
+	spa_config_exit(spa, SCL_VDEV, FTAG);
+
+	if (error == 0) {
+		error = dmu_objset_find_dp(dp, dp->dp_root_dir_obj,
+		    vdev_snapshots_collect_cb, &vsa,
+		    DS_FIND_CHILDREN | DS_FIND_SNAPSHOTS | DS_FIND_SERIALIZE);
+	}
+	dsl_pool_rele(dp, FTAG);
+
+	char *name = kmem_alloc(ZFS_MAX_DATASET_NAME_LEN, KM_SLEEP);
+	for (uint64_t i = 0; error == 0 && i < vsa.vsa_count; i++) {
+		dsl_dataset_t *ds;
+
+		error = dsl_pool_hold(pool, FTAG, &dp);
+		if (error != 0)
+			break;
+		error = dsl_dataset_hold_obj(dp, vsa.vsa_objs[i], FTAG, &ds);
+		if (error != 0) {
+			dsl_pool_rele(dp, FTAG);
+			/* Destroyed meanwhile. */
+			if (error == ENOENT)
+				error = 0;
+			continue;
+		}
+		dsl_dataset_name(ds, name);
+		boolean_t snapshot = ds->ds_is_snapshot;
+		objset_t *os = NULL;
+		if (!snapshot)
+			error = dmu_objset_from_ds(ds, &os);
+		dsl_dataset_long_hold(ds, FTAG);
+		dsl_pool_rele(dp, FTAG);
+
+		if (snapshot) {
+			error = traverse_dataset(ds, 0, TRAVERSE_PRE |
+			    TRAVERSE_PREFETCH_METADATA | TRAVERSE_NO_DECRYPT,
+			    vdev_snapshots_visit_cb, &vdev_id);
+		} else if (error == 0) {
+			error = vdev_head_check(ds, os, vdev_id);
+		}
+
+		dsl_dataset_long_rele(ds, FTAG);
+		dsl_dataset_rele(ds, FTAG);
+
+		if (error == EEXIST) {
+			fnvlist_add_boolean(snapshot ? snaps : heads, name);
+			error = 0;
+		} else if (error != 0 && error != EINTR && !snapshot) {
+			fnvlist_add_int32(unchecked, name, error);
+			error = 0;
+		}
+	}
+	kmem_free(name, ZFS_MAX_DATASET_NAME_LEN);
+
+	if (vsa.vsa_size != 0)
+		kmem_free(vsa.vsa_objs, vsa.vsa_size * sizeof (uint64_t));
+
+	return (error);
 }
 
 ZFS_MODULE_PARAM(zfs_vdev, zfs_, removal_ignore_errors, INT, ZMOD_RW,

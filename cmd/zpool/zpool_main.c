@@ -138,7 +138,8 @@ enum zpool_options {
 	ZPOOL_OPTION_POOL_KEY_GUID,
 	ZPOOL_OPTION_JSON_NUMS_AS_INT,
 	ZPOOL_OPTION_JSON_FLAT_VDEVS,
-	ZPOOL_OPTION_CONDENSE_LIST_TYPES
+	ZPOOL_OPTION_CONDENSE_LIST_TYPES,
+	ZPOOL_OPTION_DESTROY_SNAPSHOTS
 };
 
 typedef enum {
@@ -491,7 +492,9 @@ get_usage(zpool_help_t idx)
 		return ("\treplace [-fsw] [-o property=value] "
 		    "<pool> <device> [new-device]\n");
 	case HELP_REMOVE:
-		return ("\tremove [-npsw] <pool> <device> ...\n");
+		return ("\tremove [-npw] [--destroy-snapshots] <pool> "
+		    "<device> ...\n"
+		    "\tremove -s <pool>\n");
 	case HELP_REOPEN:
 		return ("\treopen [-n] <pool>\n");
 	case HELP_INITIALIZE:
@@ -1646,7 +1649,193 @@ zpool_do_add(int argc, char **argv)
 }
 
 /*
- * zpool remove [-npsw] <pool> <vdev> ...
+ * Set *result to the snapshots, file systems and volumes that keep blocks on
+ * the top-level vdev path (see lzc_vdev_snapshots()).  Spares and cache
+ * devices hold no block.
+ */
+static int
+remove_vdev_snapshots(zpool_handle_t *zhp, const char *path,
+    nvlist_t **result)
+{
+	boolean_t spare, l2cache, log;
+	nvlist_t *tgt;
+	int err;
+
+	*result = NULL;
+	if ((tgt = zpool_find_vdev(zhp, path, &spare, &l2cache,
+	    &log)) == NULL) {
+		(void) fprintf(stderr, "cannot remove %s: no such device in "
+		    "pool\n", path);
+		return (1);
+	}
+	if (spare || l2cache) {
+		*result = fnvlist_alloc();
+		return (0);
+	}
+
+	err = lzc_vdev_snapshots(zpool_get_name(zhp),
+	    fnvlist_lookup_uint64(tgt, ZPOOL_CONFIG_GUID), result);
+	if (err != 0) {
+		fnvlist_free(*result);
+		*result = NULL;
+		(void) fprintf(stderr, "cannot find the snapshots that keep "
+		    "blocks on %s: %s\n", path,
+		    err == ENOTSUP ? "not a top-level vdev" :
+		    err == ZFS_ERR_IOC_CMD_UNAVAIL ?
+		    "not supported by the kernel module" :
+		    strerror(err));
+		return (1);
+	}
+	return (0);
+}
+
+/* The names in the list key of result, which may be missing. */
+static nvlist_t *
+remove_result_list(nvlist_t *result, const char *key)
+{
+	nvlist_t *list;
+
+	if (nvlist_lookup_nvlist(result, key, &list) != 0)
+		return (NULL);
+	return (nvlist_empty(list) ? NULL : list);
+}
+
+/*
+ * Print the file systems and volumes that keep blocks on the vdev path, or
+ * that could not be checked, to stream.  Returns how many there are.
+ */
+static int
+remove_print_heads(FILE *stream, const char *path, nvlist_t *result)
+{
+	nvlist_t *heads = remove_result_list(result,
+	    ZPOOL_VDEV_SNAPSHOTS_HEADS);
+	nvlist_t *unchecked = remove_result_list(result,
+	    ZPOOL_VDEV_SNAPSHOTS_UNCHECKED);
+	int n = 0;
+
+	if (heads != NULL) {
+		(void) fprintf(stream, "File systems and volumes that keep "
+		    "blocks on %s:\n", path);
+		for (nvpair_t *pair = nvlist_next_nvpair(heads, NULL);
+		    pair != NULL; pair = nvlist_next_nvpair(heads, pair), n++)
+			(void) fprintf(stream, "\t%s\n", nvpair_name(pair));
+	}
+	if (unchecked != NULL) {
+		(void) fprintf(stream, "File systems and volumes that could "
+		    "not be checked:\n");
+		for (nvpair_t *pair = nvlist_next_nvpair(unchecked, NULL);
+		    pair != NULL;
+		    pair = nvlist_next_nvpair(unchecked, pair), n++) {
+			(void) fprintf(stream, "\t%s: %s\n",
+			    nvpair_name(pair),
+			    strerror(fnvpair_value_int32(pair)));
+		}
+	}
+	return (n);
+}
+
+static void
+remove_print_snapshots(const char *path, nvlist_t *result)
+{
+	nvlist_t *snaps = remove_result_list(result,
+	    ZPOOL_VDEV_SNAPSHOTS_LIST);
+
+	if (snaps == NULL) {
+		(void) printf("No snapshot keeps blocks on %s\n", path);
+	} else {
+		(void) printf("Snapshots that keep blocks on %s, which "
+		    "--destroy-snapshots destroys:\n", path);
+		for (nvpair_t *pair = nvlist_next_nvpair(snaps, NULL);
+		    pair != NULL; pair = nvlist_next_nvpair(snaps, pair))
+			(void) printf("\t%s\n", nvpair_name(pair));
+	}
+	if (remove_print_heads(stdout, path, result) != 0) {
+		(void) printf("--destroy-snapshots refuses to destroy any "
+		    "snapshot while these are listed.\n");
+	}
+}
+
+/*
+ * Destroy the snapshots that keep blocks on the vdev path, all of them or
+ * none, and wait until their blocks are free.
+ */
+static int
+remove_destroy_snapshots(zpool_handle_t *zhp, const char *path,
+    nvlist_t *result)
+{
+	nvlist_t *snaps = remove_result_list(result,
+	    ZPOOL_VDEV_SNAPSHOTS_LIST);
+	boolean_t force = B_FALSE;
+	int refused = 0;
+
+	if (snaps == NULL)
+		return (0);
+
+	/*
+	 * A snapshot destroyed while a file system or volume still keeps
+	 * blocks on the device would be destroyed for nothing.
+	 */
+	if (remove_print_heads(stderr, path, result) != 0) {
+		(void) fprintf(stderr, "cannot remove %s: file systems or "
+		    "volumes keep blocks on it, no snapshot was destroyed\n",
+		    path);
+		return (1);
+	}
+
+	for (nvpair_t *pair = nvlist_next_nvpair(snaps, NULL); pair != NULL;
+	    pair = nvlist_next_nvpair(snaps, pair)) {
+		const char *name = nvpair_name(pair);
+		zfs_handle_t *zfhp;
+
+		/* $ORIGIN@$ORIGIN, which every file system descends from. */
+		if (strchr(name, '$') != NULL) {
+			(void) fprintf(stderr, "cannot destroy %s: it "
+			    "is part of the pool\n", name);
+			refused++;
+			continue;
+		}
+		if ((zfhp = zfs_open(g_zfs, name, ZFS_TYPE_SNAPSHOT)) == NULL) {
+			refused++;
+			continue;
+		}
+		if (zfs_prop_get_int(zfhp, ZFS_PROP_NUMCLONES) != 0) {
+			(void) fprintf(stderr, "cannot destroy %s: it "
+			    "has clones\n", name);
+			refused++;
+		} else if (zfs_prop_get_int(zfhp, ZFS_PROP_USERREFS) != 0) {
+			(void) fprintf(stderr, "cannot destroy %s: it "
+			    "has user holds\n", name);
+			refused++;
+		}
+		zfs_close(zfhp);
+	}
+	if (refused != 0) {
+		(void) fprintf(stderr, "cannot remove %s: no snapshot "
+		    "was destroyed\n", path);
+		return (1);
+	}
+
+	if (zfs_destroy_snaps_nvl(g_zfs, snaps, B_FALSE) != 0)
+		return (1);
+	(void) printf("Destroyed %zu snapshots that kept blocks on "
+	    "%s\n", fnvlist_num_pairs(snaps), path);
+
+	/*
+	 * Wait for the blocks to be freed, then for a few txgs, so that the
+	 * deferred frees are back in the space maps of the vdev.
+	 */
+	if (zpool_wait(zhp, ZPOOL_WAIT_FREE) != 0)
+		return (1);
+	for (int i = 0; i < 4; i++) {
+		if (zpool_sync_one(zhp, &force) != 0)
+			return (1);
+	}
+	return (0);
+}
+
+/*
+ * zpool remove [-npw] [--destroy-snapshots] <pool> <vdev> ...
+ * zpool remove -s <pool>
  *
  * Removes the given vdev from the pool.
  */
@@ -1661,10 +1850,22 @@ zpool_do_remove(int argc, char **argv)
 	boolean_t noop = B_FALSE;
 	boolean_t parsable = B_FALSE;
 	boolean_t wait = B_FALSE;
+	boolean_t destroy_snaps = B_FALSE;
+	nvlist_t *snaps = NULL;
+
+	struct option long_options[] = {
+		{"destroy-snapshots", no_argument, NULL,
+		    ZPOOL_OPTION_DESTROY_SNAPSHOTS},
+		{0, 0, 0, 0}
+	};
 
 	/* check options */
-	while ((c = getopt(argc, argv, "npsw")) != -1) {
+	while ((c = getopt_long(argc, argv, "npsw", long_options,
+	    NULL)) != -1) {
 		switch (c) {
+		case ZPOOL_OPTION_DESTROY_SNAPSHOTS:
+			destroy_snaps = B_TRUE;
+			break;
 		case 'n':
 			noop = B_TRUE;
 			break;
@@ -1709,6 +1910,12 @@ zpool_do_remove(int argc, char **argv)
 			(void) fprintf(stderr, "too many arguments\n");
 			usage(B_FALSE);
 		}
+		if (destroy_snaps) {
+			(void) fprintf(stderr, "invalid option "
+			    "combination: --destroy-snapshots cannot be used "
+			    "with -s\n");
+			usage(B_FALSE);
+		}
 		if (zpool_vdev_remove_cancel(zhp) != 0)
 			ret = 1;
 		if (wait) {
@@ -1723,6 +1930,14 @@ zpool_do_remove(int argc, char **argv)
 		}
 
 		for (i = 1; i < argc; i++) {
+			if (destroy_snaps) {
+				fnvlist_free(snaps);
+				if (remove_vdev_snapshots(zhp, argv[i],
+				    &snaps) != 0) {
+					ret = 1;
+					break;
+				}
+			}
 			if (noop) {
 				uint64_t size;
 
@@ -1742,11 +1957,20 @@ zpool_do_remove(int argc, char **argv)
 					    "used after removing %s: %s\n",
 					    argv[i], valstr);
 				}
+				if (destroy_snaps)
+					remove_print_snapshots(argv[i], snaps);
 			} else {
+				if (destroy_snaps &&
+				    remove_destroy_snapshots(zhp, argv[i],
+				    snaps) != 0) {
+					ret = 1;
+					break;
+				}
 				if (zpool_vdev_remove(zhp, argv[i]) != 0)
 					ret = 1;
 			}
 		}
+		fnvlist_free(snaps);
 
 		if (ret == 0 && wait)
 			ret = zpool_wait(zhp, ZPOOL_WAIT_REMOVE);

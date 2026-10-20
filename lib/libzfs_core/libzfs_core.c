@@ -2077,6 +2077,26 @@ lzc_get_bootenv(const char *pool, nvlist_t **outnvl)
 }
 
 /*
+ * List the snapshots, file systems and volumes that refer to a block on the
+ * top-level vdev of the given guid.  On success, *outnvl holds three nvlists
+ * of names: ZPOOL_VDEV_SNAPSHOTS_LIST and ZPOOL_VDEV_SNAPSHOTS_HEADS as
+ * boolean pairs, and ZPOOL_VDEV_SNAPSHOTS_UNCHECKED, the file systems and
+ * volumes that could not be read, with the error as int32.
+ */
+int
+lzc_vdev_snapshots(const char *pool, uint64_t vdev_guid, nvlist_t **outnvl)
+{
+	nvlist_t *args = fnvlist_alloc();
+	int error;
+
+	fnvlist_add_uint64(args, ZPOOL_VDEV_SNAPSHOTS_VDEV, vdev_guid);
+	error = lzc_ioctl(ZFS_IOC_VDEV_SNAPSHOTS, pool, args, outnvl);
+	fnvlist_free(args);
+
+	return (error);
+}
+
+/*
  * Prune the specified amount from the pool's dedup table.
  */
 int
