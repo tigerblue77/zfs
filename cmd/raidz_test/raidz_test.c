@@ -124,6 +124,8 @@ static void usage(boolean_t requested)
 	    "\t[-n random erasure sets per sampled case (default: %llu)]\n"
 	    "\t[-g random seed for -c (default: %u)]\n"
 	    "\t[-V use generators 1, 2, 4, 8... instead of Cauchy]\n"
+	    "\t[-k kernel rebuilding for -c: swar, table, avx2, avx512bw,\n"
+	    "\t    gfni, gfni512, simd or all (default: table)]\n"
 	    "",
 	    o->rto_ashift,				/* -a */
 	    ilog2(o->rto_offset),			/* -o */
@@ -150,7 +152,7 @@ static void process_options(int argc, char **argv)
 	memcpy(o, &rto_opts_defaults, sizeof (*o));
 
 	while ((opt = getopt(argc, argv,
-	    "TDBSVcvha:er:o:d:s:t:m:w:n:g:")) != -1) {
+	    "TDBSVcvha:er:o:d:s:t:m:w:n:g:k:")) != -1) {
 		switch (opt) {
 		case 'a':
 			value = strtoull(optarg, NULL, 0);
@@ -213,6 +215,9 @@ static void process_options(int argc, char **argv)
 			break;
 		case 'V':
 			o->rto_ec_vand = 1;
+			break;
+		case 'k':
+			o->rto_ec_kernel_name = optarg;
 			break;
 		case 'h':
 			usage(B_TRUE);
@@ -865,6 +870,21 @@ main(int argc, char **argv)
 
 	if (rto_opts.rto_ec) {
 		rzec_init();
+		if (rto_opts.rto_ec_kernel_name != NULL) {
+			rto_opts.rto_ec_kernel =
+			    rzec_kernel_lookup(rto_opts.rto_ec_kernel_name);
+			if (rto_opts.rto_ec_kernel == -3) {
+				ERR("unknown kernel %s\n",
+				    rto_opts.rto_ec_kernel_name);
+				exit(1);
+			}
+			if (rto_opts.rto_ec_kernel >= 0 &&
+			    !rzec_kernel_available(rto_opts.rto_ec_kernel)) {
+				ERR("kernel %s is unknown or unavailable\n",
+				    rto_opts.rto_ec_kernel_name);
+				exit(1);
+			}
+		}
 		if (rto_opts.rto_benchmark)
 			run_rzec_benchmark();
 		else

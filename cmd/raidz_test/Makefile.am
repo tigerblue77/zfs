@@ -8,6 +8,9 @@ CPPCHECKTARGETS += raidz_test
 raidz_test_SOURCES = \
 	%D%/raidz_bench.c \
 	%D%/raidz_ec.c \
+	%D%/raidz_ec_simd.c \
+	%D%/raidz_ec_simd.h \
+	%D%/raidz_ec_simd_impl.h \
 	%D%/raidz_test.c \
 	%D%/raidz_test.h
 

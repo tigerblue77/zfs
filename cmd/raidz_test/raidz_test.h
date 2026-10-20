@@ -58,6 +58,8 @@ typedef struct raidz_test_opts {
 	size_t rto_ec_vand;
 	uint64_t rto_ec_samples;
 	unsigned rto_ec_seed;
+	int rto_ec_kernel;
+	const char *rto_ec_kernel_name;
 
 	/* non-user options */
 	boolean_t rto_should_stop;
@@ -84,6 +86,7 @@ static const raidz_test_opts_t rto_opts_defaults = {
 	.rto_ec_vand = 0,
 	.rto_ec_samples = 2000,
 	.rto_ec_seed = 1,
+	.rto_ec_kernel = 1,	/* RZEC_KERNEL_TABLE */
 	.rto_should_stop = B_FALSE
 };
 
@@ -130,14 +133,20 @@ typedef enum rzec_code {
 	RZEC_VAND,
 } rzec_code_t;
 
-typedef enum rzec_kernel {
-	RZEC_KERNEL_SWAR,
-	RZEC_KERNEL_TABLE,
-} rzec_kernel_t;
+/* The scalar kernels, then one per entry of rzec_simd_impls[]. */
+typedef int rzec_kernel_t;
+#define	RZEC_KERNEL_ALL		(-1)
+#define	RZEC_KERNEL_ALLSIMD	(-2)
+#define	RZEC_KERNEL_SWAR	0
+#define	RZEC_KERNEL_TABLE	1
+#define	RZEC_KERNEL_SIMD	2
 
 void rzec_init(void);
 void rzec_set_kernel(rzec_kernel_t);
+int rzec_nkernels(void);
+boolean_t rzec_kernel_available(rzec_kernel_t);
 const char *rzec_kernel_name(rzec_kernel_t);
+rzec_kernel_t rzec_kernel_lookup(const char *);
 const char *rzec_code_name(rzec_code_t);
 int rzec_max_data(rzec_code_t);
 void rzec_generate(raidz_map_t *, rzec_code_t);

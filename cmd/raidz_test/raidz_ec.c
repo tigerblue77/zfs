@@ -42,8 +42,10 @@
 #include <sys/abd.h>
 #include <sys/vdev_raidz.h>
 #include <sys/vdev_raidz_impl.h>
+#include <sys/simd.h>
 #include <stdio.h>
 #include "raidz_test.h"
+#include "raidz_ec_simd.h"
 
 #define	RZEC_MAXCOLS	256
 #define	RZEC_CHUNK	1024
@@ -54,6 +56,7 @@
 /* rzec_mul_lt[c][a] = c * a, built from vdev_raidz_pow2/log2. */
 static uint8_t rzec_mul_lt[256][256] __attribute__((aligned(256)));
 static uint8_t rzec_cauchy[RZEC_MAXPARITY][RZEC_MAXCOLS];
+static struct rzec_row *rzec_rw;
 
 const char *
 rzec_code_name(rzec_code_t code)
@@ -83,6 +86,7 @@ rzec_init(void)
 			rzec_cauchy[r][j] = (s == 0) ? 0 : gf_div(y, s);
 		}
 	}
+	rzec_simd_init((const uint8_t (*)[256])rzec_mul_lt);
 }
 
 /* Coefficient of data column j (of k) in parity row r. */
@@ -147,7 +151,8 @@ rzec_mul_acc(uint8_t *restrict dst, const uint8_t *restrict src, size_t n,
 }
 
 /*
- * Two scalar kernels for dst[d] ^= c[d] * src, d < nd, sharing one source:
+ * Two scalar kernels for dst[d] ^= c[d] * src, d < nd, sharing one source
+ * (the SIMD ones, in raidz_ec_simd.c, compute whole dot products instead):
  *
  * RZEC_KERNEL_TABLE looks every byte up in rzec_mul_lt, once per
  * destination.
@@ -161,16 +166,74 @@ rzec_mul_acc(uint8_t *restrict dst, const uint8_t *restrict src, size_t n,
  */
 static rzec_kernel_t rzec_kernel = RZEC_KERNEL_TABLE;
 
+/* The SIMD kernel selected, or NULL for a scalar one. */
+static const rzec_simd_t *rzec_simd;
+
 void
 rzec_set_kernel(rzec_kernel_t kernel)
 {
+	VERIFY(rzec_kernel_available(kernel));
 	rzec_kernel = kernel;
+	rzec_simd = kernel >= RZEC_KERNEL_SIMD ?
+	    rzec_simd_impls[kernel - RZEC_KERNEL_SIMD] : NULL;
+}
+
+int
+rzec_nkernels(void)
+{
+	return (RZEC_KERNEL_SIMD + rzec_simd_nimpls);
+}
+
+boolean_t
+rzec_kernel_available(rzec_kernel_t kernel)
+{
+	if (kernel < 0 || kernel >= rzec_nkernels())
+		return (B_FALSE);
+	if (kernel < RZEC_KERNEL_SIMD)
+		return (B_TRUE);
+	return (rzec_simd_impls[kernel - RZEC_KERNEL_SIMD]->rs_available() ?
+	    B_TRUE : B_FALSE);
 }
 
 const char *
 rzec_kernel_name(rzec_kernel_t kernel)
 {
-	return (kernel == RZEC_KERNEL_SWAR ? "swar" : "table");
+	if (kernel == RZEC_KERNEL_SWAR)
+		return ("swar");
+	if (kernel == RZEC_KERNEL_TABLE)
+		return ("table");
+	if (kernel >= RZEC_KERNEL_SIMD && kernel < rzec_nkernels())
+		return (rzec_simd_impls[kernel - RZEC_KERNEL_SIMD]->rs_name);
+	return ("?");
+}
+
+/* Kernel by name, or "all", or "simd" (all SIMD ones); -3 if unknown. */
+rzec_kernel_t
+rzec_kernel_lookup(const char *name)
+{
+	if (strcmp(name, "all") == 0)
+		return (RZEC_KERNEL_ALL);
+	if (strcmp(name, "simd") == 0)
+		return (RZEC_KERNEL_ALLSIMD);
+	for (int k = 0; k < rzec_nkernels(); k++)
+		if (strcmp(name, rzec_kernel_name(k)) == 0)
+			return (k);
+	return (-3);
+}
+
+/* Whether -k selects kernel k for rebuilding. */
+static boolean_t
+rzec_kernel_selected(rzec_kernel_t k)
+{
+	int sel = rto_opts.rto_ec_kernel;
+
+	if (!rzec_kernel_available(k))
+		return (B_FALSE);
+	if (sel == RZEC_KERNEL_ALL)
+		return (B_TRUE);
+	if (sel == RZEC_KERNEL_ALLSIMD)
+		return (k >= RZEC_KERNEL_SIMD);
+	return (k == sel);
 }
 
 static inline uint64_t
@@ -239,6 +302,24 @@ rzec_mad(uint8_t *const *dst, const uint8_t *c, int nd, const uint8_t *src,
 }
 
 /*
+ * Inputs and outputs of one dot product, dst[d] = sum_j c[d][j] * src[j],
+ * each column with its own length (bytes past it count as zero).
+ */
+typedef struct rzec_dot {
+	int		dt_nd;
+	int		dt_ns;
+	uint8_t		*dt_dst[RZEC_MAXPARITY];
+	size_t		dt_dlen[RZEC_MAXPARITY];
+	const uint8_t	*dt_src[RZEC_MAXCOLS];
+	size_t		dt_slen[RZEC_MAXCOLS];
+	uint8_t		dt_c[RZEC_MAXPARITY][RZEC_MAXCOLS];
+	/* scratch of rzec_dot_run() */
+	size_t		dt_cut[RZEC_MAXCOLS + RZEC_MAXPARITY];
+	const uint8_t	*dt_rsrc[RZEC_MAXCOLS];
+	int		dt_ssel[RZEC_MAXCOLS];
+} rzec_dot_t;
+
+/*
  * Per-row view of the columns as flat buffers.  Linear ABDs are used in
  * place; any other ABD is borrowed with a copy and returned afterwards.
  */
@@ -254,7 +335,19 @@ typedef struct rzec_row {
 	uint8_t		rw_syn[RZEC_MAXPARITY][RZEC_CHUNK];
 	uint8_t		rw_sol[RZEC_MAXPARITY][RZEC_CHUNK];
 	boolean_t	rw_lost[RZEC_MAXCOLS];
+	rzec_dot_t	rw_dot;
+	uint8_t		rw_tab[RZEC_MAXPARITY * RZEC_MAXCOLS * 32]
+	    __attribute__((aligned(64)));
 } rzec_row_t;
+
+/* raidz_test runs the prototype on one thread, so one context serves. */
+static rzec_row_t *
+rzec_row_get(void)
+{
+	if (rzec_rw == NULL)
+		rzec_rw = kmem_alloc(sizeof (*rzec_rw), KM_SLEEP);
+	return (rzec_rw);
+}
 
 static void
 rzec_row_enter(rzec_row_t *rw, raidz_row_t *rr, rzec_code_t code)
@@ -316,6 +409,169 @@ rzec_clip(size_t size, size_t off, size_t len)
 	return (MIN(size - off, len));
 }
 
+static int
+rzec_cmp_size(const void *a, const void *b)
+{
+	size_t x = *(const size_t *)a, y = *(const size_t *)b;
+
+	return (x < y ? -1 : x > y);
+}
+
+/*
+ * Run a dot product with the selected SIMD kernel.  Columns differ in
+ * length by whole sectors, so the offsets are cut at every distinct
+ * length into regions over which the same columns take part.  In each
+ * region, one output whose coefficients are all 1 (P, or a lone lost data
+ * column) is a plain XOR.  A region whose length is not a multiple of the
+ * kernel's step, which a RAID-Z map does not produce, is done in scalar.
+ */
+static void
+rzec_dot_run(rzec_dot_t *dt, uint8_t *tab)
+{
+	const rzec_simd_t *impl = rzec_simd;
+	const size_t ts = impl->rs_tabsize;
+	size_t *cut = dt->dt_cut;
+	int ncut = 0;
+	size_t a = 0;
+
+	for (int d = 0; d < dt->dt_nd; d++)
+		cut[ncut++] = dt->dt_dlen[d];
+	for (int j = 0; j < dt->dt_ns; j++)
+		cut[ncut++] = dt->dt_slen[j];
+	qsort(cut, ncut, sizeof (size_t), rzec_cmp_size);
+
+	kfpu_begin();
+	for (int q = 0; q < ncut; q++) {
+		size_t b = cut[q], len = b - a;
+		uint8_t *dst[RZEC_MAXPARITY];
+		const uint8_t **src = dt->dt_rsrc;
+		int dsel[RZEC_MAXPARITY], *ssel = dt->dt_ssel;
+		int nd = 0, ns = 0, nx = 0;
+
+		if (b <= a)
+			continue;
+		for (int d = 0; d < dt->dt_nd; d++)
+			if (dt->dt_dlen[d] >= b)
+				dsel[nd++] = d;
+		for (int j = 0; j < dt->dt_ns; j++)
+			if (dt->dt_slen[j] >= b)
+				ssel[ns++] = j;
+		if (nd == 0)
+			break;
+
+		for (int e = 0; e < nd && nx == 0; e++) {
+			boolean_t ones = B_TRUE;
+			for (int i = 0; i < ns && ones; i++)
+				ones = dt->dt_c[dsel[e]][ssel[i]] == 1;
+			if (ones) {
+				int t = dsel[0];
+				dsel[0] = dsel[e];
+				dsel[e] = t;
+				nx = 1;
+			}
+		}
+		for (int e = 0; e < nd; e++)
+			dst[e] = dt->dt_dst[dsel[e]] + a;
+		for (int i = 0; i < ns; i++)
+			src[i] = dt->dt_src[ssel[i]] + a;
+
+		if (len % impl->rs_step != 0) {
+			for (int e = 0; e < nd; e++) {
+				memset(dst[e], 0, len);
+				for (int i = 0; i < ns; i++)
+					rzec_mul_acc(dst[e], src[i], len,
+					    dt->dt_c[dsel[e]][ssel[i]]);
+			}
+			a = b;
+			continue;
+		}
+
+		for (int i = 0; i < ns; i++)
+			for (int e = nx; e < nd; e++)
+				memcpy(tab + (i * (nd - nx) + e - nx) * ts,
+				    impl->rs_tab +
+				    dt->dt_c[dsel[e]][ssel[i]] * ts, ts);
+		impl->rs_dot(dst, nx, nd - nx, src, ns, tab, len);
+		a = b;
+	}
+	kfpu_end();
+}
+
+/* The parity rows in `rows' from the data columns, in one pass. */
+static void
+rzec_encode_simd(rzec_row_t *rw, uint64_t rows)
+{
+	rzec_dot_t *dt = &rw->rw_dot;
+	const int m = rw->rw_m, k = rw->rw_k;
+	int row[RZEC_MAXPARITY];
+
+	dt->dt_nd = 0;
+	dt->dt_ns = 0;
+	for (int r = 0; r < m; r++) {
+		if (!(rows & (1ULL << r)))
+			continue;
+		row[dt->dt_nd] = r;
+		dt->dt_dst[dt->dt_nd] = rw->rw_buf[r];
+		dt->dt_dlen[dt->dt_nd] = rw->rw_size[r];
+		dt->dt_nd++;
+	}
+	for (int j = 0; j < k; j++) {
+		int s = dt->dt_ns;
+		if (rw->rw_size[m + j] == 0)
+			continue;
+		dt->dt_src[s] = rw->rw_buf[m + j];
+		dt->dt_slen[s] = rw->rw_size[m + j];
+		for (int d = 0; d < dt->dt_nd; d++)
+			dt->dt_c[d][s] = rw->rw_a[row[d]][j];
+		dt->dt_ns++;
+	}
+	rzec_dot_run(dt, rw->rw_tab);
+}
+
+/*
+ * The lost data columns straight from the surviving columns: with
+ * B = A[use][lost], D_lost = B^-1 * (P_use + A[use][survivors] * D_surv),
+ * so the coefficient of P_use[i] is B^-1[l][i] and that of a surviving
+ * D_j is sum_i B^-1[l][i] * A[use[i]][j].  One pass, no syndrome buffer.
+ */
+static void
+rzec_rebuild_simd(rzec_row_t *rw, const int *use, const int *lost,
+    int nlost, uint8_t binv[RZEC_MAXPARITY][RZEC_MAXPARITY])
+{
+	rzec_dot_t *dt = &rw->rw_dot;
+	const int m = rw->rw_m, k = rw->rw_k;
+
+	dt->dt_nd = nlost;
+	dt->dt_ns = 0;
+	for (int l = 0; l < nlost; l++) {
+		dt->dt_dst[l] = rw->rw_buf[m + lost[l]];
+		dt->dt_dlen[l] = rw->rw_size[m + lost[l]];
+	}
+	for (int i = 0; i < nlost; i++) {
+		int s = dt->dt_ns++;
+		dt->dt_src[s] = rw->rw_buf[use[i]];
+		dt->dt_slen[s] = rw->rw_size[use[i]];
+		for (int l = 0; l < nlost; l++)
+			dt->dt_c[l][s] = binv[l][i];
+	}
+	for (int j = 0; j < k; j++) {
+		int s = dt->dt_ns;
+		if (rw->rw_lost[m + j] || rw->rw_size[m + j] == 0)
+			continue;
+		dt->dt_src[s] = rw->rw_buf[m + j];
+		dt->dt_slen[s] = rw->rw_size[m + j];
+		for (int l = 0; l < nlost; l++) {
+			uint8_t c = 0;
+			for (int i = 0; i < nlost; i++)
+				c ^= rzec_mul_lt[binv[l][i]]
+				    [rw->rw_a[use[i]][j]];
+			dt->dt_c[l][s] = c;
+		}
+		dt->dt_ns++;
+	}
+	rzec_dot_run(dt, rw->rw_tab);
+}
+
 /*
  * Compute the parity rows in `rows' (a bit mask) from the data columns.
  * Each chunk of the parities stays in cache while every data column is
@@ -330,6 +586,10 @@ rzec_encode(rzec_row_t *rw, uint64_t rows)
 	int row[RZEC_MAXPARITY];
 	int nd = 0;
 
+	if (rzec_simd != NULL) {
+		rzec_encode_simd(rw, rows);
+		return;
+	}
 	for (int r = 0; r < m; r++)
 		if (rows & (1ULL << r))
 			row[nd++] = r;
@@ -355,7 +615,7 @@ rzec_encode(rzec_row_t *rw, uint64_t rows)
 void
 rzec_generate(raidz_map_t *rm, rzec_code_t code)
 {
-	rzec_row_t *rw = kmem_alloc(sizeof (*rw), KM_SLEEP);
+	rzec_row_t *rw = rzec_row_get();
 
 	for (int i = 0; i < rm->rm_nrows; i++) {
 		raidz_row_t *rr = rm->rm_row[i];
@@ -366,7 +626,6 @@ rzec_generate(raidz_map_t *rm, rzec_code_t code)
 			rw->rw_written[c] = B_TRUE;
 		rzec_row_exit(rw, rr);
 	}
-	kmem_free(rw, sizeof (*rw));
 }
 
 /*
@@ -420,7 +679,7 @@ static int
 rzec_reconstruct_row(raidz_row_t *rr, rzec_code_t code, const int *tgts,
     int ntgts)
 {
-	rzec_row_t *rw = kmem_alloc(sizeof (*rw), KM_SLEEP);
+	rzec_row_t *rw = rzec_row_get();
 	uint8_t b[RZEC_MAXPARITY][RZEC_MAXPARITY];
 	uint8_t (*syn)[RZEC_CHUNK] = rw->rw_syn;
 	uint8_t (*sol)[RZEC_CHUNK] = rw->rw_sol;
@@ -466,7 +725,11 @@ rzec_reconstruct_row(raidz_row_t *rr, rzec_code_t code, const int *tgts,
 				b[i][l] = rw->rw_a[use[i]][lost[l]];
 		if ((err = rzec_invert(b, nlost)) != 0)
 			goto out;
+	}
 
+	if (nlost > 0 && rzec_simd != NULL) {
+		rzec_rebuild_simd(rw, use, lost, nlost, b);
+	} else if (nlost > 0) {
 		/*
 		 * Syndrome S_i = P_use[i] + sum over surviving data of
 		 * A[use[i]][j] * D_j, then D_lost[l] = sum_i Binv[l][i] * S_i.
@@ -514,7 +777,6 @@ rzec_reconstruct_row(raidz_row_t *rr, rzec_code_t code, const int *tgts,
 		rw->rw_written[c] = islost[c];
 out:
 	rzec_row_exit(rw, rr);
-	kmem_free(rw, sizeof (*rw));
 	return (err);
 }
 
@@ -627,10 +889,11 @@ typedef struct rzec_stats {
 	uint64_t	rs_singular;
 	int		rs_first_fail[RZEC_MAXPARITY];
 	int		rs_first_nfail;
+	rzec_kernel_t	rs_first_kernel;
 } rzec_stats_t;
 
 static void
-rzec_try(raidz_map_t *rm, rzec_golden_t *g, rzec_code_t code,
+rzec_try_kernel(raidz_map_t *rm, rzec_golden_t *g, rzec_code_t code,
     const int *tgts, int ntgts, rzec_stats_t *st)
 {
 	int err = 0, bad;
@@ -647,9 +910,24 @@ rzec_try(raidz_map_t *rm, rzec_golden_t *g, rzec_code_t code,
 			memcpy(st->rs_first_fail, tgts,
 			    ntgts * sizeof (int));
 			st->rs_first_nfail = ntgts;
+			st->rs_first_kernel = rzec_kernel;
 		}
 		st->rs_fail++;
 	}
+}
+
+/* Rebuild with every kernel -k selects. */
+static void
+rzec_try(raidz_map_t *rm, rzec_golden_t *g, rzec_code_t code,
+    const int *tgts, int ntgts, rzec_stats_t *st)
+{
+	for (int k = 0; k < rzec_nkernels(); k++) {
+		if (!rzec_kernel_selected(k))
+			continue;
+		rzec_set_kernel(k);
+		rzec_try_kernel(rm, g, code, tgts, ntgts, st);
+	}
+	rzec_set_kernel(RZEC_KERNEL_TABLE);
 }
 
 /* Every set of 1 .. maxlost columns among ncols, in lexicographic order. */
@@ -794,11 +1072,19 @@ rzec_run_case(rzec_code_t code, int m, int n, const rzec_case_t *cs,
 		extra += rzec_check_single_column(rm);
 
 	rzec_golden_save(&g, rm);
-	/* The other kernel must produce the same parity. */
-	rzec_set_kernel(RZEC_KERNEL_SWAR);
-	rzec_generate(rm, code);
+	/* Every other kernel must produce the same parity, byte for byte. */
+	for (int kn = 0; kn < rzec_nkernels(); kn++) {
+		int bad;
+		if (kn == RZEC_KERNEL_TABLE || !rzec_kernel_available(kn))
+			continue;
+		rzec_set_kernel(kn);
+		rzec_generate(rm, code);
+		if ((bad = rzec_golden_cmp(&g, rm)) != 0)
+			LOG(D_ALL, "parity of kernel %s differs: %d columns\n",
+			    rzec_kernel_name(kn), bad);
+		extra += bad;
+	}
 	rzec_set_kernel(RZEC_KERNEL_TABLE);
-	extra += rzec_golden_cmp(&g, rm);
 	int ncols = rm->rm_row[0]->rr_cols;
 	if (cs->rc_exhaustive)
 		rzec_try_all(rm, &g, code, ncols, m, &st);
@@ -820,7 +1106,7 @@ rzec_run_case(rzec_code_t code, int m, int n, const rzec_case_t *cs,
 		LOG(D_ALL, " first_fail={");
 		for (int i = 0; i < st.rs_first_nfail; i++)
 			LOG(D_ALL, "%s%d", i ? "," : "", st.rs_first_fail[i]);
-		LOG(D_ALL, "}");
+		LOG(D_ALL, "} kernel=%s", rzec_kernel_name(st.rs_first_kernel));
 	}
 	LOG(D_ALL, "\n");
 
@@ -878,6 +1164,15 @@ run_rzec_check(void)
 	    (u_longlong_t)rto_opts.rto_ec_samples, seed,
 	    rto_opts.rto_expand ? "expanded" : "plain",
 	    rto_opts.rto_sanity ? " (sanity: reconstruction skipped)" : "");
+	LOG(D_ALL, "parity cross-checked against kernel table with:");
+	for (int kn = 0; kn < rzec_nkernels(); kn++)
+		if (kn != RZEC_KERNEL_TABLE && rzec_kernel_available(kn))
+			LOG(D_ALL, " %s", rzec_kernel_name(kn));
+	LOG(D_ALL, "\nrebuilt with:");
+	for (int kn = 0; kn < rzec_nkernels(); kn++)
+		if (rzec_kernel_selected(kn))
+			LOG(D_ALL, " %s", rzec_kernel_name(kn));
+	LOG(D_ALL, "\n");
 
 	for (int m = mlo; m <= mhi; m++) {
 		int nmax = MIN(255, m + rzec_max_data(code));
@@ -916,9 +1211,9 @@ run_rzec_check(void)
  */
 
 #define	RZEC_BENCH_ASHIFT	12
-#define	RZEC_BENCH_ROUNDS	5
+#define	RZEC_BENCH_ROUNDS	9
 #define	RZEC_BENCH_NSEC		(200ULL * MICROSEC)
-#define	RZEC_BENCH_MAXPOINTS	128
+#define	RZEC_BENCH_MAXPOINTS	256
 
 typedef void (*rzec_bench_f)(raidz_map_t *, const int *, int);
 
@@ -1034,50 +1329,46 @@ void
 run_rzec_benchmark(void)
 {
 	static const uint64_t sizes[] = { 1ULL << 17, 1ULL << 20 };
-	static const char *const impls[] = { "scalar", "fastest" };
-	static const char *const recname[] = { "rec_p", "rec_pq", "rec_pqr" };
-	static const rzec_kernel_t kernels[] = { RZEC_KERNEL_TABLE,
-	    RZEC_KERNEL_SWAR };
+	static const char *const impls[] = { "scalar", "avx2", "avx512bw" };
 	rzec_point_t *bp = kmem_zalloc(sizeof (*bp) * RZEC_BENCH_MAXPOINTS,
 	    KM_SLEEP);
-	char fastest[32] = "fastest";
 	int np = 0;
 
 	(void) setvbuf(stdout, NULL, _IOLBF, 0);
-	if (vdev_raidz_impl_set("fastest") == 0)
-		(void) snprintf(fastest, sizeof (fastest), "%s",
-		    vdev_raidz_math_get_ops()->name);
 
+	/*
+	 * The existing raidz3 code at its own parity count, against the
+	 * generic code from 3 (not the on-disk code there) to 6 parities.
+	 */
 	for (int s = 0; s < ARRAY_SIZE(sizes); s++) {
 		uint64_t sz = sizes[s];
 		for (int i = 0; i < ARRAY_SIZE(impls); i++) {
 			if (vdev_raidz_impl_set(impls[i]) != 0)
 				continue;
-			for (int m = 1; m <= PARITY_PQR; m++)
-				rzec_bench_add(bp, &np, impls[i], 0,
-				    raidz_gen_name[m - 1], m, 0, sz,
-				    rzec_bench_gen_existing);
-			for (int m = 1; m <= PARITY_PQR; m++)
-				rzec_bench_add(bp, &np, impls[i], 0,
-				    recname[m - 1], m, m, sz,
-				    rzec_bench_rec_existing);
+			rzec_bench_add(bp, &np, impls[i], 0, "gen_pqr",
+			    PARITY_PQR, 0, sz, rzec_bench_gen_existing);
+			rzec_bench_add(bp, &np, impls[i], 0, "rec_pqr",
+			    PARITY_PQR, PARITY_PQR, sz,
+			    rzec_bench_rec_existing);
 			rzec_bench_add(bp, &np, impls[i], 0, "rec_p",
 			    PARITY_PQR, 1, sz, rzec_bench_rec_existing);
 		}
-		for (int i = 0; i < ARRAY_SIZE(kernels); i++) {
-			for (int m = 1; m <= RZEC_MAXPARITY; m++)
-				rzec_bench_add(bp, &np, NULL, kernels[i],
-				    "gen", m, 0, sz, rzec_bench_gen_cauchy);
-			for (int m = 1; m <= RZEC_MAXPARITY; m++)
-				rzec_bench_add(bp, &np, NULL, kernels[i],
-				    "rec", m, m, sz, rzec_bench_rec_cauchy);
-			for (int m = 2; m <= RZEC_MAXPARITY; m++)
-				rzec_bench_add(bp, &np, NULL, kernels[i],
-				    "rec", m, 1, sz, rzec_bench_rec_cauchy);
+		for (int kn = RZEC_KERNEL_TABLE; kn < rzec_nkernels(); kn++) {
+			if (!rzec_kernel_available(kn))
+				continue;
+			for (int m = PARITY_PQR; m <= RZEC_MAXPARITY; m++)
+				rzec_bench_add(bp, &np, NULL, kn, "gen", m, 0,
+				    sz, rzec_bench_gen_cauchy);
+			for (int m = PARITY_PQR; m <= RZEC_MAXPARITY; m++)
+				rzec_bench_add(bp, &np, NULL, kn, "rec", m, m,
+				    sz, rzec_bench_rec_cauchy);
+			for (int m = 4; m <= RZEC_MAXPARITY; m += 2)
+				rzec_bench_add(bp, &np, NULL, kn, "rec", m, 1,
+				    sz, rzec_bench_rec_cauchy);
 		}
 	}
 
-	/* Rounds alternate every point, so that drift hits all of them. */
+/* Rounds alternate every point, so that drift hits all of them. */
 	for (int r = 0; r < RZEC_BENCH_ROUNDS; r++) {
 		LOG(D_INFO, "round %d/%d\n", r + 1, RZEC_BENCH_ROUNDS);
 		for (int i = 0; i < np; i++)
@@ -1090,13 +1381,15 @@ run_rzec_benchmark(void)
 		double v[RZEC_BENCH_ROUNDS];
 		memcpy(v, bp[i].bp_mibs, sizeof (v));
 		qsort(v, RZEC_BENCH_ROUNDS, sizeof (double), rzec_cmp_double);
-		LOG(D_ALL, "%-14s, %-7s, %d, %d, %3zu, %8llu, %9.1f, %9.1f, "
-		    "%9.1f, %d\n",
-		    bp[i].bp_impl == NULL ?
-		    (bp[i].bp_kernel == RZEC_KERNEL_SWAR ? "cauchy-swar" :
-		    "cauchy-table") :
-		    (strcmp(bp[i].bp_impl, "fastest") == 0 ? fastest :
-		    bp[i].bp_impl),
+		char name[32];
+		if (bp[i].bp_impl == NULL)
+			(void) snprintf(name, sizeof (name), "cauchy-%s",
+			    rzec_kernel_name(bp[i].bp_kernel));
+		else
+			(void) snprintf(name, sizeof (name), "%s",
+			    bp[i].bp_impl);
+		LOG(D_ALL, "%-16s, %-7s, %d, %d, %3zu, %8llu, %9.1f, %9.1f, "
+		    "%9.1f, %d\n", name,
 		    bp[i].bp_op, bp[i].bp_m, bp[i].bp_nlost, rto_opts.rto_dcols,
 		    (u_longlong_t)bp[i].bp_size, v[RZEC_BENCH_ROUNDS / 2],
 		    v[0], v[RZEC_BENCH_ROUNDS - 1], RZEC_BENCH_ROUNDS);

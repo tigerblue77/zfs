@@ -30,6 +30,7 @@
 .Op Fl w Ar width
 .Op Fl n Ar samples
 .Op Fl g Ar seed
+.Op Fl k Ar kernel
 .
 .Sh DESCRIPTION
 The purpose of this tool is to run all supported raidz implementation and verify
@@ -121,6 +122,22 @@ With
 .Fl c ,
 use the generators 1, 2, 4, 8, and so on, which match P, Q and R for up to
 3 parity columns, instead of the Cauchy code.
+.It Fl k Ar kernel Pq default: Sy table
+Kernel that
+.Fl c
+rebuilds the lost columns with:
+.Sy swar ,
+.Sy table ,
+.Sy avx2 ,
+.Sy avx512bw ,
+.Sy gfni ,
+.Sy gfni512 ,
+.Sy simd
+for every SIMD kernel the CPU supports, or
+.Sy all .
+The parity of every available kernel is compared with that of
+.Sy table
+on every map checked, whichever kernel is selected.
 .El
 .
 .Sh "SEE ALSO"
