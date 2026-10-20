@@ -381,6 +381,7 @@ typedef struct zio_prop {
 	boolean_t		zp_direct_write:1;
 	boolean_t		zp_rewrite:1;
 	uint32_t		zp_zpl_smallblk;
+	uint8_t			zp_layout;	/* spike: AnyRAID layout */
 	uint8_t			zp_salt[ZIO_DATA_SALT_LEN];
 	uint8_t			zp_iv[ZIO_DATA_IV_LEN];
 	uint8_t			zp_mac[ZIO_DATA_MAC_LEN];

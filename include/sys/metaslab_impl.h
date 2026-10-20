@@ -538,6 +538,7 @@ struct metaslab {
 	uint64_t	ms_synced_length;
 
 	boolean_t	ms_new;
+	boolean_t	ms_ar_mapped;	/* spike: AnyRAID tile mapped */
 };
 
 typedef struct metaslab_unflushed_phys {

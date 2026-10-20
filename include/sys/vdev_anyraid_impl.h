@@ -76,6 +76,7 @@ typedef struct anyraid_tile {
 	uint32_t	at_tile_id;
 	list_t		at_list;
 	uint64_t	at_synced;
+	uint8_t		at_nparity;	/* the tile's layout */
 } anyraid_tile_t;
 
 typedef struct anyraid_move_arg {
@@ -146,8 +147,9 @@ _Static_assert(sizeof (relocate_task_phys_t) == 32,
  * context (since the entries are stored in tile/offset order, with no gaps
  * unless a skip entry is present).
  *
- * New entry types will be added eventually to store information like parity
- * changes.
+ * 2: Layout entries (spike format) precede the location entries of a tile
+ * whose parity is not the parity of the vdev, and carry that parity in the
+ * 8 bits after the type.  A tile has the same width whatever its parity.
  *
  * Because the mapping can be larger than the SPA_MAXBLOCKSIZE, it has to be
  * written in multiple IOs; each IO-sized region has their own checksum, which
@@ -169,6 +171,8 @@ _Static_assert(sizeof (relocate_task_phys_t) == 32,
 #define	VDEV_ANYRAID_HEADER_RELOC_STATE	"state"
 #define	VDEV_ANYRAID_HEADER_CUR_TASK	"cur_task"
 #define	VDEV_ANYRAID_HEADER_CONTRACTING_LEAF	"contracting_leaf"
+/* Spike: parity of the second tile layout; absent when there is none. */
+#define	VDEV_ANYRAID_HEADER_ALT_NPARITY	"alt_nparity"
 
 #define	VART_TILE		"tile"
 #define	VART_SOURCE_DISK	"source_disk"
@@ -197,6 +201,7 @@ _Static_assert(sizeof (relocate_task_phys_t) == 32,
 typedef enum anyraid_map_entry_type {
 	AMET_SKIP = 0,
 	AMET_LOC = 1,
+	AMET_LAYOUT = 2,
 	AMET_TYPES
 } anyraid_map_entry_type_t;
 
@@ -273,6 +278,33 @@ amle_get_offset(anyraid_map_loc_entry_t *amle)
 
 /*
  * ==========================================================================
+ * Layout entry definitions and functions (spike format)
+ * ==========================================================================
+ */
+typedef uint32_t anyraid_map_layout_entry_t;
+
+#define	AMYE_NPARITY_BITS	8
+
+static inline void
+amye_set_type(anyraid_map_layout_entry_t *amye)
+{
+	BF32_SET(*amye, 0, AME_TYPE_BITS, AMET_LAYOUT);
+}
+
+static inline void
+amye_set_nparity(anyraid_map_layout_entry_t *amye, uint8_t nparity)
+{
+	BF32_SET(*amye, AME_TYPE_BITS, AMYE_NPARITY_BITS, nparity);
+}
+
+static inline uint32_t
+amye_get_nparity(anyraid_map_layout_entry_t *amye)
+{
+	return (BF32_GET(*amye, AME_TYPE_BITS, AMYE_NPARITY_BITS));
+}
+
+/*
+ * ==========================================================================
  * Overall mapping definitions
  * ==========================================================================
  */
@@ -281,6 +313,7 @@ typedef struct anyraid_map_entry {
 	union {
 		anyraid_map_skip_entry_t ame_amse;
 		anyraid_map_loc_entry_t ame_amle;
+		anyraid_map_layout_entry_t ame_amye;
 	} ame_u;
 } anyraid_map_entry_t;
 

@@ -46,6 +46,7 @@
 #include <sys/vdev_trim.h>
 #include <sys/vdev_file.h>
 #include <sys/vdev_raidz.h>
+#include <sys/vdev_anyraid.h>
 #include <sys/metaslab.h>
 #include <sys/uberblock_impl.h>
 #include <sys/txg.h>
@@ -1370,6 +1371,7 @@ spa_vdev_config_exit(spa_t *spa, vdev_t *vd, uint64_t txg, int error,
 	metaslab_class_validate(spa_special_class(spa));
 	metaslab_class_validate(spa_special_embedded_log_class(spa));
 	metaslab_class_validate(spa_dedup_class(spa));
+	metaslab_class_validate(spa_anyraid_alt_class(spa));
 
 	spa_config_exit(spa, SCL_ALL, spa);
 
@@ -2029,6 +2031,30 @@ void
 spa_update_dspace(spa_t *spa)
 {
 	spa->spa_rdspace = metaslab_class_get_dspace(spa_normal_class(spa));
+
+	/*
+	 * Spike: the two layouts of an AnyRAID vdev share its physical tiles,
+	 * and the normal class has as much space as they back.  Free space
+	 * in the tiles of the second layout is lost to the first, which holds
+	 * the metadata, so it is not counted; anyraid_alt data spills into
+	 * the normal class, never the reverse.  zfs_anyraid_thin_dspace=0
+	 * counts both layouts in full instead, to see what that breaks.
+	 */
+	vdev_t *rvd = spa->spa_root_vdev;
+	if (!zfs_anyraid_thin_dspace) {
+		spa->spa_rdspace +=
+		    metaslab_class_get_dspace(spa_anyraid_alt_class(spa));
+	} else if (rvd != NULL) {
+		for (uint64_t c = 0; c < rvd->vdev_children; c++) {
+			vdev_t *tvd = rvd->vdev_child[c];
+			if (!vdev_anyraid_thin(tvd) ||
+			    tvd->vdev_deflate_ratio == 0)
+				continue;
+			uint64_t lost = vdev_deflated_space(tvd,
+			    vdev_anyraid_stranded(tvd));
+			spa->spa_rdspace -= MIN(lost, spa->spa_rdspace);
+		}
+	}
 	if (spa->spa_nonallocating_dspace > 0) {
 		/*
 		 * Subtract the space provided by all non-allocating vdevs that
@@ -2122,6 +2148,12 @@ spa_dedup_class(spa_t *spa)
 	return (spa->spa_dedup_class);
 }
 
+metaslab_class_t *
+spa_anyraid_alt_class(spa_t *spa)
+{
+	return (spa->spa_anyraid_alt_class);
+}
+
 boolean_t
 spa_special_has_ddt(spa_t *spa)
 {
@@ -2159,6 +2191,18 @@ spa_preferred_class(spa_t *spa, const zio_t *zio)
 	 * ZIL allocations determine their class in zio_alloc_zil().
 	 */
 	ASSERT(objtype != DMU_OT_INTENT_LOG);
+
+	/*
+	 * Spike: file and volume data of a dataset that asked for the second
+	 * AnyRAID layout, until that layout is full.  Indirect blocks and
+	 * metadata keep the first layout, which has more parity.
+	 */
+	if (zp->zp_layout != 0 && zp->zp_level == 0 &&
+	    !DMU_OT_IS_METADATA(objtype) && !DMU_OT_IS_DDT(objtype) &&
+	    spa_anyraid_alt_class(spa)->mc_groups != 0 && mc == NULL)
+		return (spa_anyraid_alt_class(spa));
+	if (mc == spa_anyraid_alt_class(spa))
+		atomic_inc_64(&anyraid_layout_counters.alc_alt_fallbacks);
 
 	if (DMU_OT_IS_DDT(objtype)) {
 		if (spa_has_dedup(spa) && !tried_dedup && !tried_special)

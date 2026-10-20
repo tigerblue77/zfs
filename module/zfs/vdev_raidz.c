@@ -44,6 +44,7 @@
 #include <sys/vdev_raidz.h>
 #include <sys/vdev_raidz_impl.h>
 #include <sys/vdev_draid.h>
+#include <sys/vdev_anyraid.h>
 #include <sys/uberblock_impl.h>
 #include <sys/dsl_scan.h>
 
@@ -2453,9 +2454,16 @@ vdev_raidz_io_verify(zio_t *zio, raidz_map_t *rm, raidz_row_t *rr, int col)
 #ifdef ZFS_DEBUG
 	zfs_range_seg64_t logical_rs, physical_rs, remain_rs;
 	logical_rs.rs_start = rr->rr_offset;
-	logical_rs.rs_end = logical_rs.rs_start +
-	    vdev_psize_to_asize_txg(zio->io_vd,
-	    rr->rr_size, BP_GET_PHYSICAL_BIRTH(zio->io_bp));
+	if (vdev_is_anyraid(zio->io_vd)) {
+		/* Spike: the asize follows the tile's layout. */
+		logical_rs.rs_end = logical_rs.rs_start +
+		    vdev_anyraid_offset_asize(zio->io_vd, rr->rr_offset,
+		    rr->rr_size);
+	} else {
+		logical_rs.rs_end = logical_rs.rs_start +
+		    vdev_psize_to_asize_txg(zio->io_vd,
+		    rr->rr_size, BP_GET_PHYSICAL_BIRTH(zio->io_bp));
+	}
 
 	raidz_col_t *rc = &rr->rr_col[col];
 	vdev_t *cvd = zio->io_vd->vdev_child[rc->rc_devidx];
@@ -3585,6 +3593,9 @@ vdev_raidz_combrec(zio_t *zio)
 		nparity = vdc->vdc_nparity;
 		physical_width = vdc->vdc_children;
 	}
+	/* Spike: an AnyRAID tile has its own parity. */
+	if (vdev_is_anyraid(vd))
+		nparity = rm->rm_row[0]->rr_firstdatacol;
 
 	int original_width = (rm->rm_original_width != 0) ?
 	    rm->rm_original_width : physical_width;

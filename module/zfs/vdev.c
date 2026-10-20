@@ -315,6 +315,9 @@ vdev_get_mg(vdev_t *vd, metaslab_class_t *mc)
 	    mc == spa_special_embedded_log_class(vd->vdev_spa)) &&
 	    vd->vdev_log_mg != NULL)
 		return (vd->vdev_log_mg);
+	else if (mc == spa_anyraid_alt_class(vd->vdev_spa) &&
+	    vd->vdev_alt_mg != NULL)
+		return (vd->vdev_alt_mg);
 	else
 		return (vd->vdev_mg);
 }
@@ -1253,6 +1256,11 @@ vdev_free(vdev_t *vd)
 		metaslab_group_destroy(vd->vdev_log_mg);
 		vd->vdev_log_mg = NULL;
 	}
+	if (vd->vdev_alt_mg != NULL) {
+		ASSERT0(vd->vdev_ms_count);
+		metaslab_group_destroy(vd->vdev_alt_mg);
+		vd->vdev_alt_mg = NULL;
+	}
 
 	ASSERT0(vd->vdev_stat.vs_space);
 	ASSERT0(vd->vdev_stat.vs_dspace);
@@ -1646,6 +1654,12 @@ vdev_metaslab_group_create(vdev_t *vd)
 				    spa_embedded_log_class(spa), vd);
 			}
 		}
+		/* Spike: used only if the vdev has a second layout. */
+		if (mc == spa_normal_class(spa) &&
+		    vd->vdev_ops == &vdev_anyraidz_ops) {
+			vd->vdev_alt_mg = metaslab_group_create(
+			    spa_anyraid_alt_class(spa), vd);
+		}
 
 		/*
 		 * The spa ashift min/max only apply for the normal metaslab
@@ -1755,8 +1769,11 @@ vdev_metaslab_init(vdev_t *vd, uint64_t txg)
 			}
 		}
 
-		error = metaslab_init(vd->vdev_mg, m, object, txg,
-		    &(vd->vdev_ms[m]));
+		metaslab_group_t *mg = vd->vdev_mg;
+		if (vd->vdev_alt_mg != NULL && vdev_anyraid_thin(vd) &&
+		    vdev_anyraid_ms_is_alt(vd, m << vd->vdev_ms_shift))
+			mg = vd->vdev_alt_mg;
+		error = metaslab_init(mg, m, object, txg, &(vd->vdev_ms[m]));
 		if (error != 0) {
 			vdev_dbgmsg(vd, "metaslab_init failed [error=%d]",
 			    error);
@@ -1785,6 +1802,9 @@ vdev_metaslab_init(vdev_t *vd, uint64_t txg)
 		for (uint64_t m = oldc; m < newc; m++) {
 			uint64_t alloc =
 			    space_map_allocated(vd->vdev_ms[m]->ms_sm);
+			/* Spike: the ZIL stays in the first layout. */
+			if (vd->vdev_ms[m]->ms_group != vd->vdev_mg)
+				continue;
 			if (alloc < smallest) {
 				slog_msid = m;
 				smallest = alloc;
@@ -1822,6 +1842,8 @@ vdev_metaslab_init(vdev_t *vd, uint64_t txg)
 		metaslab_group_activate(vd->vdev_mg);
 		if (vd->vdev_log_mg != NULL)
 			metaslab_group_activate(vd->vdev_log_mg);
+		if (vd->vdev_alt_mg != NULL && vdev_anyraid_thin(vd))
+			metaslab_group_activate(vd->vdev_alt_mg);
 	}
 
 	if (txg == 0)
@@ -1856,6 +1878,8 @@ vdev_metaslab_fini(vdev_t *vd)
 			ASSERT(!vd->vdev_islog);
 			metaslab_group_passivate(vd->vdev_log_mg);
 		}
+		if (vd->vdev_alt_mg != NULL && vdev_anyraid_thin(vd))
+			metaslab_group_passivate(vd->vdev_alt_mg);
 
 		uint64_t count = vd->vdev_ms_count;
 		for (uint64_t m = 0; m < count; m++) {
@@ -1871,6 +1895,8 @@ vdev_metaslab_fini(vdev_t *vd)
 			ASSERT0(mg->mg_histogram[i]);
 			if (vd->vdev_log_mg != NULL)
 				ASSERT0(vd->vdev_log_mg->mg_histogram[i]);
+			if (vd->vdev_alt_mg != NULL)
+				ASSERT0(vd->vdev_alt_mg->mg_histogram[i]);
 		}
 	}
 	ASSERT0(vd->vdev_ms_count);
@@ -4352,6 +4378,8 @@ vdev_sync_done(vdev_t *vd, uint64_t txg)
 		metaslab_sync_reassess(vd->vdev_mg);
 		if (vd->vdev_log_mg != NULL)
 			metaslab_sync_reassess(vd->vdev_log_mg);
+		if (vd->vdev_alt_mg != NULL && vdev_anyraid_thin(vd))
+			metaslab_sync_reassess(vd->vdev_alt_mg);
 	}
 }
 

@@ -349,6 +349,14 @@ smallblk_changed_cb(void *arg, uint64_t newval)
 }
 
 static void
+anyraid_layout_changed_cb(void *arg, uint64_t newval)
+{
+	objset_t *os = arg;
+
+	os->os_anyraid_layout = newval;
+}
+
+static void
 direct_changed_cb(void *arg, uint64_t newval)
 {
 	objset_t *os = arg;
@@ -635,6 +643,11 @@ dmu_objset_open_impl(spa_t *spa, dsl_dataset_t *ds, blkptr_t *bp,
 				err = dsl_prop_register(ds,
 				    zfs_prop_to_name(ZFS_PROP_DIRECT),
 				    direct_changed_cb, os);
+			}
+			if (err == 0) {
+				err = dsl_prop_register(ds,
+				    zfs_prop_to_name(ZFS_PROP_ANYRAID_LAYOUT),
+				    anyraid_layout_changed_cb, os);
 			}
 		}
 		if (err != 0) {

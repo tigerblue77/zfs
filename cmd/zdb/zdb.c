@@ -6225,6 +6225,11 @@ typedef struct zdb_cb {
 	hrtime_t	zcb_lastprint;
 	uint64_t	zcb_totalasize;
 	uint64_t	zcb_errors[256];
+	/* Spike: per AnyRAID tile layout, by the block's first DVA. */
+	uint64_t	zcb_layout_blocks[2];
+	uint64_t	zcb_layout_asize[2];
+	uint64_t	zcb_layout_lsize[2];
+	uint64_t	zcb_layout_errors[2];
 	int		zcb_readfails;
 	int		zcb_haderrors;
 	spa_t		*zcb_spa;
@@ -6782,6 +6787,27 @@ hist_skipped:
 	}
 }
 
+/* Spike: the AnyRAID tile layout of a block's first DVA, or -1. */
+static int
+zdb_bp_layout(spa_t *spa, const blkptr_t *bp)
+{
+	if (BP_IS_EMBEDDED(bp) || BP_GET_NDVAS(bp) == 0)
+		return (-1);
+	/*
+	 * zdb does not change the vdev tree while it traverses, and this runs
+	 * in zio completion too, so it takes no config lock.
+	 */
+	vdev_t *rvd = spa->spa_root_vdev;
+	uint64_t id = DVA_GET_VDEV(&bp->blk_dva[0]);
+	if (id >= rvd->vdev_children)
+		return (-1);
+	vdev_t *vd = rvd->vdev_child[id];
+	if (!vdev_is_concrete(vd) || !vdev_anyraid_thin(vd))
+		return (-1);
+	return (vdev_anyraid_ms_is_alt(vd,
+	    DVA_GET_OFFSET(&bp->blk_dva[0])) ? 1 : 0);
+}
+
 static void
 zdb_blkptr_done(zio_t *zio)
 {
@@ -6790,6 +6816,7 @@ zdb_blkptr_done(zio_t *zio)
 	int ioerr = zio->io_error;
 	zdb_cb_t *zcb = zio->io_private;
 	zbookmark_phys_t *zb = &zio->io_bookmark;
+	int layout = ioerr != 0 ? zdb_bp_layout(spa, bp) : -1;
 
 	mutex_enter(&spa->spa_scrub_lock);
 	spa->spa_load_verify_bytes -= BP_GET_PSIZE(bp);
@@ -6800,6 +6827,8 @@ zdb_blkptr_done(zio_t *zio)
 
 		zcb->zcb_haderrors = 1;
 		zcb->zcb_errors[ioerr]++;
+		if (layout >= 0)
+			zcb->zcb_layout_errors[layout]++;
 
 		if (dump_opt['b'] >= 2)
 			snprintf_blkptr(blkbuf, sizeof (blkbuf), bp);
@@ -6851,6 +6880,13 @@ zdb_blkptr_cb(spa_t *spa, zilog_t *zilog, const blkptr_t *bp,
 
 	zdb_count_block(zcb, zilog, bp,
 	    (type & DMU_OT_NEWTYPE) ? ZDB_OT_OTHER : type);
+
+	int layout = zdb_bp_layout(spa, bp);
+	if (layout >= 0) {
+		zcb->zcb_layout_blocks[layout]++;
+		zcb->zcb_layout_asize[layout] += DVA_GET_ASIZE(&bp->blk_dva[0]);
+		zcb->zcb_layout_lsize[layout] += BP_GET_LSIZE(bp);
+	}
 
 	is_metadata = (BP_GET_LEVEL(bp) != 0 || DMU_OT_IS_METADATA(type));
 
@@ -7433,6 +7469,7 @@ zdb_leak_init(spa_t *spa, zdb_cb_t *zcb)
 	spa->spa_log_class->mc_ops = &zdb_metaslab_ops;
 	spa->spa_embedded_log_class->mc_ops = &zdb_metaslab_ops;
 	spa->spa_special_embedded_log_class->mc_ops = &zdb_metaslab_ops;
+	spa->spa_anyraid_alt_class->mc_ops = &zdb_metaslab_ops;
 
 	zcb->zcb_vd_obsolete_counts =
 	    umem_zalloc(rvd->vdev_children * sizeof (uint32_t *),
@@ -7629,7 +7666,9 @@ zdb_leak_fini(spa_t *spa, zdb_cb_t *zcb)
 			    spa_embedded_log_class(spa) ||
 			    msp->ms_group->mg_class ==
 			    spa_special_embedded_log_class(spa)) ?
-			    vd->vdev_log_mg : vd->vdev_mg);
+			    vd->vdev_log_mg : msp->ms_group->mg_class ==
+			    spa_anyraid_alt_class(spa) ?
+			    vd->vdev_alt_mg : vd->vdev_mg);
 
 			/*
 			 * ms_allocatable has been overloaded
@@ -7864,6 +7903,8 @@ dump_block_stats(spa_t *spa)
 	    metaslab_class_get_alloc(spa_embedded_log_class(spa));
 	zcb->zcb_totalasize +=
 	    metaslab_class_get_alloc(spa_special_embedded_log_class(spa));
+	zcb->zcb_totalasize +=
+	    metaslab_class_get_alloc(spa_anyraid_alt_class(spa));
 	zcb->zcb_start = zcb->zcb_lastprint = gethrtime();
 	err = traverse_pool(spa, 0, flags, zdb_blkptr_cb, zcb);
 
@@ -7915,6 +7956,7 @@ dump_block_stats(spa_t *spa)
 	    metaslab_class_get_alloc(spa_special_embedded_log_class(spa)) +
 	    metaslab_class_get_alloc(spa_special_class(spa)) +
 	    metaslab_class_get_alloc(spa_dedup_class(spa)) +
+	    metaslab_class_get_alloc(spa_anyraid_alt_class(spa)) +
 	    get_unflushed_alloc_space(spa);
 	total_found =
 	    tzb->zb_asize - zcb->zcb_dedup_asize - zcb->zcb_clone_asize +
@@ -7983,6 +8025,28 @@ dump_block_stats(spa_t *spa)
 		(void) printf("\t%-16s %14llu     used: %5.2f%%\n",
 		    "Dedup class", (u_longlong_t)alloc,
 		    100.0 * alloc / space);
+	}
+
+	if (spa_anyraid_alt_class(spa)->mc_allocator[0].mca_rotor != NULL) {
+		uint64_t alloc = metaslab_class_get_alloc(
+		    spa_anyraid_alt_class(spa));
+		uint64_t space = metaslab_class_get_space(
+		    spa_anyraid_alt_class(spa));
+
+		(void) printf("\t%-16s %14llu     used: %5.2f%%\n",
+		    "AnyRAID layout 1", (u_longlong_t)alloc,
+		    100.0 * alloc / space);
+	}
+	for (int l = 0; l < 2; l++) {
+		if (zcb->zcb_layout_blocks[l] == 0 &&
+		    zcb->zcb_layout_errors[l] == 0)
+			continue;
+		(void) printf("\tAnyRAID tile layout %d: %llu blocks, "
+		    "asize %llu, lsize %llu, read errors %llu\n", l,
+		    (u_longlong_t)zcb->zcb_layout_blocks[l],
+		    (u_longlong_t)zcb->zcb_layout_asize[l],
+		    (u_longlong_t)zcb->zcb_layout_lsize[l],
+		    (u_longlong_t)zcb->zcb_layout_errors[l]);
 	}
 
 	if (spa_embedded_log_class(spa)->mc_allocator[0].mca_rotor != NULL) {
@@ -10277,11 +10341,16 @@ print_anyraid_mapping(vdev_t *vd, int child, int mapping, int verbosity,
 				}
 				(void) printf("\td%u o%u,", amle_get_disk(amle),
 				    amle_get_offset(amle));
-				par_cnt = (par_cnt + 1) % (va->vd_nparity + 1);
+				par_cnt = (par_cnt + 1) %
+				    (va->vd_nparity + va->vd_ndata);
 				if (par_cnt == 0)
 					(void) printf("\n");
 				break;
 			}
+			case AMET_LAYOUT:
+				(void) printf("layout p%u ", amye_get_nparity(
+				    &entry->ame_u.ame_amye));
+				break;
 			default:
 				(void) printf("Invalid entry type %d, "
 				    "aborting\n", type);

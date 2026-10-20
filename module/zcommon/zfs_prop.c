@@ -815,6 +815,11 @@ zfs_prop_init(void)
 	    ZFS_TYPE_FILESYSTEM, "on | off", "LONGNAME", boolean_table,
 	    sfeatures);
 
+	/* Spike: which AnyRAID tile layout new data blocks go to. */
+	zprop_register_number(ZFS_PROP_ANYRAID_LAYOUT, "anyraid_layout", 0,
+	    PROP_INHERIT, ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME, "0 | 1",
+	    "ARLAYOUT", B_FALSE, sfeatures);
+
 	zfs_mod_list_supported_free(sfeatures);
 }
 

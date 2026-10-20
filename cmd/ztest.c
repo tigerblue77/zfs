@@ -115,12 +115,14 @@
 #include <sys/vdev_initialize.h>
 #include <sys/vdev_raidz.h>
 #include <sys/vdev_trim.h>
+#include <sys/zfs_file.h>
 #include <sys/spa_impl.h>
 #include <sys/metaslab_impl.h>
 #include <sys/dsl_prop.h>
 #include <sys/dsl_dataset.h>
 #include <sys/dsl_destroy.h>
 #include <sys/dsl_scan.h>
+#include <sys/dsl_dir.h>
 #include <sys/zio_checksum.h>
 #include <sys/zfs_refcount.h>
 #include <sys/zfeature.h>
@@ -230,6 +232,10 @@ typedef struct ztest_shared_opts {
 	int zo_dump_dbgmsg;
 	int zo_gvars_count;
 	char zo_gvars[ZO_GVARS_MAX_COUNT][ZO_GVARS_MAX_ARGLEN];
+	/* Spike: two AnyRAID tile layouts. */
+	int zo_anyraid_fill_pct;	/* -1: no fill test */
+	int zo_anyraid_capacity;	/* report the capacity and stop */
+	char zo_anyraid_sizes[64];	/* "NxMiB,..." leaf sizes */
 } ztest_shared_opts_t;
 
 /* Default values for command line options. */
@@ -289,6 +295,7 @@ static const ztest_shared_opts_t ztest_opts_defaults = {
 	.zo_raidz_expand_test = RAIDZ_EXPAND_NONE,
 	.zo_anyraid_rebal_test = ANYRAID_REBAL_NONE,
 	.zo_anyraid_contract_test = ANYRAID_CONTRACT_NONE,
+	.zo_anyraid_fill_pct = -1,
 };
 
 extern uint64_t metaslab_force_ganging;
@@ -326,8 +333,17 @@ typedef struct ztest_scratch_state {
 static ztest_shared_scratch_state_t *ztest_scratch_state;
 
 #define	BT_MAGIC	0x123456789abcdefULL
+/*
+ * Spike: with two AnyRAID tile layouts, the faults ztest injects stay within
+ * the parity of the weaker one.
+ */
+#define	ZTEST_FAULT_PARITY() \
+	((strcmp(ztest_opts.zo_raid_type, VDEV_TYPE_ANYRAIDZ) == 0 && \
+	zfs_anyraid_alt_nparity != 0 && \
+	zfs_anyraid_alt_nparity < ztest_opts.zo_raid_parity) ? \
+	(int)zfs_anyraid_alt_nparity : ztest_opts.zo_raid_parity)
 #define	MAXFAULTS(zs) \
-	(MAX((zs)->zs_mirrors, 1) * (ztest_opts.zo_raid_parity + 1) - 1)
+	(MAX((zs)->zs_mirrors, 1) * (ZTEST_FAULT_PARITY() + 1) - 1)
 
 enum ztest_io_type {
 	ZTEST_IO_WRITE_TAG,
@@ -857,6 +873,14 @@ static ztest_option_t option_table[] = {
 	    "Perform a dedicated anyraid rebalance test", NO_DEFAULT, NULL},
 	{ 'c', "anyraid-contraction", NULL,
 	    "Perform a dedicated anyraid contraction test", NO_DEFAULT, NULL},
+	{ 'L', "anyraid-fill", "PERCENT",
+	    "Spike: fill two anyraidz tile layouts, PERCENT to the second",
+	    NO_DEFAULT, NULL},
+	{ 'Q', "anyraid-capacity", NULL,
+	    "Spike: report the anyraidz capacity per layout and stop",
+	    NO_DEFAULT, NULL},
+	{ 'Z', "anyraid-sizes", "NxMIB,...",
+	    "Spike: sizes of the first leaves, in MiB", NO_DEFAULT, NULL},
 	{0, 0, 0, 0, 0, 0}
 };
 
@@ -1021,6 +1045,7 @@ process_options(int argc, char **argv)
 		case 'T':
 		case 'P':
 		case 'F':
+		case 'L':
 			value = nicenumtoull(optarg);
 		}
 		switch (opt) {
@@ -1107,6 +1132,16 @@ process_options(int argc, char **argv)
 			break;
 		case 'E':
 			zo->zo_init = 0;
+			break;
+		case 'L':
+			zo->zo_anyraid_fill_pct = MIN(MAX(value, 0), 100);
+			break;
+		case 'Q':
+			zo->zo_anyraid_capacity = 1;
+			break;
+		case 'Z':
+			(void) strlcpy(zo->zo_anyraid_sizes, optarg,
+			    sizeof (zo->zo_anyraid_sizes));
 			break;
 		case 'T':
 			zo->zo_time = value;
@@ -1369,6 +1404,31 @@ ztest_is_draid_spare(const char *name)
 	return (B_FALSE);
 }
 
+/*
+ * Spike: the size of leaf number leaf from --anyraid-sizes, "5x2816,12x700"
+ * for five leaves of 2816 MiB then twelve of 700 MiB; 0 past the list.
+ */
+static size_t
+ztest_anyraid_leaf_size(uint64_t leaf)
+{
+	const char *p = ztest_opts.zo_anyraid_sizes;
+
+	while (*p != '\0') {
+		char *end;
+		uint64_t count = strtoull(p, &end, 10);
+		if (*end != 'x')
+			return (0);
+		uint64_t mib = strtoull(end + 1, &end, 10);
+		if (leaf < count)
+			return ((size_t)mib << 20);
+		leaf -= count;
+		if (*end != ',')
+			return (0);
+		p = end + 1;
+	}
+	return (0);
+}
+
 static nvlist_t *
 make_vdev_file(const char *path, const char *aux, const char *pool,
     size_t size, uint64_t ashift)
@@ -1397,6 +1457,8 @@ make_vdev_file(const char *path, const char *aux, const char *pool,
 			(void) snprintf(pathbuf, MAXPATHLEN,
 			    ztest_dev_template, ztest_opts.zo_dir,
 			    pool == NULL ? ztest_opts.zo_pool : pool, vdev);
+			if (size != 0 && ztest_anyraid_leaf_size(vdev) != 0)
+				size = ztest_anyraid_leaf_size(vdev);
 		}
 	} else {
 		draid_spare = ztest_is_draid_spare(path);
@@ -1469,7 +1531,7 @@ make_vdev_raid(const char *path, const char *aux, const char *pool, size_t size,
 	} else if (strcmp(ztest_opts.zo_raid_type, VDEV_TYPE_ANYRAIDZ) == 0) {
 		enum vdev_anyraid_parity_type type = VAP_RAIDZ;
 		uint64_t ndata = ztest_opts.zo_draid_data;
-		fnvlist_add_uint64(raid, ZPOOL_CONFIG_ANYRAID_NDATA, ndata);
+		fnvlist_add_uint8(raid, ZPOOL_CONFIG_ANYRAID_NDATA, (uint8_t)ndata);
 		fnvlist_add_uint8(raid, ZPOOL_CONFIG_ANYRAID_PARITY_TYPE,
 		    type);
 	}
@@ -4719,6 +4781,12 @@ ztest_dataset_create(char *dsname)
 	    ztest_objset_create_cb, NULL);
 	dsl_crypto_params_free(dcp, !!err);
 
+	/* Spike: spread the datasets over both AnyRAID tile layouts. */
+	if (err == 0 && zfs_anyraid_alt_nparity != 0) {
+		(void) ztest_dsl_prop_set_uint64(dsname,
+		    ZFS_PROP_ANYRAID_LAYOUT, ztest_random(2), B_FALSE);
+	}
+
 	rand = ztest_random(100);
 	if (err || rand < 80)
 		return (err);
@@ -6384,6 +6452,14 @@ ztest_dsl_prop_get_set(ztest_ds_t *zd, uint64_t id)
 	    ztest_random_blocksize(), (int)ztest_random(2));
 	ASSERT(error == 0 || error == ENOSPC);
 
+	/* Spike: a dataset moves between layouts; new writes follow. */
+	if (zfs_anyraid_alt_nparity != 0 && ztest_random(4) == 0) {
+		error = ztest_dsl_prop_set_uint64(zd->zd_name,
+		    ZFS_PROP_ANYRAID_LAYOUT, ztest_random(2),
+		    (int)ztest_random(2));
+		ASSERT(error == 0 || error == ENOSPC);
+	}
+
 	(void) pthread_rwlock_unlock(&ztest_name_lock);
 }
 
@@ -7661,9 +7737,13 @@ ztest_spa_import_export(char *oldname, char *newname)
 	fnvlist_free(config);
 }
 
+static uint64_t ztest_resume_count;	/* spike: suspensions seen */
+
 static void
 ztest_resume(spa_t *spa)
 {
+	if (spa_suspended(spa))
+		atomic_inc_64(&ztest_resume_count);
 	if (spa_suspended(spa) && ztest_opts.zo_verbose >= 6)
 		(void) printf("resuming from suspended state\n");
 	spa_vdev_state_enter(spa, SCL_NONE);
@@ -8933,6 +9013,334 @@ ztest_generic_run(ztest_shared_t *zs, spa_t *spa)
  * Setup our test context and kick off threads to run tests on all datasets
  * in parallel.
  */
+/*
+ * Spike: a dedicated test of two AnyRAID tile layouts in one anyraidz vdev.
+ * It reports the capacity per layout, fills both layouts to ENOSPC with
+ * zo_anyraid_fill_pct percent of the bytes in the second one, reads every
+ * block back, then again with one and two leaves offline, and repairs a
+ * wiped leaf with a scrub.
+ */
+#define	ZTEST_FILL_CHUNK	(1ULL << 20)
+static const char *ztest_fill_tag = "ztest_anyraid_fill";
+#define	ZTEST_FILL_BLOCK	(128ULL << 10)
+
+static uint64_t
+ztest_fill_word(int l, uint64_t off)
+{
+	uint64_t x = off ^ ((uint64_t)(l + 1) << 56) ^ 0x9e3779b97f4a7c15ULL;
+
+	x ^= x >> 30;
+	x *= 0xbf58476d1ce4e5b9ULL;
+	x ^= x >> 27;
+	x *= 0x94d049bb133111ebULL;
+	return (x ^ (x >> 31));
+}
+
+static void
+ztest_fill_pattern(int l, uint64_t off, uint64_t *buf, uint64_t len)
+{
+	for (uint64_t i = 0; i < len / sizeof (uint64_t); i++)
+		buf[i] = ztest_fill_word(l, off + i * sizeof (uint64_t));
+}
+
+static void
+ztest_anyraid_report(spa_t *spa, const char *tag)
+{
+	anyraid_layout_stats_t als;
+	anyraid_layout_counters_t *c = &anyraid_layout_counters;
+	dsl_pool_t *dp = spa_get_dsl(spa);
+
+	spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
+	vdev_t *tvd = spa->spa_root_vdev->vdev_child[0];
+	vdev_anyraid_layout_stats(tvd, &als);
+	uint64_t stranded = vdev_anyraid_stranded(tvd);
+	spa_config_exit(spa, SCL_CONFIG, FTAG);
+
+	dsl_pool_config_enter(dp, FTAG);
+	uint64_t avail = dsl_dir_space_available(dp->dp_root_dir, NULL, 0,
+	    B_TRUE);
+	dsl_pool_config_exit(dp, FTAG);
+
+	(void) printf("anyraid[%s] vdev asize %llu ltile %llu dspace %llu "
+	    "slop %llu avail %llu suspended %d resumes %llu\n", tag,
+	    (u_longlong_t)tvd->vdev_asize, (u_longlong_t)als.als_ltile_size,
+	    (u_longlong_t)spa_get_dspace(spa),
+	    (u_longlong_t)spa_get_slop_space(spa), (u_longlong_t)avail,
+	    spa_suspended(spa), (u_longlong_t)ztest_resume_count);
+	for (int l = 0; l < 2; l++) {
+		(void) printf("anyraid[%s] layout %d p%u tiles %llu "
+		    "mapped_space %llu alloc %llu free_in_mapped %llu "
+		    "unmapped_alloc %llu\n", tag, l, als.als_nparity[l],
+		    (u_longlong_t)als.als_tiles[l],
+		    (u_longlong_t)als.als_mapped_space[l],
+		    (u_longlong_t)als.als_mapped_alloc[l],
+		    (u_longlong_t)(als.als_mapped_space[l] -
+		    als.als_mapped_alloc[l]),
+		    (u_longlong_t)als.als_unmapped_alloc[l]);
+	}
+	(void) printf("anyraid[%s] free_ptiles %llu more_ltiles %llu "
+	    "stranded %llu (%.2f ltiles) class_alloc normal %llu alt %llu "
+	    "elog %llu\n", tag, (u_longlong_t)als.als_free_ptiles,
+	    (u_longlong_t)als.als_more_tiles, (u_longlong_t)stranded,
+	    (double)stranded / als.als_ltile_size,
+	    (u_longlong_t)metaslab_class_get_alloc(spa_normal_class(spa)),
+	    (u_longlong_t)metaslab_class_get_alloc(spa_anyraid_alt_class(spa)),
+	    (u_longlong_t)metaslab_class_get_alloc(
+	    spa_embedded_log_class(spa)));
+	(void) printf("anyraid[%s] counters admit_maps %llu admit_fails %llu "
+	    "lazy_maps %llu open_unsynced %llu zil_unsynced %llu "
+	    "alt_fallbacks %llu\n", tag,
+	    (u_longlong_t)c->alc_admit_maps, (u_longlong_t)c->alc_admit_fails,
+	    (u_longlong_t)c->alc_lazy_maps, (u_longlong_t)c->alc_open_unsynced,
+	    (u_longlong_t)c->alc_zil_unsynced,
+	    (u_longlong_t)c->alc_alt_fallbacks);
+
+	/* The mapped logical tiles, with their layout's parity. */
+	spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
+	vdev_anyraid_t *va = tvd->vdev_tsd;
+	(void) printf("anyraid[%s] tiles:", tag);
+	rw_enter(&va->vd_lock, RW_READER);
+	for (anyraid_tile_t *at = avl_first(&va->vd_tile_map); at != NULL;
+	    at = AVL_NEXT(&va->vd_tile_map, at)) {
+		(void) printf(" %u/p%u", at->at_tile_id, at->at_nparity);
+	}
+	rw_exit(&va->vd_lock);
+	spa_config_exit(spa, SCL_CONFIG, FTAG);
+	(void) printf("\n");
+}
+
+/*
+ * Read every block back from disk; count good, EIO and wrong blocks per
+ * layout.  Disowning the objsets evicts their dbufs, then the ARC is
+ * flushed.
+ */
+static void
+ztest_fill_verify(objset_t **os, char name[2][ZFS_MAX_DATASET_NAME_LEN],
+    uint64_t *obj, uint64_t *len, const char *tag)
+{
+	uint64_t *buf = umem_alloc(ZTEST_FILL_BLOCK, UMEM_NOFAIL);
+	uint64_t *want = umem_alloc(ZTEST_FILL_BLOCK, UMEM_NOFAIL);
+
+	for (int l = 0; l < 2; l++)
+		dmu_objset_disown(os[l], B_TRUE, ztest_fill_tag);
+	arc_flush(NULL, B_TRUE);
+	for (int l = 0; l < 2; l++) {
+		VERIFY0(dmu_objset_own(name[l], DMU_OST_OTHER, B_TRUE,
+		    B_TRUE, ztest_fill_tag, &os[l]));
+	}
+	for (int l = 0; l < 2; l++) {
+		uint64_t good = 0, eio = 0, bad = 0;
+		for (uint64_t off = 0; off < len[l]; off += ZTEST_FILL_BLOCK) {
+			int err = dmu_read(os[l], obj[l], off,
+			    ZTEST_FILL_BLOCK, buf, DMU_READ_NO_PREFETCH);
+			if (err != 0) {
+				eio++;
+				continue;
+			}
+			ztest_fill_pattern(l, off, want, ZTEST_FILL_BLOCK);
+			if (memcmp(buf, want, ZTEST_FILL_BLOCK) != 0)
+				bad++;
+			else
+				good++;
+		}
+		(void) printf("anyraid[%s] layout %d read good %llu eio %llu "
+		    "wrong %llu blocks\n", tag, l, (u_longlong_t)good,
+		    (u_longlong_t)eio, (u_longlong_t)bad);
+		if (bad != 0)
+			fatal(B_FALSE, "anyraid fill: wrong data read back");
+	}
+	umem_free(buf, ZTEST_FILL_BLOCK);
+	umem_free(want, ZTEST_FILL_BLOCK);
+}
+
+/* The logical tiles of the second layout with columns on both leaves. */
+static uint64_t
+ztest_alt_tiles_on(spa_t *spa, int c1, int c2)
+{
+	uint64_t n = 0;
+
+	spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
+	vdev_t *tvd = spa->spa_root_vdev->vdev_child[0];
+	vdev_anyraid_t *va = tvd->vdev_tsd;
+	rw_enter(&va->vd_lock, RW_READER);
+	for (anyraid_tile_t *at = avl_first(&va->vd_tile_map); at != NULL;
+	    at = AVL_NEXT(&va->vd_tile_map, at)) {
+		if (at->at_nparity == va->vd_nparity)
+			continue;
+		int hits = 0;
+		for (anyraid_tile_node_t *atn = list_head(&at->at_list);
+		    atn != NULL; atn = list_next(&at->at_list, atn)) {
+			if (atn->atn_disk == c1 || atn->atn_disk == c2)
+				hits++;
+		}
+		if (hits == 2)
+			n++;
+	}
+	rw_exit(&va->vd_lock);
+	spa_config_exit(spa, SCL_CONFIG, FTAG);
+	return (n);
+}
+
+static void
+ztest_anyraid_fill_run(ztest_shared_t *zs, spa_t *spa)
+{
+	(void) zs;
+	dsl_pool_t *dp = spa_get_dsl(spa);
+	vdev_t *tvd = spa->spa_root_vdev->vdev_child[0];
+	char name[2][ZFS_MAX_DATASET_NAME_LEN];
+	objset_t *os[2];
+	uint64_t obj[2], off[2] = {0, 0};
+	boolean_t full[2] = {B_FALSE, B_FALSE};
+	int retries[2] = {0, 0};
+	int pct = ztest_opts.zo_anyraid_fill_pct;
+
+	if (!vdev_anyraid_thin(tvd))
+		fatal(B_FALSE, "anyraid fill: needs -K anyraidz and "
+		    "-o zfs_anyraid_alt_nparity=N below -R");
+
+	ztest_anyraid_report(spa, "open");
+	if (ztest_opts.zo_anyraid_capacity) {
+		vdev_anyraid_t *va = tvd->vdev_tsd;
+		(void) printf("anyraid[capacity] children %llu width %u "
+		    "tile %llu\n", (u_longlong_t)tvd->vdev_children,
+		    va->vd_width, (u_longlong_t)va->vd_tile_size);
+		for (uint64_t c = 0; c < tvd->vdev_children; c++) {
+			(void) printf("anyraid[capacity] child %llu tiles "
+			    "%u\n", (u_longlong_t)c,
+			    va->vd_children[c]->van_capacity);
+		}
+		return;
+	}
+
+	for (int l = 0; l < 2; l++) {
+		(void) snprintf(name[l], sizeof (name[l]), "%s/fill%d",
+		    ztest_opts.zo_pool, l);
+		int err = dmu_objset_create(name[l], DMU_OST_OTHER, 0, NULL,
+		    NULL, NULL);
+		if (err != 0)
+			fatal(B_FALSE, "anyraid fill: create %s: %d", name[l],
+			    err);
+		VERIFY0(ztest_dsl_prop_set_uint64(name[l],
+		    ZFS_PROP_COMPRESSION, ZIO_COMPRESS_OFF, B_FALSE));
+		VERIFY0(ztest_dsl_prop_set_uint64(name[l],
+		    ZFS_PROP_ANYRAID_LAYOUT, l, B_FALSE));
+		VERIFY0(dmu_objset_own(name[l], DMU_OST_OTHER, B_FALSE,
+		    B_TRUE, ztest_fill_tag, &os[l]));
+		dmu_tx_t *tx = dmu_tx_create(os[l]);
+		dmu_tx_hold_bonus(tx, DMU_NEW_OBJECT);
+		VERIFY0(dmu_tx_assign(tx, DMU_TX_WAIT));
+		obj[l] = dmu_object_alloc(os[l], DMU_OT_UINT64_OTHER,
+		    ZTEST_FILL_BLOCK, DMU_OT_NONE, 0, tx);
+		dmu_tx_commit(tx);
+	}
+	txg_wait_synced(dp, 0);
+	ztest_anyraid_report(spa, "start");
+
+	uint64_t *buf = umem_alloc(ZTEST_FILL_CHUNK, UMEM_NOFAIL);
+	uint64_t next_report = 64ULL << 20;
+	while (!full[0] || !full[1]) {
+		int l;
+		if (full[0])
+			l = 1;
+		else if (full[1])
+			l = 0;
+		else
+			l = (off[1] * 100 < (uint64_t)pct * (off[0] + off[1] +
+			    1)) ? 1 : 0;
+
+		dmu_tx_t *tx = dmu_tx_create(os[l]);
+		dmu_tx_hold_write(tx, obj[l], off[l], ZTEST_FILL_CHUNK);
+		int err = dmu_tx_assign(tx, DMU_TX_WAIT);
+		if (err != 0) {
+			dmu_tx_abort(tx);
+			if (err != ENOSPC)
+				fatal(B_FALSE, "anyraid fill: assign %d", err);
+			/* Deferred frees and dirty data may still be due. */
+			txg_wait_synced(dp, 0);
+			if (++retries[l] > 4) {
+				full[l] = B_TRUE;
+				(void) printf("anyraid[fill] layout %d ENOSPC "
+				    "after %llu bytes\n", l,
+				    (u_longlong_t)off[l]);
+			}
+			continue;
+		}
+		retries[l] = 0;
+		ztest_fill_pattern(l, off[l], buf, ZTEST_FILL_CHUNK);
+		dmu_write(os[l], obj[l], off[l], ZTEST_FILL_CHUNK, buf, tx, 0);
+		dmu_tx_commit(tx);
+		off[l] += ZTEST_FILL_CHUNK;
+		if (off[0] + off[1] >= next_report) {
+			next_report += 256ULL << 20;
+			(void) printf("anyraid[fill] written %llu + %llu "
+			    "suspended %d\n", (u_longlong_t)off[0],
+			    (u_longlong_t)off[1], spa_suspended(spa));
+		}
+	}
+	umem_free(buf, ZTEST_FILL_CHUNK);
+	txg_wait_synced(dp, 0);
+	(void) printf("anyraid[fill] done written %llu + %llu bytes\n",
+	    (u_longlong_t)off[0], (u_longlong_t)off[1]);
+	ztest_anyraid_report(spa, "full");
+
+	ztest_fill_verify(os, name, obj, off, "read0");
+
+	/* Two leaves offline, one after the other. */
+	uint64_t guid[2];
+	spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
+	guid[0] = tvd->vdev_child[0]->vdev_guid;
+	guid[1] = tvd->vdev_child[1]->vdev_guid;
+	spa_config_exit(spa, SCL_CONFIG, FTAG);
+	(void) printf("anyraid[offline2] layout-1 tiles on both leaves %llu\n",
+	    (u_longlong_t)ztest_alt_tiles_on(spa, 0, 1));
+	for (int k = 0; k < 2; k++) {
+		int err = vdev_offline(spa, guid[k], ZFS_OFFLINE_TEMPORARY);
+		(void) printf("anyraid[offline%d] vdev_offline %d\n", k + 1,
+		    err);
+		ztest_fill_verify(os, name, obj, off,
+		    k == 0 ? "offline1" : "offline2");
+		ztest_anyraid_report(spa, k == 0 ? "offline1" : "offline2");
+	}
+	for (int k = 0; k < 2; k++) {
+		vdev_state_t st;
+		VERIFY0(vdev_online(spa, guid[k], 0, &st));
+	}
+	txg_wait_synced(dp, 0);
+	while (dsl_scan_resilvering(dp))
+		txg_wait_synced(dp, 0);
+
+	/* Wipe one leaf's tiles and let a scrub rebuild them. */
+	spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
+	vdev_t *lvd = tvd->vdev_child[2];
+	char *path = umem_alloc(MAXPATHLEN, UMEM_NOFAIL);
+	(void) strlcpy(path, lvd->vdev_path, MAXPATHLEN);
+	uint64_t start = VDEV_ANYRAID_START_OFFSET(lvd->vdev_ashift);
+	uint64_t end = lvd->vdev_psize - VDEV_LABEL_END_SIZE -
+	    VDEV_ANYRAID_START_OFFSET(lvd->vdev_ashift);
+	spa_config_exit(spa, SCL_CONFIG, FTAG);
+	zfs_file_t *fp;
+	if (zfs_file_open(path, O_RDWR, 0, &fp) != 0 ||
+	    zfs_file_deallocate(fp, start, end - start) != 0)
+		fatal(B_TRUE, "anyraid fill: punch %s", path);
+	zfs_file_close(fp);
+	umem_free(path, MAXPATHLEN);
+	(void) printf("anyraid[wipe] leaf 2 data zeroed\n");
+	int serr = ztest_scrub_impl(spa);
+	pool_scan_stat_t ps;
+	VERIFY0(spa_scan_get_stats(spa, &ps));
+	(void) printf("anyraid[wipe] scrub %d errors %llu leaf cksum %llu "
+	    "repaired %llu errlog %llu\n", serr,
+	    (u_longlong_t)ps.pss_errors,
+	    (u_longlong_t)lvd->vdev_stat.vs_checksum_errors,
+	    (u_longlong_t)lvd->vdev_stat.vs_scan_processed,
+	    (u_longlong_t)spa_approx_errlog_size(spa));
+	ztest_fill_verify(os, name, obj, off, "wipe");
+
+	for (int l = 0; l < 2; l++)
+		dmu_objset_disown(os[l], B_TRUE, ztest_fill_tag);
+	ztest_anyraid_report(spa, "end");
+}
+
 static void
 ztest_run(ztest_shared_t *zs)
 {
@@ -9082,7 +9490,10 @@ ztest_run(ztest_shared_t *zs)
 	(void) dmu_objset_find(ztest_opts.zo_pool, ztest_replay_zil_cb,
 	    NULL, DS_FIND_CHILDREN);
 
-	if (ztest_opts.zo_raidz_expand_test == RAIDZ_EXPAND_REQUESTED)
+	if (ztest_opts.zo_anyraid_fill_pct >= 0 ||
+	    ztest_opts.zo_anyraid_capacity)
+		ztest_anyraid_fill_run(zs, spa);
+	else if (ztest_opts.zo_raidz_expand_test == RAIDZ_EXPAND_REQUESTED)
 		ztest_raidz_expand_run(zs, spa);
 	else if (ztest_opts.zo_anyraid_rebal_test == ANYRAID_REBAL_REQUESTED)
 		ztest_anyraid_rebal_run(zs, spa);
@@ -9097,6 +9508,10 @@ ztest_run(ztest_shared_t *zs)
 		ztest_anyraid_contract_check(spa);
 	else
 		ztest_generic_run(zs, spa);
+
+	if (zfs_anyraid_alt_nparity != 0 && ztest_opts.zo_anyraid_fill_pct < 0 &&
+	    vdev_anyraid_thin(spa->spa_root_vdev->vdev_child[0]))
+		ztest_anyraid_report(spa, "pass");
 
 	/* Kill the resume and deadman threads */
 	ztest_exiting = B_TRUE;

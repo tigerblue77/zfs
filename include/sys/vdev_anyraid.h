@@ -127,7 +127,43 @@ typedef struct vdev_anyraid {
 	anyraid_move_t	vd_move;
 	/* Logical rows of the tiles; held by writes and by the column copy. */
 	zfs_rangelock_t	vd_rangelock;
+	/*
+	 * Spike: parity of a second tile layout, 0 for none.  Odd logical
+	 * tiles have it and belong to vdev_alt_mg; each layout has as much
+	 * logical space as the whole vdev, backed by one pool of physical
+	 * tiles, and a tile is mapped when its first block is allocated.
+	 */
+	uint8_t		vd_alt_nparity;
+	uint64_t	vd_ntiles[2];		/* mapped tiles per layout */
+	boolean_t	vd_can_map;		/* hint, under no lock */
 } vdev_anyraid_t;
+
+/* Spike counters, for ztest and zdb. */
+typedef struct anyraid_layout_counters {
+	uint64_t	alc_admit_maps;		/* tiles mapped at allocation */
+	uint64_t	alc_admit_fails;	/* allocations refused a tile */
+	uint64_t	alc_lazy_maps;		/* tiles mapped in io_start */
+	uint64_t	alc_open_unsynced;	/* open-context writes, map unsynced */
+	uint64_t	alc_zil_unsynced;	/* ZIL writes, map unsynced */
+	uint64_t	alc_alt_fallbacks;	/* second layout full: normal */
+} anyraid_layout_counters_t;
+
+extern anyraid_layout_counters_t anyraid_layout_counters;
+extern uint_t zfs_anyraid_alt_nparity;
+extern int zfs_anyraid_thin_admit;
+extern int zfs_anyraid_thin_dspace;
+
+/* Per-layout state of one vdev, in bytes of asize. */
+typedef struct anyraid_layout_stats {
+	uint8_t		als_nparity[2];
+	uint64_t	als_tiles[2];		/* mapped logical tiles */
+	uint64_t	als_mapped_space[2];	/* metaslab space in them */
+	uint64_t	als_mapped_alloc[2];	/* allocated in them */
+	uint64_t	als_unmapped_alloc[2];	/* must be 0 */
+	uint64_t	als_free_ptiles;	/* free physical tiles */
+	uint64_t	als_more_tiles;		/* logical tiles still mappable */
+	uint64_t	als_ltile_size;
+} anyraid_layout_stats_t;
 
 #define	VDEV_ANYRAID_MAX_DISKS	(1 << 8)
 
@@ -156,6 +192,19 @@ void vdev_anyraid_setup_rebalance(vdev_t *vd, dmu_tx_t *tx);
 void spa_start_anyraid_relocate_thread(spa_t *spa);
 dsl_scan_done_func_t *anyraid_setup_scan_done(spa_t *spa, uint64_t vd_id,
     void **arg);
+
+boolean_t vdev_anyraid_thin(vdev_t *vd);
+boolean_t vdev_anyraid_ms_is_alt(vdev_t *vd, uint64_t offset);
+uint64_t vdev_anyraid_layout_asize(vdev_t *vd, boolean_t alt, uint64_t psize);
+uint64_t vdev_anyraid_layout_psize(vdev_t *vd, boolean_t alt, uint64_t asize);
+uint64_t vdev_anyraid_offset_asize(vdev_t *vd, uint64_t offset,
+    uint64_t psize);
+uint_t vdev_anyraid_offset_nparity(vdev_t *vd, uint64_t offset);
+boolean_t vdev_anyraid_admissible(metaslab_t *msp);
+int vdev_anyraid_admit(metaslab_t *msp, uint64_t txg);
+void vdev_anyraid_ms_init(vdev_t *vd, metaslab_t *msp);
+uint64_t vdev_anyraid_stranded(vdev_t *vd);
+void vdev_anyraid_layout_stats(vdev_t *vd, anyraid_layout_stats_t *als);
 
 #ifdef	__cplusplus
 }

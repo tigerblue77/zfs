@@ -157,9 +157,65 @@ static
 #endif	/* _KERNEL */
 unsigned long anyraid_relocate_max_bytes_pause = 0;
 
+/*
+ * Spike: parity of a second tile layout for anyraidz vdevs created while it
+ * is set, below the parity of the vdev; 0 for none.  zfs_anyraid_thin_admit
+ * maps a tile when a block is first allocated in it, and refuses the
+ * allocation when no physical tiles are left; zfs_anyraid_thin_dspace keeps
+ * free space in the tiles of the second layout out of the pool's size.  Both
+ * exist to measure what happens without them.
+ */
+uint_t zfs_anyraid_alt_nparity = 0;
+int zfs_anyraid_thin_admit = 1;
+int zfs_anyraid_thin_dspace = 1;
+
+anyraid_layout_counters_t anyraid_layout_counters;
+
 static int tasklist_read(vdev_t *vd);
 static void anyraid_scrub_done(spa_t *spa, dmu_tx_t *tx, void *arg);
 static uint64_t vdev_anyraid_asize(vdev_t *vd, uint64_t psize, uint64_t txg);
+static uint64_t calculate_asize(vdev_t *vd, uint64_t *num_tiles);
+
+static inline uint64_t
+anyraid_ltsize(const vdev_anyraid_t *va)
+{
+	return (va->vd_tile_size * va->vd_width);
+}
+
+static inline boolean_t
+anyraid_tile_is_alt(const vdev_anyraid_t *va, uint64_t tile_id)
+{
+	return (va->vd_alt_nparity != 0 && (tile_id & 1) != 0);
+}
+
+static inline uint8_t
+anyraid_tile_nparity(const vdev_anyraid_t *va, uint64_t tile_id)
+{
+	return (anyraid_tile_is_alt(va, tile_id) ? va->vd_alt_nparity :
+	    va->vd_nparity);
+}
+
+/*
+ * Whether anyraid_tile_create() can map one more logical tile: it takes the
+ * width children with the most free tiles.  The caller holds vd_lock.
+ */
+static boolean_t
+anyraid_can_map_locked(vdev_anyraid_t *va)
+{
+	uint_t width = va->vd_nparity + va->vd_ndata;
+	uint_t n = 0;
+
+	ASSERT(RW_LOCK_HELD(&va->vd_lock));
+	for (vdev_anyraid_node_t *van = avl_first(&va->vd_children_tree);
+	    van != NULL && n < width;
+	    van = AVL_NEXT(&va->vd_children_tree, van), n++) {
+		if ((int64_t)van->van_capacity -
+		    anyraid_freelist_alloc(&van->van_freelist) <= 0 ||
+		    van->van_id == va->vd_contracting_leaf)
+			return (B_FALSE);
+	}
+	return (n == width);
+}
 
 struct anyraid_done_arg {
 	vdev_t *vd;
@@ -456,7 +512,7 @@ vdev_anyraid_config_generate(vdev_t *vd, nvlist_t *nv)
 static void
 create_tile_entry(spa_t *spa, vdev_anyraid_t *va,
     anyraid_map_loc_entry_t *amle, uint8_t *pat_cnt, anyraid_tile_t **out_at,
-    uint32_t *cur_tile)
+    uint32_t *cur_tile, uint8_t nparity)
 {
 	uint8_t disk = amle_get_disk(amle);
 	uint16_t offset = amle_get_offset(amle);
@@ -466,6 +522,13 @@ create_tile_entry(spa_t *spa, vdev_anyraid_t *va,
 		at = kmem_alloc(sizeof (*at), KM_SLEEP);
 		at->at_tile_id = *cur_tile;
 		at->at_synced = spa_current_txg(spa);
+		/*
+		 * Spike: the layout is also a function of the tile id, so a
+		 * map that disagrees with it is corrupt.
+		 */
+		VERIFY3U(nparity, ==, anyraid_tile_nparity(va, *cur_tile));
+		at->at_nparity = nparity;
+		va->vd_ntiles[anyraid_tile_is_alt(va, *cur_tile)]++;
 		avl_add(&va->vd_tile_map, at);
 		list_create(&at->at_list,
 		    sizeof (anyraid_tile_node_t),
@@ -914,6 +977,10 @@ anyraid_open_existing(vdev_t *vd, uint64_t child, int32_t **child_capacities)
 	va->vd_checkpoint_tile = UINT32_MAX;
 	(void) nvlist_lookup_uint32(header.ah_nvl,
 	    VDEV_ANYRAID_HEADER_CHECKPOINT, &va->vd_checkpoint_tile);
+	va->vd_alt_nparity = 0;
+	(void) nvlist_lookup_uint8(header.ah_nvl,
+	    VDEV_ANYRAID_HEADER_ALT_NPARITY, &va->vd_alt_nparity);
+	va->vd_ntiles[0] = va->vd_ntiles[1] = 0;
 
 	/*
 	 * When processing the mapping, we need to iterate across the separate
@@ -943,6 +1010,7 @@ anyraid_open_existing(vdev_t *vd, uint64_t child, int32_t **child_capacities)
 	uint32_t size = sizeof (anyraid_map_loc_entry_t);
 	uint8_t *map_buf = NULL;
 	uint8_t pat_cnt = 0;
+	uint8_t next_nparity = va->vd_nparity;
 	anyraid_tile_t *at = NULL;
 	for (uint32_t off = 0; off < map_length; off += size) {
 		if (checkpoint_rb && cur_tile > va->vd_checkpoint_tile &&
@@ -982,7 +1050,15 @@ anyraid_open_existing(vdev_t *vd, uint64_t child, int32_t **child_capacities)
 				anyraid_map_loc_entry_t *amle =
 				    &entry->ame_u.ame_amle;
 				create_tile_entry(vd->vdev_spa, va, amle,
-				    &pat_cnt, &at, &cur_tile);
+				    &pat_cnt, &at, &cur_tile, next_nparity);
+				if (pat_cnt == 0)
+					next_nparity = va->vd_nparity;
+				break;
+			}
+			case AMET_LAYOUT: {
+				ASSERT0(pat_cnt);
+				next_nparity = amye_get_nparity(
+				    &entry->ame_u.ame_amye);
 				break;
 			}
 			default:
@@ -1103,7 +1179,26 @@ anyraid_calculate_size(vdev_t *vd)
 	 */
 	if (va->vd_tile_size * va->vd_ndata < SPA_MAXBLOCKSIZE)
 		return (SET_ERROR(ENOSPC));
+
+	/* Metadata stays in the first layout, so it has the most parity. */
+	va->vd_alt_nparity = 0;
+	if (va->vd_parity_type == VAP_RAIDZ && zfs_anyraid_alt_nparity != 0 &&
+	    zfs_anyraid_alt_nparity < va->vd_nparity)
+		va->vd_alt_nparity = zfs_anyraid_alt_nparity;
 	return (0);
+}
+
+/*
+ * The logical size of the vdev: with a second layout, each layout can grow
+ * over every physical tile, so the vdev has twice the space they back.
+ */
+static uint64_t
+anyraid_logical_asize(vdev_t *vd, uint64_t *num_tiles)
+{
+	vdev_anyraid_t *va = vd->vdev_tsd;
+	uint64_t asize = calculate_asize(vd, num_tiles);
+
+	return (va->vd_alt_nparity != 0 ? 2 * asize : asize);
 }
 
 struct tile_count {
@@ -1295,7 +1390,7 @@ vdev_anyraid_open(vdev_t *vd, uint64_t *asize, uint64_t *max_asize,
 		va->vd_children[c]->van_capacity = num_tiles[c];
 		avl_add(&va->vd_children_tree, va->vd_children[c]);
 	}
-	*asize = calculate_asize(vd, num_tiles);
+	*asize = anyraid_logical_asize(vd, num_tiles);
 
 	for (int c = 0; c < vd->vdev_children; c++) {
 		vdev_t *cvd = vd->vdev_child[c];
@@ -1310,7 +1405,13 @@ vdev_anyraid_open(vdev_t *vd, uint64_t *asize, uint64_t *max_asize,
 
 		num_tiles[c] = cmasize / va->vd_tile_size;
 	}
-	*max_asize = calculate_asize(vd, num_tiles);
+	*max_asize = anyraid_logical_asize(vd, num_tiles);
+	zfs_dbgmsg("anyraid vdev %llu open: asize %llu max_asize %llu "
+	    "tiles %llu alt_nparity %u children %llu",
+	    (u_longlong_t)vd->vdev_id, (u_longlong_t)*asize,
+	    (u_longlong_t)*max_asize,
+	    (u_longlong_t)avl_numnodes(&va->vd_tile_map),
+	    va->vd_alt_nparity, (u_longlong_t)vd->vdev_children);
 
 	if (child_capacities) {
 		kmem_free(child_capacities, sizeof (*child_capacities) *
@@ -1515,12 +1616,13 @@ vdev_anyraid_raidz_map_translate(vdev_t *vd, raidz_map_t *rm,
  * logic.
  */
 static void
-vdev_anyraid_raidz_start(zio_t *zio, const anyraid_col_t *cols, int ncols)
+vdev_anyraid_raidz_start(zio_t *zio, const anyraid_col_t *cols, int ncols,
+    uint_t nparity)
 {
 	vdev_t *vd = zio->io_vd;
 	vdev_anyraid_t *va = vd->vdev_tsd;
 	raidz_map_t *rm = vdev_raidz_map_alloc(zio, vd->vdev_ashift,
-	    va->vd_width, va->vd_nparity);
+	    va->vd_width, nparity);
 	vdev_anyraid_raidz_map_translate(vd, rm, cols, ncols);
 
 	zio->io_vsd = rm;
@@ -1580,6 +1682,8 @@ anyraid_tile_create(vdev_anyraid_t *va, uint64_t tile_id, avl_index_t where,
 	anyraid_tile_t *tile = kmem_alloc(sizeof (*tile), KM_SLEEP);
 	tile->at_tile_id = tile_id;
 	tile->at_synced = txg;
+	tile->at_nparity = anyraid_tile_nparity(va, tile_id);
+	va->vd_ntiles[anyraid_tile_is_alt(va, tile_id)]++;
 	list_create(&tile->at_list, sizeof (anyraid_tile_node_t),
 	    offsetof(anyraid_tile_node_t, atn_node));
 
@@ -1607,7 +1711,29 @@ anyraid_tile_create(vdev_anyraid_t *va, uint64_t tile_id, avl_index_t where,
 
 	kmem_free(vans, sizeof (*vans) * width);
 	avl_insert(&va->vd_tile_map, tile, where);
+	va->vd_can_map = anyraid_can_map_locked(va);
 	return (tile);
+}
+
+/*
+ * Spike: every metaslab of a mapped tile is allocatable without asking for
+ * physical tiles again.  The flag is only ever set, and read under no lock.
+ */
+static void
+anyraid_mark_mapped(vdev_t *vd, uint64_t tile_id)
+{
+	vdev_anyraid_t *va = vd->vdev_tsd;
+	uint64_t ltsize = anyraid_ltsize(va);
+
+	if (vd->vdev_ms == NULL || vd->vdev_ms_shift == 0)
+		return;
+	uint64_t first = (tile_id * ltsize) >> vd->vdev_ms_shift;
+	uint64_t last = MIN(vd->vdev_ms_count,
+	    ((tile_id + 1) * ltsize) >> vd->vdev_ms_shift);
+	for (uint64_t m = first; m < last; m++) {
+		if (vd->vdev_ms[m] != NULL)
+			vd->vdev_ms[m]->ms_ar_mapped = B_TRUE;
+	}
 }
 
 static void
@@ -1631,7 +1757,7 @@ vdev_anyraid_io_start(zio_t *zio)
 	if (write) {
 		uint64_t lstart, lsize;
 		anyraid_rows(va, vd->vdev_ashift, zio->io_offset,
-		    vdev_anyraid_asize(vd, zio->io_size, zio->io_txg),
+		    vdev_anyraid_offset_asize(vd, zio->io_offset, zio->io_size),
 		    &lstart, &lsize);
 		ai = kmem_zalloc(sizeof (*ai), KM_SLEEP);
 		ai->ai_shadow_col = -1;
@@ -1660,10 +1786,34 @@ vdev_anyraid_io_start(zio_t *zio)
 		rw_enter(&va->vd_lock, RW_WRITER);
 		tile = avl_find(&va->vd_tile_map, &search, &where);
 	}
+	boolean_t lazy = B_FALSE;
 	if (tile == NULL) {
 		ASSERT(write);
+		/*
+		 * Spike: without admission at allocation, a second layout
+		 * can allocate past the physical tiles, and this is where the
+		 * pool finds out, in syncing context.
+		 */
+		VERIFY(va->vd_alt_nparity == 0 || anyraid_can_map_locked(va));
 		tile = anyraid_tile_create(va, start_tile_id, where,
 		    MAX(zio->io_txg, spa_syncing_txg(vd->vdev_spa)));
+		atomic_inc_64(&anyraid_layout_counters.alc_lazy_maps);
+		lazy = B_TRUE;
+	}
+	uint_t tile_nparity = tile->at_nparity;
+
+	/*
+	 * Spike: a write issued in open context (the ZIL, dmu_sync) must be
+	 * readable before its txg syncs, so its tile must already be in the
+	 * on-disk map.
+	 */
+	if (write && zio->io_txg > spa_syncing_txg(vd->vdev_spa) &&
+	    tile->at_synced + VDEV_ANYRAID_MAP_COPIES > zio->io_txg) {
+		atomic_inc_64(&anyraid_layout_counters.alc_open_unsynced);
+		if (zio->io_flags & ZIO_FLAG_ZILWRITE) {
+			atomic_inc_64(
+			    &anyraid_layout_counters.alc_zil_unsynced);
+		}
 	}
 
 	int n = 0;
@@ -1699,6 +1849,8 @@ vdev_anyraid_io_start(zio_t *zio)
 		ASSERT3S(ai->ai_shadow_col, >=, 0);
 	}
 	rw_exit(&va->vd_lock);
+	if (lazy)
+		anyraid_mark_mapped(vd, start_tile_id);
 
 	zio->io_aux_vsd = ai;
 
@@ -1713,7 +1865,8 @@ vdev_anyraid_io_start(zio_t *zio)
 			}
 			break;
 		case VAP_RAIDZ:
-			vdev_anyraid_raidz_start(zio, cols, ncols);
+			vdev_anyraid_raidz_start(zio, cols, ncols,
+			    tile_nparity);
 			kmem_free(cols, sizeof (*cols) * ncols);
 			zio_execute(zio);
 			return;
@@ -1801,6 +1954,16 @@ vdev_anyraid_io_done(zio_t *zio)
 	}
 	if (zio->io_stage != ZIO_STAGE_VDEV_IO_DONE)
 		return;
+
+	/*
+	 * Spike: a tile of the second layout can lose more columns than it
+	 * has parity while the vdev, and the metadata in the first layout,
+	 * survive.  ENXIO would suspend the pool; its blocks are lost, EIO.
+	 */
+	if (zio->io_error == ENXIO && va->vd_alt_nparity != 0 &&
+	    !vdev_is_dead(vd))
+		zio->io_error = SET_ERROR(EIO);
+
 	anyraid_io_t *ai = zio->io_aux_vsd;
 	if (ai == NULL)
 		return;
@@ -2007,6 +2170,17 @@ map_write_loc_entry(anyraid_tile_node_t *atn, void *buf, uint32_t *offset)
 }
 
 static boolean_t
+map_write_layout_entry(uint8_t nparity, void *buf, uint32_t *offset)
+{
+	anyraid_map_layout_entry_t *entry = (void *)((char *)buf + *offset);
+	*entry = 0;
+	amye_set_type(entry);
+	amye_set_nparity(entry, nparity);
+	*offset += sizeof (*entry);
+	return (*offset == SPA_MAXBLOCKSIZE);
+}
+
+static boolean_t
 map_write_skip_entry(uint32_t tile, void *buf, uint32_t *offset,
     uint32_t prev_id)
 {
@@ -2088,6 +2262,7 @@ vdev_anyraid_write_map_sync(vdev_t *vd, zio_t *pio, uint64_t txg,
 	anyraid_tile_node_t *curn = cur != NULL ?
 	    list_head(&cur->at_list) : NULL;
 	uint32_t buf_offset = 0, prev_id = UINT32_MAX;
+	boolean_t layout_done = B_FALSE;
 	zio_t *zio = zio_root(spa, NULL, NULL, flags);
 	/* Write out each sub-tile in turn */
 	while (cur) {
@@ -2104,9 +2279,16 @@ vdev_anyraid_write_map_sync(vdev_t *vd, zio_t *pio, uint64_t txg,
 		boolean_t skip =
 		    (prev_id == UINT32_MAX && cur->at_tile_id != 0) ||
 		    (prev_id != UINT32_MAX && cur->at_tile_id > prev_id + 1);
+		/* Spike: a tile of the second layout says so first. */
+		boolean_t layout = !skip && !layout_done &&
+		    curn == list_head(&cur->at_list) &&
+		    cur->at_nparity != va->vd_nparity;
 		if ((skip && map_write_skip_entry(cur->at_tile_id, buf,
 		    &buf_offset, prev_id)) ||
-		    (!skip && map_write_loc_entry(curn, buf, &buf_offset))) {
+		    (layout && map_write_layout_entry(cur->at_nparity, buf,
+		    &buf_offset)) ||
+		    (!skip && !layout &&
+		    map_write_loc_entry(curn, buf, &buf_offset))) {
 			// Let the final write handle it
 			if (next == NULL)
 				break;
@@ -2121,6 +2303,10 @@ vdev_anyraid_write_map_sync(vdev_t *vd, zio_t *pio, uint64_t txg,
 			buf = abd_borrow_buf(map_abd, SPA_MAXBLOCKSIZE);
 			buf_offset = 0;
 		}
+		if (layout) {
+			layout_done = B_TRUE;
+			continue;
+		}
 		prev_id = cur->at_tile_id;
 		/*
 		 * Advance the current sub-tile; if it moves us past the end
@@ -2132,6 +2318,7 @@ vdev_anyraid_write_map_sync(vdev_t *vd, zio_t *pio, uint64_t txg,
 				cur = next;
 				curn = cur != NULL ?
 				    list_head(&cur->at_list) : NULL;
+				layout_done = B_FALSE;
 			}
 		}
 	}
@@ -2184,6 +2371,10 @@ vdev_anyraid_write_map_sync(vdev_t *vd, zio_t *pio, uint64_t txg,
 	if (va->vd_checkpoint_tile != UINT32_MAX) {
 		fnvlist_add_uint32(header, VDEV_ANYRAID_HEADER_CHECKPOINT,
 		    va->vd_checkpoint_tile);
+	}
+	if (va->vd_alt_nparity != 0) {
+		fnvlist_add_uint8(header, VDEV_ANYRAID_HEADER_ALT_NPARITY,
+		    va->vd_alt_nparity);
 	}
 	vdev_anyraid_relocate_t *var = &va->vd_relocate;
 	if (var->var_state != ARS_NONE && var->var_state != ARS_FINISHED)
@@ -2317,6 +2508,136 @@ vdev_anyraid_mapped(vdev_t *vd, uint64_t offset, uint64_t txg)
 }
 
 /*
+ * Spike: admission.  With a second layout the logical space is twice what
+ * the physical tiles back, so a metaslab whose tile is not mapped is
+ * allocatable only while a tile can still be mapped.  This hint is read by
+ * the allocator under metaslab locks, without vd_lock; vdev_anyraid_admit()
+ * decides, before the allocator takes the metaslab lock.
+ */
+boolean_t
+vdev_anyraid_admissible(metaslab_t *msp)
+{
+	vdev_anyraid_t *va = msp->ms_group->mg_vd->vdev_tsd;
+
+	if (va->vd_alt_nparity == 0 || !zfs_anyraid_thin_admit)
+		return (B_TRUE);
+	return (msp->ms_ar_mapped || va->vd_can_map);
+}
+
+int
+vdev_anyraid_admit(metaslab_t *msp, uint64_t txg)
+{
+	vdev_t *vd = msp->ms_group->mg_vd;
+	vdev_anyraid_t *va = vd->vdev_tsd;
+
+	if (va->vd_alt_nparity == 0 || !zfs_anyraid_thin_admit ||
+	    msp->ms_ar_mapped)
+		return (0);
+
+	anyraid_tile_t search;
+	avl_index_t where;
+	search.at_tile_id = msp->ms_start / anyraid_ltsize(va);
+	rw_enter(&va->vd_lock, RW_WRITER);
+	anyraid_tile_t *tile = avl_find(&va->vd_tile_map, &search, &where);
+	if (tile == NULL) {
+		if (!anyraid_can_map_locked(va)) {
+			va->vd_can_map = B_FALSE;
+			rw_exit(&va->vd_lock);
+			atomic_inc_64(&anyraid_layout_counters.alc_admit_fails);
+			return (SET_ERROR(ENOSPC));
+		}
+		(void) anyraid_tile_create(va, search.at_tile_id, where,
+		    MAX(txg, spa_syncing_txg(vd->vdev_spa)));
+		atomic_inc_64(&anyraid_layout_counters.alc_admit_maps);
+	}
+	rw_exit(&va->vd_lock);
+	anyraid_mark_mapped(vd, search.at_tile_id);
+	return (0);
+}
+
+/* Called before the metaslab joins its group, under no metaslab lock. */
+void
+vdev_anyraid_ms_init(vdev_t *vd, metaslab_t *msp)
+{
+	vdev_anyraid_t *va = vd->vdev_tsd;
+
+	if (va->vd_tile_size == 0)
+		return;
+	anyraid_tile_t search;
+	search.at_tile_id = msp->ms_start / anyraid_ltsize(va);
+	rw_enter(&va->vd_lock, RW_READER);
+	msp->ms_ar_mapped =
+	    avl_find(&va->vd_tile_map, &search, NULL) != NULL;
+	va->vd_can_map = anyraid_can_map_locked(va);
+	rw_exit(&va->vd_lock);
+}
+
+/*
+ * Free space in the mapped tiles of the second layout: the first layout,
+ * which holds the metadata, cannot use it.
+ */
+uint64_t
+vdev_anyraid_stranded(vdev_t *vd)
+{
+	vdev_anyraid_t *va = vd->vdev_tsd;
+	uint64_t stranded = 0;
+
+	if (va->vd_alt_nparity == 0 || vd->vdev_ms == NULL)
+		return (0);
+	for (uint64_t m = 0; m < vd->vdev_ms_count; m++) {
+		metaslab_t *msp = vd->vdev_ms[m];
+		if (msp == NULL || !msp->ms_ar_mapped ||
+		    msp->ms_group != vd->vdev_alt_mg)
+			continue;
+		stranded += msp->ms_size - metaslab_allocated_space(msp);
+	}
+	return (stranded);
+}
+
+void
+vdev_anyraid_layout_stats(vdev_t *vd, anyraid_layout_stats_t *als)
+{
+	vdev_anyraid_t *va = vd->vdev_tsd;
+
+	memset(als, 0, sizeof (*als));
+	als->als_nparity[0] = va->vd_nparity;
+	als->als_nparity[1] = va->vd_alt_nparity;
+	als->als_ltile_size = anyraid_ltsize(va);
+	for (uint64_t m = 0; vd->vdev_ms != NULL && m < vd->vdev_ms_count;
+	    m++) {
+		metaslab_t *msp = vd->vdev_ms[m];
+		int l = vdev_anyraid_ms_is_alt(vd, msp->ms_start);
+		if (msp->ms_ar_mapped) {
+			als->als_mapped_space[l] += msp->ms_size;
+			als->als_mapped_alloc[l] +=
+			    metaslab_allocated_space(msp);
+		} else {
+			als->als_unmapped_alloc[l] +=
+			    metaslab_allocated_space(msp);
+		}
+	}
+
+	uint64_t *num_tiles = kmem_zalloc(vd->vdev_children *
+	    sizeof (*num_tiles), KM_SLEEP);
+	rw_enter(&va->vd_lock, RW_READER);
+	als->als_tiles[0] = va->vd_ntiles[0];
+	als->als_tiles[1] = va->vd_ntiles[1];
+	for (int c = 0; c < vd->vdev_children; c++) {
+		vdev_anyraid_node_t *van = va->vd_children[c];
+		int64_t f = (int64_t)van->van_capacity -
+		    anyraid_freelist_alloc(&van->van_freelist);
+		als->als_free_ptiles += MAX(f, 0);
+		num_tiles[c] = va->vd_contracting_leaf == c ? 0 :
+		    van->van_capacity;
+	}
+	uint64_t total = calculate_asize(vd, num_tiles) / als->als_ltile_size;
+	uint64_t mapped = avl_numnodes(&va->vd_tile_map);
+	als->als_more_tiles = total > mapped ? total - mapped : 0;
+	rw_exit(&va->vd_lock);
+	kmem_free(num_tiles, vd->vdev_children * sizeof (*num_tiles));
+}
+
+/*
  * Return the maximum asize for a rebuild zio in the provided range
  * given the following constraints.  An anyraid chunk may not:
  *
@@ -2342,15 +2663,10 @@ vdev_anyraid_rebuild_asize(vdev_t *vd, uint64_t start, uint64_t asize,
 }
 
 static uint64_t
-vdev_anyraid_asize(vdev_t *vd, uint64_t psize, uint64_t txg)
+anyraid_raidz_asize(vdev_t *vd, uint64_t nparity, uint64_t psize)
 {
 	vdev_anyraid_t *va = vd->vdev_tsd;
-	ASSERT(vdev_is_anyraid(vd));
-	if (va->vd_parity_type == VAP_MIRROR)
-		return (vdev_default_asize(vd, psize, txg));
-
 	uint64_t ashift = vd->vdev_top->vdev_ashift;
-	uint64_t nparity = va->vd_nparity;
 	uint64_t cols = va->vd_width;
 
 	uint64_t asize = ((psize - 1) >> ashift) + 1;
@@ -2370,15 +2686,20 @@ vdev_anyraid_asize(vdev_t *vd, uint64_t psize, uint64_t txg)
 }
 
 static uint64_t
-vdev_anyraid_psize(vdev_t *vd, uint64_t asize, uint64_t txg)
+vdev_anyraid_asize(vdev_t *vd, uint64_t psize, uint64_t txg)
 {
-	(void) txg;
 	vdev_anyraid_t *va = vd->vdev_tsd;
 	ASSERT(vdev_is_anyraid(vd));
-	ASSERT3U(va->vd_parity_type, ==, VAP_RAIDZ);
+	if (va->vd_parity_type == VAP_MIRROR)
+		return (vdev_default_asize(vd, psize, txg));
+	return (anyraid_raidz_asize(vd, va->vd_nparity, psize));
+}
 
+static uint64_t
+anyraid_raidz_psize(vdev_t *vd, uint64_t nparity, uint64_t asize)
+{
+	vdev_anyraid_t *va = vd->vdev_tsd;
 	uint64_t ashift = vd->vdev_top->vdev_ashift;
-	uint64_t nparity = va->vd_nparity;
 	uint64_t cols = va->vd_width;
 
 	ASSERT0(asize % (1 << ashift));
@@ -2396,6 +2717,78 @@ vdev_anyraid_psize(vdev_t *vd, uint64_t asize, uint64_t txg)
 	psize <<= ashift;
 
 	return (psize);
+}
+
+static uint64_t
+vdev_anyraid_psize(vdev_t *vd, uint64_t asize, uint64_t txg)
+{
+	(void) txg;
+	vdev_anyraid_t *va = vd->vdev_tsd;
+	ASSERT(vdev_is_anyraid(vd));
+	ASSERT3U(va->vd_parity_type, ==, VAP_RAIDZ);
+	return (anyraid_raidz_psize(vd, va->vd_nparity, asize));
+}
+
+/*
+ * Spike: the size of a block in one layout.  The allocator knows the layout
+ * from the metaslab group before it knows the offset; everything after it
+ * knows the offset.
+ */
+uint64_t
+vdev_anyraid_layout_asize(vdev_t *vd, boolean_t alt, uint64_t psize)
+{
+	vdev_anyraid_t *va = vd->vdev_tsd;
+
+	if (!alt || va->vd_alt_nparity == 0)
+		return (vdev_anyraid_asize(vd, psize, 0));
+	return (anyraid_raidz_asize(vd, va->vd_alt_nparity, psize));
+}
+
+uint64_t
+vdev_anyraid_layout_psize(vdev_t *vd, boolean_t alt, uint64_t asize)
+{
+	vdev_anyraid_t *va = vd->vdev_tsd;
+
+	if (va->vd_parity_type == VAP_MIRROR)
+		return (vdev_default_psize(vd, asize, 0));
+	if (!alt || va->vd_alt_nparity == 0)
+		return (vdev_anyraid_psize(vd, asize, 0));
+	return (anyraid_raidz_psize(vd, va->vd_alt_nparity, asize));
+}
+
+boolean_t
+vdev_anyraid_thin(vdev_t *vd)
+{
+	vdev_anyraid_t *va = vd->vdev_tsd;
+
+	return (vdev_is_anyraid(vd) && va->vd_alt_nparity != 0);
+}
+
+boolean_t
+vdev_anyraid_ms_is_alt(vdev_t *vd, uint64_t offset)
+{
+	vdev_anyraid_t *va = vd->vdev_tsd;
+
+	if (va->vd_alt_nparity == 0)
+		return (B_FALSE);
+	return (anyraid_tile_is_alt(va, offset / anyraid_ltsize(va)));
+}
+
+uint_t
+vdev_anyraid_offset_nparity(vdev_t *vd, uint64_t offset)
+{
+	vdev_anyraid_t *va = vd->vdev_tsd;
+
+	if (va->vd_alt_nparity == 0)
+		return (va->vd_nparity);
+	return (anyraid_tile_nparity(va, offset / anyraid_ltsize(va)));
+}
+
+uint64_t
+vdev_anyraid_offset_asize(vdev_t *vd, uint64_t offset, uint64_t psize)
+{
+	return (vdev_anyraid_layout_asize(vd,
+	    vdev_anyraid_ms_is_alt(vd, offset), psize));
 }
 
 uint64_t
@@ -2779,7 +3172,7 @@ disable_tail:
 		}
 		num_tiles[c] = van->van_capacity;
 	}
-	uint64_t updated_asize = calculate_asize(vd, num_tiles);
+	uint64_t updated_asize = anyraid_logical_asize(vd, num_tiles);
 	rw_exit(&va->vd_lock);
 	kmem_free(num_tiles, vd->vdev_children * sizeof (*num_tiles));
 	var->var_nonalloc = vd->vdev_asize - updated_asize;
@@ -3169,7 +3562,7 @@ vdev_anyraid_setup_rebalance(vdev_t *vd, dmu_tx_t *tx)
 		return;
 	}
 
-	uint64_t updated_asize = calculate_asize(vd, num_tiles);
+	uint64_t updated_asize = anyraid_logical_asize(vd, num_tiles);
 	rw_exit(&va->vd_lock);
 	kmem_free(num_tiles, vd->vdev_children * sizeof (*num_tiles));
 	ASSERT3U(vd->vdev_asize, >=, updated_asize);
@@ -4002,7 +4395,7 @@ vdev_anyraid_check_contract(vdev_t *tvd, vdev_t *lvd, dmu_tx_t *tx)
 	/*
 	 * Step 2: Calculate the new asize of the proposed movement plan
 	 */
-	uint64_t updated_asize = calculate_asize(tvd, num_tiles);
+	uint64_t updated_asize = anyraid_logical_asize(tvd, num_tiles);
 
 	/*
 	 * Step 3: Verify that all the current data can fit in the proposed
@@ -4145,3 +4538,11 @@ ZFS_MODULE_PARAM(zfs_vdev_anyraid, zfs_vdev_anyraid_, min_tile_size, U64,
 
 ZFS_MODULE_PARAM(zfs_vdev, anyraid_, relocate_max_bytes_pause, ULONG, ZMOD_RW,
 	"For testing, pause AnyRAID relocate after moving this many bytes");
+ZFS_MODULE_PARAM(zfs_anyraid, zfs_anyraid_, alt_nparity, UINT, ZMOD_RW,
+	"Spike: parity of a second tile layout for new anyraidz vdevs");
+
+ZFS_MODULE_PARAM(zfs_anyraid, zfs_anyraid_, thin_admit, INT, ZMOD_RW,
+	"Spike: map tiles of a two-layout vdev at allocation");
+
+ZFS_MODULE_PARAM(zfs_anyraid, zfs_anyraid_, thin_dspace, INT, ZMOD_RW,
+	"Spike: keep free space of the second layout out of the pool size");

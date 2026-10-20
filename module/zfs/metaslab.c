@@ -510,7 +510,8 @@ metaslab_class_validate(metaslab_class_t *mc)
 			vdev_t *vd = mg->mg_vd;
 
 			ASSERT3P(vd->vdev_top, ==, vd);
-			ASSERT(vd->vdev_mg == mg || vd->vdev_log_mg == mg);
+			ASSERT(vd->vdev_mg == mg || vd->vdev_log_mg == mg ||
+			    vd->vdev_alt_mg == mg);
 			ASSERT3P(mg->mg_class, ==, mc);
 			ASSERT3P(vd->vdev_ops, !=, &vdev_hole_ops);
 			ASSERT0(zfs_refcount_count(&mga->mga_queue_depth));
@@ -2680,7 +2681,10 @@ metaslab_load_impl(metaslab_t *msp)
 	uint64_t weight = msp->ms_weight;
 	uint64_t max_size = msp->ms_max_size;
 	metaslab_recalculate_weight_and_sort(msp);
-	if (!WEIGHT_IS_SPACEBASED(weight))
+	/* Spike: an AnyRAID tile that ran out of backing drops to 0. */
+	if (!WEIGHT_IS_SPACEBASED(weight) &&
+	    !(vdev_is_anyraid(msp->ms_group->mg_vd) &&
+	    !vdev_anyraid_admissible(msp)))
 		ASSERT3U(weight, <=, msp->ms_weight);
 	msp->ms_max_size = metaslab_largest_allocatable(msp);
 	ASSERT3U(max_size, <=, msp->ms_max_size);
@@ -2988,6 +2992,8 @@ metaslab_init(metaslab_group_t *mg, uint64_t id, uint64_t object,
 	    NULL, type, NULL, start, shift,
 	    ZFS_RT_F_DYN_NAME, metaslab_rt_name(mg, ms, "ms_trim"));
 
+	if (vdev_anyraid_thin(vd))
+		vdev_anyraid_ms_init(vd, ms);
 	metaslab_group_add(mg, ms);
 	metaslab_set_fragmentation(ms, B_FALSE);
 
@@ -3521,6 +3527,11 @@ metaslab_should_allocate(metaslab_t *msp, uint64_t asize, boolean_t try_hard,
 	    !vdev_anyraid_mapped(msp->ms_group->mg_vd, msp->ms_start, txg))
 		return (B_FALSE);
 
+	/* Spike: no physical tile left to map this metaslab's tile. */
+	if (vdev_is_anyraid(msp->ms_group->mg_vd) &&
+	    !vdev_anyraid_admissible(msp))
+		return (B_FALSE);
+
 	/*
 	 * If the metaslab is loaded, ms_max_size is definitive and we can use
 	 * the fast check. If it's not, the ms_max_size is a lower bound (once
@@ -3582,6 +3593,13 @@ metaslab_weight(metaslab_t *msp, boolean_t nodirty)
 	/*
 	 * Segment-based weighting requires space map histogram support.
 	 */
+	/*
+	 * Spike: an AnyRAID metaslab whose tile cannot be mapped any more
+	 * sorts last, rather than first as an empty metaslab would.
+	 */
+	if (vdev_is_anyraid(vd) && !vdev_anyraid_admissible(msp))
+		return (0);
+
 	if (zfs_metaslab_segment_weight_enabled &&
 	    spa_feature_is_enabled(spa, SPA_FEATURE_SPACEMAP_HISTOGRAM) &&
 	    (msp->ms_sm == NULL || msp->ms_sm->sm_dbuf->db_size ==
@@ -5168,6 +5186,18 @@ metaslab_group_alloc(metaslab_group_t *mg, zio_alloc_list_t *zal,
 		mutex_exit(&mg->mg_lock);
 		if (msp == NULL)
 			break;
+
+		/*
+		 * Spike: map the AnyRAID tile now, in the context that can
+		 * still fail the allocation, rather than in io_start.  This
+		 * takes vd_lock, so no metaslab lock may be held.
+		 */
+		if (vdev_is_anyraid(mg->mg_vd) &&
+		    vdev_anyraid_admit(msp, txg) != 0) {
+			metaslab_trace_add(zal, mg, msp, asize, d,
+			    TRACE_TOO_SMALL, allocator);
+			continue;
+		}
 		mutex_enter(&msp->ms_lock);
 
 		metaslab_active_mask_verify(msp);
@@ -5514,9 +5544,16 @@ top:
 
 		vd = mg->mg_vd;
 		uint64_t asize = vdev_psize_to_asize_txg(vd, psize, txg);
-		ASSERT0(P2PHASE(asize, 1ULL << vd->vdev_ashift));
 		uint64_t max_asize = vdev_psize_to_asize_txg(vd, max_psize,
 		    txg);
+		/* Spike: the second AnyRAID layout has its own asize. */
+		boolean_t alt = (mg == vd->vdev_alt_mg);
+		if (alt) {
+			asize = vdev_anyraid_layout_asize(vd, B_TRUE, psize);
+			max_asize = vdev_anyraid_layout_asize(vd, B_TRUE,
+			    max_psize);
+		}
+		ASSERT0(P2PHASE(asize, 1ULL << vd->vdev_ashift));
 		ASSERT0(P2PHASE(max_asize, 1ULL << vd->vdev_ashift));
 		boolean_t mapped = B_FALSE;
 		if (flags & METASLAB_ZIL)
@@ -5527,9 +5564,13 @@ top:
 		    &asize);
 
 		if (offset != -1ULL) {
-			if (actual_psize)
+			if (actual_psize && alt) {
+				*actual_psize = vdev_anyraid_layout_psize(vd,
+				    B_TRUE, asize);
+			} else if (actual_psize) {
 				*actual_psize = vdev_asize_to_psize_txg(vd,
 				    asize, txg);
+			}
 			metaslab_class_rotate(mg, allocator, psize, B_TRUE);
 
 			DVA_SET_VDEV(&dva[d], vd->vdev_id);

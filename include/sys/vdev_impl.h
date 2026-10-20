@@ -262,6 +262,7 @@ struct vdev {
 	uint64_t	vdev_ms_count;	/* number of metaslabs		*/
 	metaslab_group_t *vdev_mg;	/* metaslab group		*/
 	metaslab_group_t *vdev_log_mg;	/* embedded slog metaslab group	*/
+	metaslab_group_t *vdev_alt_mg;	/* spike: second AnyRAID layout	*/
 	metaslab_t	**vdev_ms;	/* metaslab array		*/
 	txg_list_t	vdev_ms_list;	/* per-txg dirty metaslab lists	*/
 	txg_list_t	vdev_dtl_list;	/* per-txg dirty DTL lists	*/

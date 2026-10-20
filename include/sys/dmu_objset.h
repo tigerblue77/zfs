@@ -153,6 +153,7 @@ struct objset {
 	 * cached here instead of zfsvfs for easier access.
 	 */
 	uint64_t os_zpl_special_smallblock;
+	uint64_t os_anyraid_layout;	/* spike */
 
 	/*
 	 * Pointer is constant; the blkptr it points to is protected by

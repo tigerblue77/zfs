@@ -272,6 +272,7 @@ struct spa {
 	metaslab_class_t *spa_special_class;	/* special allocation class */
 	metaslab_class_t *spa_special_embedded_log_class; /* log on special */
 	metaslab_class_t *spa_dedup_class;	/* dedup allocation class */
+	metaslab_class_t *spa_anyraid_alt_class; /* spike: AnyRAID layout */
 	uint64_t	spa_first_txg;		/* first txg after spa_open() */
 	uint64_t	spa_final_txg;		/* txg of export/destroy */
 	uint64_t	spa_freeze_txg;		/* freeze pool at this txg */

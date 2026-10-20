@@ -1837,6 +1837,8 @@ spa_activate(spa_t *spa, spa_mode_t mode)
 	    "special_embedded_log", msp, B_TRUE);
 	spa->spa_dedup_class = metaslab_class_create(spa, "dedup",
 	    msp, B_FALSE);
+	spa->spa_anyraid_alt_class = metaslab_class_create(spa,
+	    "anyraid_alt", msp, B_FALSE);
 
 	/* Try to create a covering process */
 	mutex_enter(&spa->spa_proc_lock);
@@ -2018,6 +2020,9 @@ spa_deactivate(spa_t *spa)
 
 	metaslab_class_destroy(spa->spa_dedup_class);
 	spa->spa_dedup_class = NULL;
+
+	metaslab_class_destroy(spa->spa_anyraid_alt_class);
+	spa->spa_anyraid_alt_class = NULL;
 
 	/*
 	 * If this was part of an import or the open otherwise failed, we may
@@ -10916,6 +10921,7 @@ spa_sync_adjust_vdev_max_queue_depth(spa_t *spa)
 	metaslab_class_balance(spa_normal_class(spa), B_TRUE);
 	metaslab_class_balance(spa_special_class(spa), B_TRUE);
 	metaslab_class_balance(spa_dedup_class(spa), B_TRUE);
+	metaslab_class_balance(spa_anyraid_alt_class(spa), B_TRUE);
 }
 
 static void
@@ -11270,6 +11276,7 @@ spa_sync(spa_t *spa, uint64_t txg)
 	/* Embedded log classes have only one metaslab per vdev. */
 	metaslab_class_evict_old(spa->spa_special_class, txg);
 	metaslab_class_evict_old(spa->spa_dedup_class, txg);
+	metaslab_class_evict_old(spa->spa_anyraid_alt_class, txg);
 
 	spa_sync_close_syncing_log_sm(spa);
 

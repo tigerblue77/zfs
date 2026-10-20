@@ -2602,6 +2602,7 @@ dmu_write_policy(objset_t *os, dnode_t *dn, int level, int wp, zio_prop_t *zp)
 	memset(zp->zp_iv, 0, ZIO_DATA_IV_LEN);
 	memset(zp->zp_mac, 0, ZIO_DATA_MAC_LEN);
 	zp->zp_zpl_smallblk = os->os_zpl_special_smallblock;
+	zp->zp_layout = (uint8_t)os->os_anyraid_layout;
 	zp->zp_storage_type = dn ? dn->dn_storage_type : DMU_OT_NONE;
 
 	ASSERT3U(zp->zp_compress, !=, ZIO_COMPRESS_INHERIT);
