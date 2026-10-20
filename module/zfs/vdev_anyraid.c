@@ -1118,6 +1118,7 @@ vdev_anyraid_io_start(zio_t *zio)
 		    (u_longlong_t)start_tile_id, zio);
 		tile = kmem_alloc(sizeof (*tile), KM_SLEEP);
 		tile->at_tile_id = start_tile_id;
+		tile->at_synced = spa_syncing_txg(vd->vdev_spa);
 		list_create(&tile->at_list, sizeof (anyraid_tile_node_t),
 		    offsetof(anyraid_tile_node_t, atn_node));
 
