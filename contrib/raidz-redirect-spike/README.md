@@ -900,3 +900,42 @@ and the pool suspends at 0.99 even with the charge; aligned, the fill ends
 at 1.0013 to 1.0043.  The controls end at 1.0006 to 1.0008, with or without
 the change.  After each fill, zdb -b finds the claims' difference equal to
 the tables' charge, to the byte, and no leak.
+
+## The hybrid mover, the pre-flight check, fragmentation
+
+    hybrid_probe <dir> <ashift> <redirect|hybrid> [filemb=N] [reck=N]
+        [objs=N] [overw=N] [new=N] [objmb=N] [steer] [force] [nofill]
+        [destroy] [expect=refused]
+
+**Pre-flight.**  `vdev_raidz_migrate_need_add()` takes each DVA the
+migration will move, as a redirect or a rewrite, and sizes it at the
+layout it moves to, padding included.  `vdev_raidz_migrate_preflight()`
+refuses with ENOSPC unless the end state fits in the free space minus the
+slop *and* the redirects' new extents pack, first fit decreasing, into the
+free segments as they stand, with room left for the slop, the table and
+the rewrites' growth.  The second condition is the one that matters: a
+redirect frees a tail shorter than its own new extent, fenced by kept
+sectors, so the move cannot use what it frees.  On 5 x 256 MiB with 320
+MiB of 16K blocks, the end state fits (547 of 599 MB) but only 7.8 MB stay
+usable after the new extents, against 210 MB needed; moved anyway, 861
+blocks are refused with ENOSPC on the way and 802 old DVAs stay unmoved.
+The check refuses it before moving anything.  The packing is a model of
+the allocator, not the allocator.
+
+**Hybrid.**  Blocks the head owns (its objset, logical birth after its
+previous snapshot) are rewritten with `dmu_buf_will_rewrite()`, as `zfs
+rewrite -P` does; the rest is redirected, then a census redirects what
+the rewrite did not reach and must end at 0.  With 70 % head data and
+30 % snapshot-only data (5 x 320 MiB, ashift 12, 128K): 788 table entries
+instead of 2608, 1.1 MB of table instead of 3.8 MB, 3.2-3.9 s instead of
+4.6-5.6 s, no gang block in the fill instead of 27 %.  In 16K records:
+6170 entries instead of 20548, 13 s instead of 36 s, 352 MB written by the
+fill instead of 193 MB.
+
+**Fragmentation.**  The tails a redirect frees cannot hold a block of the
+same size at the higher parity (a 128K block at ashift 12 frees 39 sectors
+and needs 54), so they remain until the block is freed.  Placing new
+extents back to back in the densest metaslab (`steer`) does not change
+that (gang rate 28 % instead of 27 %).  After `destroy` of the snapshot,
+the hybrid's free space is whole again; the all-redirect mover keeps the
+head's 1820 entries and their tails, and 11 % of new 128K blocks gang.

@@ -327,6 +327,33 @@ typedef struct raidz_redirect_move {
 
 extern int vdev_raidz_redirect_move(spa_t *, uint64_t,
     raidz_redirect_move_t *, int, raidz_redirect_keep_t, boolean_t);
+/* SPIKE: the pre-flight check of a migration (test-only mover). */
+#define	RAIDZ_MIGRATE_CLASSES	64
+typedef struct raidz_migrate_need {
+	uint64_t rmn_txg;		/* the layout blocks move to */
+	uint64_t rmn_entry_bytes;	/* table metadata per redirect */
+	uint64_t rmn_nredirect;
+	uint64_t rmn_nrewrite;
+	uint64_t rmn_redirect_old;	/* raw bytes, as allocated */
+	uint64_t rmn_redirect_new;
+	uint64_t rmn_redirect_keep;
+	uint64_t rmn_rewrite_old;
+	uint64_t rmn_rewrite_new;
+	int rmn_nclass;			/* the redirects' new asizes */
+	uint64_t rmn_class_asize[RAIDZ_MIGRATE_CLASSES];
+	uint64_t rmn_class_count[RAIDZ_MIGRATE_CLASSES];
+	/* Set by vdev_raidz_migrate_preflight(), raw bytes. */
+	uint64_t rmn_free;		/* allocatable now */
+	uint64_t rmn_slop;
+	uint64_t rmn_need_end;		/* growth of what the vdev holds */
+	uint64_t rmn_packed;		/* of rmn_redirect_new */
+	uint64_t rmn_left;		/* usable after the packing */
+	uint64_t rmn_need_left;
+} raidz_migrate_need_t;
+
+extern void vdev_raidz_migrate_need_add(vdev_t *, raidz_migrate_need_t *,
+    const struct blkptr *, int, boolean_t);
+extern int vdev_raidz_migrate_preflight(vdev_t *, raidz_migrate_need_t *);
 extern boolean_t vdev_raidz_redirect_get(vdev_t *, uint64_t, uint64_t,
     raidz_redirect_ent_t *);
 extern boolean_t vdev_raidz_redirect_get_live(vdev_t *, uint64_t, uint64_t,

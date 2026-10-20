@@ -8571,6 +8571,187 @@ vdev_raidz_redirect_move(spa_t *spa, uint64_t vdev,
 }
 
 /*
+ * SPIKE, not for merge: the pre-flight check of a parity migration.  The
+ * caller adds every DVA the migration will move, each as a redirect or a
+ * rewrite, with vdev_raidz_migrate_need_add(); the new size of each is its
+ * asize at the layout of rmn_txg, padding included (a 4-sector raidz1
+ * block takes 6 sectors at raidz2).  vdev_raidz_migrate_preflight() then
+ * refuses with ENOSPC unless both hold, leaving the slop free:
+ *
+ *  - The end state: Σ (N + kept - O) of the redirects, Σ (N - O) of the
+ *    rewrites and the table's metadata fit in the free space.
+ *  - The way there: the redirects' new extents, packed first-fit
+ *    decreasing into the free segments as they stand, all fit, and what
+ *    is left holds the rest.  A redirect frees a tail shorter than its own
+ *    new extent, fenced by kept sectors, so the move cannot count on it;
+ *    a rewrite frees its whole extent, which later rewrites reuse.
+ *
+ * The packing is a model: the allocator does not promise first fit.
+ */
+void
+vdev_raidz_migrate_need_add(vdev_t *vd, raidz_migrate_need_t *rmn,
+    const blkptr_t *bp, int d, boolean_t redirect)
+{
+	const dva_t *dva = &bp->blk_dva[d];
+	uint64_t birth = BP_GET_PHYSICAL_BIRTH(bp);
+	uint64_t old, new;
+	int c;
+
+	if (DVA_GET_GANG(dva)) {
+		old = vdev_gang_header_asize(vd, birth);
+		new = vdev_gang_header_asize(vd, rmn->rmn_txg);
+	} else {
+		old = DVA_GET_ASIZE(dva);
+		new = vdev_psize_to_asize_txg(vd, BP_GET_PSIZE(bp),
+		    rmn->rmn_txg);
+	}
+	if (!redirect) {
+		rmn->rmn_nrewrite++;
+		rmn->rmn_rewrite_old += old;
+		rmn->rmn_rewrite_new += new;
+		return;
+	}
+	rmn->rmn_nredirect++;
+	rmn->rmn_redirect_old += old;
+	rmn->rmn_redirect_new += new;
+	rmn->rmn_redirect_keep += vdev_raidz_redirect_keep_first(vd, old,
+	    rmn->rmn_txg);
+	for (c = 0; c < rmn->rmn_nclass; c++) {
+		if (rmn->rmn_class_asize[c] == new)
+			break;
+	}
+	if (c == rmn->rmn_nclass) {
+		if (c < RAIDZ_MIGRATE_CLASSES) {
+			rmn->rmn_class_asize[c] = new;
+			rmn->rmn_nclass++;
+		} else {
+			/* Out of classes: count it as the largest, safely. */
+			c = 0;
+			for (int i = 1; i < rmn->rmn_nclass; i++) {
+				if (rmn->rmn_class_asize[i] >
+				    rmn->rmn_class_asize[c])
+					c = i;
+			}
+			rmn->rmn_class_asize[c] = MAX(new,
+			    rmn->rmn_class_asize[c]);
+		}
+	}
+	rmn->rmn_class_count[c]++;
+}
+
+typedef struct migrate_segs {
+	uint64_t	*ms_size;
+	uint64_t	ms_n;
+	uint64_t	ms_max;
+} migrate_segs_t;
+
+static void
+vdev_raidz_migrate_seg_cb(void *arg, uint64_t start, uint64_t size)
+{
+	migrate_segs_t *segs = arg;
+
+	(void) start;
+	if (segs->ms_n < segs->ms_max)
+		segs->ms_size[segs->ms_n++] = size;
+}
+
+int
+vdev_raidz_migrate_preflight(vdev_t *vd, raidz_migrate_need_t *rmn)
+{
+	spa_t *spa = vd->vdev_spa;
+	migrate_segs_t segs = { 0 };
+	uint64_t nparity, unit, slop, end, left = 0, packed = 0;
+	uint64_t free = 0;
+	int order[RAIDZ_MIGRATE_CLASSES];
+
+	vdev_raidz_layout_for_birth(vd, rmn->rmn_txg, NULL, &nparity);
+	unit = (nparity + 1) << vd->vdev_ashift;
+
+	for (uint64_t m = 0; m < vd->vdev_ms_count; m++) {
+		metaslab_t *msp = vd->vdev_ms[m];
+		int err;
+
+		mutex_enter(&msp->ms_lock);
+		err = metaslab_load(msp);
+		if (err == 0) {
+			segs.ms_max += zfs_range_tree_numsegs(
+			    msp->ms_allocatable);
+		}
+		mutex_exit(&msp->ms_lock);
+		if (err != 0)
+			return (err);
+	}
+	segs.ms_size = vmem_alloc(MAX(segs.ms_max, 1) * sizeof (uint64_t),
+	    KM_SLEEP);
+	for (uint64_t m = 0; m < vd->vdev_ms_count; m++) {
+		metaslab_t *msp = vd->vdev_ms[m];
+
+		mutex_enter(&msp->ms_lock);
+		if (msp->ms_loaded) {
+			zfs_range_tree_walk(msp->ms_allocatable,
+			    vdev_raidz_migrate_seg_cb, &segs);
+		}
+		mutex_exit(&msp->ms_lock);
+	}
+	for (uint64_t i = 0; i < segs.ms_n; i++)
+		free += segs.ms_size[i];
+
+	/* The slop is in deflated bytes; this check works in raw ones. */
+	slop = spa_get_slop_space(spa);
+	if (vd->vdev_stat.vs_dspace != 0) {
+		slop = (uint64_t)((double)slop *
+		    (double)vd->vdev_stat.vs_space /
+		    (double)vd->vdev_stat.vs_dspace);
+	}
+
+	end = rmn->rmn_redirect_new + rmn->rmn_redirect_keep +
+	    rmn->rmn_rewrite_new + rmn->rmn_nredirect * rmn->rmn_entry_bytes;
+	end -= MIN(end, rmn->rmn_redirect_old + rmn->rmn_rewrite_old);
+
+	/* First fit decreasing, the largest new extents first. */
+	for (int c = 0; c < rmn->rmn_nclass; c++)
+		order[c] = c;
+	for (int i = 1; i < rmn->rmn_nclass; i++) {
+		for (int j = i; j > 0 && rmn->rmn_class_asize[order[j]] >
+		    rmn->rmn_class_asize[order[j - 1]]; j--) {
+			int t = order[j];
+
+			order[j] = order[j - 1];
+			order[j - 1] = t;
+		}
+	}
+	for (int i = 0; i < rmn->rmn_nclass; i++) {
+		uint64_t a = rmn->rmn_class_asize[order[i]];
+		uint64_t want = rmn->rmn_class_count[order[i]];
+
+		for (uint64_t s = 0; s < segs.ms_n && want > 0; s++) {
+			uint64_t k = MIN(want, segs.ms_size[s] / a);
+
+			segs.ms_size[s] -= k * a;
+			want -= k;
+			packed += k * a;
+		}
+	}
+	for (uint64_t s = 0; s < segs.ms_n; s++)
+		left += segs.ms_size[s] / unit * unit;
+	vmem_free(segs.ms_size, MAX(segs.ms_max, 1) * sizeof (uint64_t));
+
+	rmn->rmn_free = free;
+	rmn->rmn_slop = slop;
+	rmn->rmn_need_end = end;
+	rmn->rmn_packed = packed;
+	rmn->rmn_left = left;
+	rmn->rmn_need_left = slop + rmn->rmn_nredirect *
+	    rmn->rmn_entry_bytes + (rmn->rmn_rewrite_new -
+	    MIN(rmn->rmn_rewrite_new, rmn->rmn_rewrite_old));
+
+	if (end + slop > free || packed < rmn->rmn_redirect_new ||
+	    left < rmn->rmn_need_left)
+		return (SET_ERROR(ENOSPC));
+	return (0);
+}
+
+/*
  * SPIKE: zdb claims a moved block where it now lies, [O, O + old_reserved)
  * and N, instead of the old extent.  Only a pool that is not writeable
  * (zdb) claims moved blocks: ZIL blocks, which a writeable pool claims, are
