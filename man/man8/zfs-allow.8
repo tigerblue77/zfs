@@ -279,6 +279,20 @@ vscan	property
 xattr	property
 zoned	property
 .TE
+.Pp
+Snapshots are treated as descendents of the file system they belong to.
+Destroying a snapshot thus requires the
+.Sy destroy
+and
+.Sy mount
+permissions to be allowed for descendents, which is the default.
+Permissions allowed with
+.Fl l
+alone do not apply to snapshots.
+Conversely, allowing them with
+.Fl d
+lets the user destroy the snapshots and the descendent file systems, but not
+the file system itself.
 .It Xo
 .Nm zfs
 .Cm allow
