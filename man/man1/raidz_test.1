@@ -31,6 +31,12 @@
 .Op Fl n Ar samples
 .Op Fl g Ar seed
 .Op Fl k Ar kernel
+.Op Fl R Ar mode
+.Op Fl W Ar widths
+.Op Fl C Ar checksum
+.Op Fl b Ar bits
+.Op Fl L Ar budget
+.Op Fl P Ar impl
 .
 .Sh DESCRIPTION
 The purpose of this tool is to run all supported raidz implementation and verify
@@ -138,6 +144,71 @@ for every SIMD kernel the CPU supports, or
 The parity of every available kernel is compared with that of
 .Sy table
 on every map checked, whichever kernel is selected.
+With
+.Fl R ,
+the kernel of every reconstruction.
+.It Fl R Ar mode
+Model the combinatorial reconstruction of a block that fails its checksum
+with no child reporting an error, for the code of
+.Fl c
+with
+.Fl m
+parities, and compare the search of the module, which tries every set of
+up to
+.Fl m
+children in turn, with one guided by the syndromes.
+.Ar mode
+is
+.Sy check
+to verify that every set of up to
+.Fl m
+damaged columns is repaired and attributed, exhaustively up to the width
+.Fl w
+and on
+.Fl n
+random sets beyond, and that more damaged columns are never repaired;
+.Sy worst
+to measure the cost of a block that cannot be repaired, with blocks of
+.Fl s
+and runs shorter than
+.Fl n
+milliseconds also made in full;
+.Sy random
+to measure the cost of
+.Fl n
+random damage patterns of each kind and size; or
+.Sy false
+to count false repairs with a checksum truncated by
+.Fl b .
+Nothing here is used by the module.
+.It Fl W Ar widths Pq default: Sy 8,12,16,20,24,32,40
+Vdev widths for
+.Fl R Sy worst , random No and Sy false .
+.It Fl C Ar checksum Pq default: Sy fletcher4
+Block checksum for
+.Fl R :
+.Sy fletcher4 ,
+.Sy sha256
+or
+.Sy blake3 .
+.It Fl b Ar bits Pq default: Sy 256
+Compare only the low
+.Ar bits
+bits, at most 63, of the first checksum word with
+.Fl R .
+.It Fl L Ar budget Pq default: Sy 0
+Most candidate checksums of the syndrome-guided search for one block, 0
+for no limit.
+.It Fl P Ar impl
+With
+.Fl R
+and
+.Fl V ,
+rebuild with the module's P, Q and R implementation
+.Ar impl ,
+as named for
+.Fn vdev_raidz_impl_set ,
+in the module's search.
 .El
 .
 .Sh "SEE ALSO"

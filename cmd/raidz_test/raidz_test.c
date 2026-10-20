@@ -126,6 +126,14 @@ static void usage(boolean_t requested)
 	    "\t[-V use generators 1, 2, 4, 8... instead of Cauchy]\n"
 	    "\t[-k kernel rebuilding for -c: swar, table, avx2, avx512bw,\n"
 	    "\t    gfni, gfni512, simd or all (default: table)]\n"
+	    "\t[-R combinatorial reconstruction model: check, worst,\n"
+	    "\t    random or false]\n"
+	    "\t[-W widths for -R worst, random and false (8,...,40)]\n"
+	    "\t[-C checksum for -R: fletcher4, sha256 or blake3]\n"
+	    "\t[-b checksum bits compared by -R, 1..63 or 256]\n"
+	    "\t[-L candidate checksum budget of the -R search]\n"
+	    "\t[-P vdev_raidz_impl_set() name: -R -V baseline rebuilds\n"
+	    "\t    with the module's code]\n"
 	    "",
 	    o->rto_ashift,				/* -a */
 	    ilog2(o->rto_offset),			/* -o */
@@ -152,7 +160,7 @@ static void process_options(int argc, char **argv)
 	memcpy(o, &rto_opts_defaults, sizeof (*o));
 
 	while ((opt = getopt(argc, argv,
-	    "TDBSVcvha:er:o:d:s:t:m:w:n:g:k:")) != -1) {
+	    "TDBSVcvha:er:o:d:s:t:m:w:n:g:k:R:W:C:b:L:P:")) != -1) {
 		switch (opt) {
 		case 'a':
 			value = strtoull(optarg, NULL, 0);
@@ -218,6 +226,34 @@ static void process_options(int argc, char **argv)
 			break;
 		case 'k':
 			o->rto_ec_kernel_name = optarg;
+			break;
+		case 'R':
+			o->rto_cr_mode = optarg;
+			break;
+		case 'W':
+			o->rto_cr_widths = optarg;
+			break;
+		case 'C':
+			if (strcmp(optarg, "fletcher4") == 0)
+				o->rto_cr_cksum = 0;
+			else if (strcmp(optarg, "sha256") == 0)
+				o->rto_cr_cksum = 1;
+			else if (strcmp(optarg, "blake3") == 0)
+				o->rto_cr_cksum = 2;
+			else
+				usage(B_FALSE);
+			break;
+		case 'b':
+			value = strtoull(optarg, NULL, 0);
+			o->rto_cr_bits = MIN(256, MAX(1, value));
+			if (o->rto_cr_bits > 63)
+				o->rto_cr_bits = 256;
+			break;
+		case 'L':
+			o->rto_cr_budget = strtoull(optarg, NULL, 0);
+			break;
+		case 'P':
+			o->rto_cr_prod = optarg;
 			break;
 		case 'h':
 			usage(B_TRUE);
@@ -868,7 +904,7 @@ main(int argc, char **argv)
 
 	mprotect(rand_data, SPA_MAXBLOCKSIZE, PROT_READ);
 
-	if (rto_opts.rto_ec) {
+	if (rto_opts.rto_ec || rto_opts.rto_cr_mode != NULL) {
 		rzec_init();
 		if (rto_opts.rto_ec_kernel_name != NULL) {
 			rto_opts.rto_ec_kernel =
@@ -885,7 +921,9 @@ main(int argc, char **argv)
 				exit(1);
 			}
 		}
-		if (rto_opts.rto_benchmark)
+		if (rto_opts.rto_cr_mode != NULL)
+			err = run_combrec();
+		else if (rto_opts.rto_benchmark)
 			run_rzec_benchmark();
 		else
 			err = run_rzec_check();

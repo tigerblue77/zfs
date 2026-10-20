@@ -60,6 +60,12 @@ typedef struct raidz_test_opts {
 	unsigned rto_ec_seed;
 	int rto_ec_kernel;
 	const char *rto_ec_kernel_name;
+	const char *rto_cr_mode;
+	const char *rto_cr_widths;
+	const char *rto_cr_prod;
+	int rto_cr_cksum;
+	int rto_cr_bits;
+	uint64_t rto_cr_budget;
 
 	/* non-user options */
 	boolean_t rto_should_stop;
@@ -87,6 +93,7 @@ static const raidz_test_opts_t rto_opts_defaults = {
 	.rto_ec_samples = 2000,
 	.rto_ec_seed = 1,
 	.rto_ec_kernel = 1,	/* RZEC_KERNEL_TABLE */
+	.rto_cr_bits = 256,
 	.rto_should_stop = B_FALSE
 };
 
@@ -151,7 +158,13 @@ const char *rzec_code_name(rzec_code_t);
 int rzec_max_data(rzec_code_t);
 void rzec_generate(raidz_map_t *, rzec_code_t);
 int rzec_reconstruct(raidz_map_t *, rzec_code_t, const int *, int);
+int rzec_reconstruct_data(raidz_map_t *, rzec_code_t, const int *, int);
+uint8_t rzec_coefficient(rzec_code_t, int, int, int);
+int rzec_matrix_invert(uint8_t [RZEC_MAXPARITY][RZEC_MAXPARITY], int);
+void rzec_lincomb(int, uint8_t *const *, const size_t *, int,
+    const uint8_t *const *, const size_t *, const uint8_t *);
 int run_rzec_check(void);
 void run_rzec_benchmark(void);
+int run_combrec(void);
 
 #endif /* RAIDZ_TEST_H */

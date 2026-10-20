@@ -677,7 +677,7 @@ rzec_invert(uint8_t a[RZEC_MAXPARITY][RZEC_MAXPARITY], int n)
 
 static int
 rzec_reconstruct_row(raidz_row_t *rr, rzec_code_t code, const int *tgts,
-    int ntgts)
+    int ntgts, boolean_t regen)
 {
 	rzec_row_t *rw = rzec_row_get();
 	uint8_t b[RZEC_MAXPARITY][RZEC_MAXPARITY];
@@ -771,10 +771,10 @@ rzec_reconstruct_row(raidz_row_t *rr, rzec_code_t code, const int *tgts,
 		}
 	}
 
-	if (badparity != 0)
+	if (badparity != 0 && regen)
 		rzec_encode(rw, badparity);
 	for (int c = 0; c < rr->rr_cols; c++)
-		rw->rw_written[c] = islost[c];
+		rw->rw_written[c] = islost[c] && (c >= m || regen);
 out:
 	rzec_row_exit(rw, rr);
 	return (err);
@@ -787,8 +787,95 @@ rzec_reconstruct(raidz_map_t *rm, rzec_code_t code, const int *tgts,
 	int err = 0;
 
 	for (int i = 0; i < rm->rm_nrows && err == 0; i++)
-		err = rzec_reconstruct_row(rm->rm_row[i], code, tgts, ntgts);
+		err = rzec_reconstruct_row(rm->rm_row[i], code, tgts, ntgts,
+		    B_TRUE);
 	return (err);
+}
+
+/*
+ * As rzec_reconstruct(), but targeted parity columns are only left out of
+ * the rebuild, not regenerated, as vdev_raidz_reconstruct_row() does.
+ */
+int
+rzec_reconstruct_data(raidz_map_t *rm, rzec_code_t code, const int *tgts,
+    int ntgts)
+{
+	int err = 0;
+
+	for (int i = 0; i < rm->rm_nrows && err == 0; i++)
+		err = rzec_reconstruct_row(rm->rm_row[i], code, tgts, ntgts,
+		    B_FALSE);
+	return (err);
+}
+
+uint8_t
+rzec_coefficient(rzec_code_t code, int r, int j, int k)
+{
+	return (rzec_coef(code, r, j, k));
+}
+
+int
+rzec_matrix_invert(uint8_t a[RZEC_MAXPARITY][RZEC_MAXPARITY], int n)
+{
+	return (rzec_invert(a, n));
+}
+
+/*
+ * dst[d] = sum_s c[d * ns + s] * src[s] for d < nd, over dlen[d] bytes,
+ * with the selected kernel; a source counts as zero past slen[s].  For a
+ * SIMD kernel, every length must be a multiple of its step.
+ */
+void
+rzec_lincomb(int nd, uint8_t *const *dst, const size_t *dlen, int ns,
+    const uint8_t *const *src, const size_t *slen, const uint8_t *c)
+{
+	VERIFY3S(nd, <=, RZEC_MAXPARITY);
+	VERIFY3S(ns, <=, RZEC_MAXCOLS);
+
+	if (rzec_simd != NULL) {
+		rzec_row_t *rw = rzec_row_get();
+		rzec_dot_t *dt = &rw->rw_dot;
+
+		dt->dt_nd = nd;
+		dt->dt_ns = ns;
+		for (int d = 0; d < nd; d++) {
+			dt->dt_dst[d] = dst[d];
+			dt->dt_dlen[d] = dlen[d];
+			for (int s = 0; s < ns; s++)
+				dt->dt_c[d][s] = c[d * ns + s];
+		}
+		for (int s = 0; s < ns; s++) {
+			dt->dt_src[s] = src[s];
+			dt->dt_slen[s] = slen[s];
+		}
+		rzec_dot_run(dt, rw->rw_tab);
+		return;
+	}
+
+	size_t max = 0;
+	for (int d = 0; d < nd; d++)
+		max = MAX(max, dlen[d]);
+	for (size_t off = 0; off < max; off += RZEC_CHUNK) {
+		size_t len = MIN(RZEC_CHUNK, max - off);
+
+		for (int d = 0; d < nd; d++) {
+			size_t dl = rzec_clip(dlen[d], off, len);
+			if (dl != 0)
+				memset(dst[d] + off, 0, dl);
+		}
+		for (int s = 0; s < ns; s++) {
+			size_t sl = rzec_clip(slen[s], off, len);
+			if (sl == 0)
+				continue;
+			for (int d = 0; d < nd; d++) {
+				size_t l = MIN(sl, rzec_clip(dlen[d], off,
+				    len));
+				if (l != 0)
+					rzec_mul_acc(dst[d] + off,
+					    src[s] + off, l, c[d * ns + s]);
+			}
+		}
+	}
 }
 
 /*
