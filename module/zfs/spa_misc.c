@@ -2114,6 +2114,17 @@ spa_update_dspace(spa_t *spa)
 		ASSERT3U(spa->spa_rdspace, >=, spa->spa_nonallocating_dspace);
 		spa->spa_rdspace -= spa->spa_nonallocating_dspace;
 	}
+	/*
+	 * SPIKE, not for merge: a moved raidz block keeps the DVA, hence the
+	 * dsize, it was charged at birth, but holds its new extent and what
+	 * is kept of the old one.  Datasets cannot be charged the difference
+	 * (dsize must not change from birth to free), so it comes out of the
+	 * pool's space instead, until the block is freed.  A negative sum
+	 * (lower parity) is not given back.
+	 */
+	int64_t moved = (int64_t)spa->spa_redirect_dspace;
+	if (moved > 0)
+		spa->spa_rdspace -= MIN(spa->spa_rdspace, (uint64_t)moved);
 	spa->spa_dspace = spa->spa_rdspace +
 	    metaslab_class_get_dalloc(spa_special_class(spa)) +
 	    metaslab_class_get_dalloc(spa_dedup_class(spa)) +

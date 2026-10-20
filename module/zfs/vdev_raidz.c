@@ -2475,6 +2475,15 @@ struct raidz_redirect_table {
 	uint64_t rdt_count;		/* entries, tombstones included */
 	uint64_t rdt_ntombs;
 	uint64_t rdt_max_birth;		/* no entry has a later birth */
+	/*
+	 * What the live entries hold beyond their DVAs' asize, new extent
+	 * plus kept sectors less old extent, and that deflated, which is in
+	 * the pool's spa_redirect_dspace.  Derived from the entries, so it is
+	 * persisted with them.
+	 */
+	int64_t rdt_extra;
+	int64_t rdt_dspace;
+	spa_t *rdt_spa;
 	/* Freed entries: their keys still on disk, then gone from it. */
 	kmutex_t rdt_tomb_lock;
 	list_t rdt_pending;
@@ -2508,13 +2517,14 @@ vdev_raidz_redirect_hits(void)
 }
 
 static raidz_redirect_table_t *
-rdt_alloc(void)
+rdt_alloc(spa_t *spa)
 {
 	size_t size = sizeof (raidz_redirect_table_t) + 64;
 	void *raw = kmem_zalloc(size, KM_SLEEP);
 	raidz_redirect_table_t *t = (void *)P2ROUNDUP((uintptr_t)raw, 64);
 
 	t->rdt_raw = raw;
+	t->rdt_spa = spa;
 	t->rdt_walk_ms = UINT64_MAX;
 	rw_init(&t->rdt_lock, NULL, RW_DEFAULT, NULL);
 	mutex_init(&t->rdt_tomb_lock, NULL, MUTEX_DEFAULT, NULL);
@@ -2785,6 +2795,37 @@ rdt_clear(raidz_redirect_table_t *t)
 	t->rdt_walk_ms = UINT64_MAX;
 	t->rdt_count = t->rdt_ntombs = t->rdt_max_birth = 0;
 	t->rdt_log_records = t->rdt_log_sorted = 0;
+	atomic_add_64(&t->rdt_spa->spa_redirect_dspace,
+	    (uint64_t)-t->rdt_dspace);
+	t->rdt_extra = t->rdt_dspace = 0;
+}
+
+/* SPIKE: what a moved block holds beyond its DVA's asize (X2). */
+static inline int64_t
+rdt_ent_extra(const raidz_redirect_ent_t *e)
+{
+	return ((int64_t)(e->rde_new_asize + e->rde_old_reserved) -
+	    (int64_t)e->rde_old_asize);
+}
+
+/*
+ * SPIKE: add extra to what the live entries hold beyond their DVAs, and
+ * charge the change, deflated as dsize is, to the pool's space; it is
+ * taken out of dspace at the next spa_update_dspace().  A writer is in.
+ */
+static void
+rdt_extra_add(vdev_t *vd, raidz_redirect_table_t *t, int64_t extra)
+{
+	spa_t *spa = vd->vdev_spa;
+	int64_t d;
+
+	if (extra == 0)
+		return;
+	t->rdt_extra += extra;
+	d = spa->spa_deflate ? vdev_deflated_space(vd, t->rdt_extra) :
+	    t->rdt_extra;
+	atomic_add_64(&spa->spa_redirect_dspace, (uint64_t)(d - t->rdt_dspace));
+	t->rdt_dspace = d;
 }
 
 static void
@@ -2813,6 +2854,7 @@ rdt_insert_locked(vdev_t *vd, raidz_redirect_table_t *t,
 	rdt_shard_reserve(sh, 1);
 	rdt_shard_put(sh, &s);
 	t->rdt_count++;
+	rdt_extra_add(vd, t, rdt_ent_extra(e));
 	t->rdt_max_birth = MAX(t->rdt_max_birth, e->rde_birth);
 	sh->rrs_max_new_birth = MAX(sh->rrs_max_new_birth, e->rde_new_birth);
 	if ((e->rde_offset >> t->rdt_ms_shift) == t->rdt_walk_ms)
@@ -2931,6 +2973,37 @@ uint64_t
 vdev_raidz_redirect_count(spa_t *spa, uint64_t vdev)
 {
 	return (vdev_raidz_redirect_nodes(spa, vdev, B_FALSE));
+}
+
+/*
+ * SPIKE: what the live entries of vdev <vdev> hold beyond their DVAs'
+ * asize, in bytes as allocated: zdb checks it against its claims.
+ */
+int64_t
+vdev_raidz_redirect_extra(spa_t *spa, uint64_t vdev)
+{
+	int64_t n = 0;
+	vdev_t *vd;
+
+	spa_config_enter(spa, SCL_VDEV, FTAG, RW_READER);
+	vd = vdev_lookup_top(spa, vdev);
+	if (vd != NULL && vd->vdev_ops == &vdev_raidz_ops) {
+		raidz_redirect_table_t *t =
+		    ((vdev_raidz_t *)vd->vdev_tsd)->vd_rdt;
+
+		rw_enter(&t->rdt_lock, RW_READER);
+		n = t->rdt_extra;
+		rw_exit(&t->rdt_lock);
+	}
+	spa_config_exit(spa, SCL_VDEV, FTAG);
+	return (n);
+}
+
+/* SPIKE: the same over the pool, deflated: what dspace is reduced by. */
+int64_t
+vdev_raidz_redirect_dspace(spa_t *spa)
+{
+	return ((int64_t)atomic_load_64(&spa->spa_redirect_dspace));
 }
 
 uint64_t
@@ -3412,6 +3485,7 @@ typedef struct rdt_load_task {
 	int lt_k1;
 	boolean_t lt_trim;		/* trim them instead */
 	int64_t lt_count;		/* entries added less removed */
+	int64_t lt_extra;		/* their rdt_ent_extra(), the same */
 	uint64_t lt_max_birth;
 	uint64_t lt_damaged;
 } rdt_load_task_t;
@@ -3460,11 +3534,16 @@ rdt_load_replay(rdt_load_task_t *lt, raidz_redirect_shard_t *sh,
 			    ent.rde_new_birth);
 			lt->lt_max_birth = MAX(lt->lt_max_birth, ent.rde_birth);
 			lt->lt_count++;
+			lt->lt_extra += rdt_ent_extra(&ent);
 			return;
 		}
 	} else if (type == RAIDZ_REDIRECT_REC_REMOVE) {
 		s = rdt_shard_find(sh, ent.rde_offset, ent.rde_birth);
 		if (s != NULL) {
+			raidz_redirect_ent_t gone;
+
+			rdt_slot_to_ent(s, &gone);
+			lt->lt_extra -= rdt_ent_extra(&gone);
 			rdt_shard_del(sh, s);
 			lt->lt_count--;
 			return;
@@ -3522,6 +3601,7 @@ rdt_load_run(rdt_load_t *rl, uint64_t n, boolean_t trim)
 		lt->lt_rl = rl;
 		lt->lt_trim = trim;
 		lt->lt_count = 0;
+		lt->lt_extra = 0;
 		lt->lt_max_birth = 0;
 		lt->lt_damaged = 0;
 		lt->lt_k0 = k;
@@ -3541,6 +3621,7 @@ rdt_load_run(rdt_load_t *rl, uint64_t n, boolean_t trim)
 		rdt_load_task_t *lt = &rl->rl_tasks[i];
 
 		t->rdt_count += lt->lt_count;
+		rdt_extra_add(rl->rl_vd, t, lt->lt_extra);
 		t->rdt_max_birth = MAX(t->rdt_max_birth, lt->lt_max_birth);
 		rl->rl_damaged += lt->lt_damaged;
 	}
@@ -3978,6 +4059,8 @@ vdev_raidz_redirect_remove(vdev_t *vd, uint64_t offset, uint64_t birth,
 		s->rs_old_reserved |= RS_TOMB;
 		t->rdt_ntombs++;
 		rdt_slot_to_ent(s, ent);
+		/* SPIKE: what it held beyond its DVA is free again (X2). */
+		rdt_extra_add(vd, t, -rdt_ent_extra(ent));
 	}
 	rdt_write_exit(t);
 	if (s == NULL) {
@@ -8277,6 +8360,33 @@ vdev_raidz_redirect_move_check(void *arg, dmu_tx_t *tx)
 	return (0);
 }
 
+/* SPIKE: test-only, P2 keeps exactly one sector again (X3). */
+int spike_redirect_keep_unaligned = 0;
+
+/*
+ * SPIKE: what P2 keeps of an old extent of asize bytes moved in txg: its
+ * first sector, and as many more as it takes for the freed tail to be a
+ * multiple of nparity + 1 sectors at the parity of txg.  Every allocation
+ * at that parity is such a multiple, so a tail of any other length, held
+ * between two kept sectors, would strand its remainder: free in the space
+ * maps, counted as free space, and never allocatable (X3).  Kept sectors
+ * are charged like the rest of what a moved block holds (X2).
+ */
+static uint64_t
+vdev_raidz_redirect_keep_first(vdev_t *vd, uint64_t asize, uint64_t txg)
+{
+	uint64_t sectors = asize >> vd->vdev_ashift;
+	uint64_t nparity;
+	uint64_t tail;
+
+	if (spike_redirect_keep_unaligned || sectors <= 1)
+		return (1ULL << vd->vdev_ashift);
+	vdev_raidz_layout_for_birth(vd, txg, NULL, &nparity);
+	tail = sectors - 1;
+	tail -= tail % (nparity + 1);
+	return ((sectors - tail) << vd->vdev_ashift);
+}
+
 static void
 vdev_raidz_redirect_move_sync(void *arg, dmu_tx_t *tx)
 {
@@ -8306,7 +8416,7 @@ vdev_raidz_redirect_move_sync(void *arg, dmu_tx_t *tx)
 		blkptr_t wbp;
 
 		if (rma->rma_keep == RAIDZ_REDIRECT_KEEP_FIRST)
-			keep = 1ULL << vd->vdev_ashift;
+			keep = vdev_raidz_redirect_keep_first(vd, asize, txg);
 		else if (rma->rma_keep == RAIDZ_REDIRECT_KEEP_NONE)
 			keep = 0;
 		rdm->rdm_old_asize = asize;
@@ -8743,7 +8853,7 @@ vdev_raidz_init(spa_t *spa, nvlist_t *nv, void **tsd)
 	mutex_init(&vdrz->vd_expand_lock, NULL, MUTEX_DEFAULT, NULL);
 	avl_create(&vdrz->vd_expand_txgs, vdev_raidz_reflow_compare,
 	    sizeof (reflow_node_t), offsetof(reflow_node_t, re_link));
-	vdrz->vd_rdt = rdt_alloc();
+	vdrz->vd_rdt = rdt_alloc(spa);
 
 	vdrz->vd_physical_width = children;
 	vdrz->vd_nparity = nparity;

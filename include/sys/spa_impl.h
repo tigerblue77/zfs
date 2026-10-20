@@ -351,6 +351,11 @@ struct spa {
 	uint64_t	spa_missing_tvds_allowed; /* allow loading spa? */
 
 	uint64_t	spa_nonallocating_dspace;
+	/*
+	 * SPIKE: deflated space that moved raidz blocks hold beyond what
+	 * their DVAs' asize charges, an int64_t (vdev_raidz.c).
+	 */
+	uint64_t	spa_redirect_dspace;
 	spa_removing_phys_t spa_removing_phys;
 	spa_vdev_removal_t *spa_vdev_removal;
 

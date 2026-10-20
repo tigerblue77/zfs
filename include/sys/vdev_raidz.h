@@ -296,7 +296,7 @@ raidz_redirect_rec_read(const raidz_redirect_rec_t *r, raidz_redirect_ent_t *e)
 /* What a move keeps allocated of the old extent [O, O + asize). */
 typedef enum raidz_redirect_keep {
 	RAIDZ_REDIRECT_KEEP_ALL,	/* P1: all of it */
-	RAIDZ_REDIRECT_KEEP_FIRST,	/* P2: its first sector */
+	RAIDZ_REDIRECT_KEEP_FIRST,	/* P2: its first sectors (X3) */
 	RAIDZ_REDIRECT_KEEP_NONE,	/* P3: nothing */
 } raidz_redirect_keep_t;
 
@@ -320,6 +320,10 @@ typedef struct raidz_redirect_move {
 
 /* SPIKE: the move takes rdm_dva (step 3A). */
 #define	RAIDZ_REDIRECT_MOVE_DVA	1
+/* SPIKE: moved blocks are charged to the pool's space (X2). */
+#define	RAIDZ_REDIRECT_DSPACE	1
+/* SPIKE: P2 keeps what aligns the freed tail to the new parity (X3). */
+#define	RAIDZ_REDIRECT_KEEP_ALIGNED	1
 
 extern int vdev_raidz_redirect_move(spa_t *, uint64_t,
     raidz_redirect_move_t *, int, raidz_redirect_keep_t, boolean_t);
@@ -332,6 +336,8 @@ extern void vdev_raidz_redirect_expire(vdev_t *, uint64_t);
 extern boolean_t vdev_raidz_redirect_lookup(spa_t *, uint64_t, uint64_t,
     uint64_t);
 extern uint64_t vdev_raidz_redirect_count(spa_t *, uint64_t);
+extern int64_t vdev_raidz_redirect_extra(spa_t *, uint64_t);
+extern int64_t vdev_raidz_redirect_dspace(spa_t *);
 extern uint64_t vdev_raidz_redirect_damaged(spa_t *, uint64_t);
 extern boolean_t vdev_raidz_redirect_fits(vdev_t *,
     const raidz_redirect_ent_t *, uint64_t);
@@ -381,6 +387,7 @@ extern int spike_redirect_claim_enable;
 extern int spike_redirect_split_txg;
 extern int spike_redirect_check_enable;
 extern int spike_redirect_late_remove;
+extern int spike_redirect_keep_unaligned;
 extern int spike_crash_arm_free;
 
 /* SPIKE: test-only, what spike_resilver_redirects turns on. */

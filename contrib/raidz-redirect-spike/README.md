@@ -856,6 +856,47 @@ allocated space grew from 40.5 to 55.2 MB while the DSL's used space grew
 by 0.9 MB (the table's own MOS objects): the vdev holds 10.9 MB (deflated)
 more than any dataset is charged, for 26.8 MB of moved blocks (9.2 MB for
 26.4 MB at ashift 9).  "available" overstates the free space by that much.
-Not fixed: a real implementation would charge the deflated difference to a
-counter persisted with the table, subtract it in `spa_update_dspace()` and
-release it at free.
+Fixed below.
+
+## Accounting: moved blocks charged to the pool's space (X2), aligned tails (X3)
+
+**X2.**  A moved block keeps its DVA, hence the dsize it was charged at
+birth, which `dsl_dataset.c` requires to stay the same until it is freed.
+The vdev, meanwhile, holds N and the kept sectors instead of the old
+extent.  Each table now keeps, for its live entries, the sum of new asize
+plus kept less old asize (`rdt_extra`), and its deflated value is added to
+`spa_redirect_dspace`, which `spa_update_dspace()` subtracts beside
+`spa_nonallocating_dspace`.  The sum is derived from the entries: the
+move and the load add it, the free that turns an entry into a tombstone
+takes it back, so it is persisted with the table and cannot drift from it
+across a crash.  zdb still adds the claims' own difference to its block
+sum, which the counter cannot replace (it is the table's bookkeeping, the
+claims are what the traversal found), and now also requires the two to be
+equal.
+
+**X3.**  P2 kept one sector and freed the rest.  A parity-2 allocation is
+a multiple of 3 sectors, so a freed tail held between two kept sectors
+strands `(sectors - 1) mod 3` sectors: free in the space maps, counted as
+free space, never allocatable.  For 16K blocks at ashift 12 (6 sectors at
+parity 1) that is 2 sectors in 5.  P2 now keeps the first sector and as
+many more as make the tail a multiple of nparity + 1 at the move's parity;
+`spike_redirect_keep_unaligned = 1` keeps one sector again.  A 128K block
+(40 sectors) still keeps one.
+
+    fill_probe <dir> <ashift> <move|nomove> [filemb=N] [reck=N] [objs=N]
+        [objmb=N] [overw=N] [unaligned]
+
+`fill_probe.c` builds a raidz1 pool, a snapshot and blocks only it holds,
+a parity-2 epoch, moves every old DVA outside the MOS (or nothing, the
+control), then writes until ENOSPC and compares what the DSL charged with
+the head's "available" just before.  `crypt_probe` now also requires the
+move to leave no space unaccounted.  At ashift 12, 5 x 352 MiB, 512 MiB of
+128K blocks moved: without the charge the pool suspends at 0.906 of
+"available" (201.5 MB deflated unaccounted); with it the fill ends in
+ENOSPC at 1.0011 to 1.0013, 0 unaccounted (at ashift 9: 0.931 without,
+184.5 MB unaccounted; 1.0018 with).  With 16K blocks (5 x 320 MiB, 320 MiB
+moved), unaligned tails strand 134 MB deflated, more than the 128 MiB slop,
+and the pool suspends at 0.99 even with the charge; aligned, the fill ends
+at 1.0013 to 1.0043.  The controls end at 1.0006 to 1.0008, with or without
+the change.  After each fill, zdb -b finds the claims' difference equal to
+the tables' charge, to the byte, and no leak.

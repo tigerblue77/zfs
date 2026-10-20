@@ -1168,12 +1168,19 @@ print_space(spa_t *spa, const char *when)
 	uint64_t used = dsl_dir_phys(dp->dp_root_dir)->dd_used_bytes;
 	uint64_t alloc = vd->vdev_stat.vs_alloc;
 	uint64_t dalloc = vdev_deflated_space(vd, alloc);
+	int64_t charge = 0;
 
+#ifdef	RAIDZ_REDIRECT_DSPACE
+	/* What the kernel takes out of dspace for moved blocks. */
+	charge = vdev_raidz_redirect_dspace(spa);
+#endif
 	(void) printf("INFO space %s: vdev allocated %llu (deflated %llu), "
-	    "DSL used %llu, deflated minus used %lld, dspace %llu\n", when,
-	    (u_longlong_t)alloc, (u_longlong_t)dalloc, (u_longlong_t)used,
-	    (longlong_t)(dalloc - used), (u_longlong_t)spa_get_dspace(spa));
-	sh->sh_space_gap = (int64_t)(dalloc - used);
+	    "DSL used %llu, deflated minus used %lld, moved-block charge "
+	    "%lld, dspace %llu\n", when, (u_longlong_t)alloc,
+	    (u_longlong_t)dalloc, (u_longlong_t)used,
+	    (longlong_t)(dalloc - used), (longlong_t)charge,
+	    (u_longlong_t)spa_get_dspace(spa));
+	sh->sh_space_gap = (int64_t)(dalloc - used) - charge;
 }
 
 static int
@@ -1962,10 +1969,13 @@ child_move(void *arg)
 	space_settle(spa);
 	print_space(spa, "after the move");
 	(void) printf("INFO space: the move grew the gap between what the vdev "
-	    "holds and what the DSL charges by %lld bytes (deflated), for "
-	    "%llu bytes of moved blocks as stored\n",
-	    (longlong_t)(sh->sh_space_gap - sh->sh_gap_before),
+	    "holds and what the DSL and the moved-block charge account for "
+	    "by %lld bytes (deflated), for %llu bytes of moved blocks as "
+	    "stored\n", (longlong_t)(sh->sh_space_gap - sh->sh_gap_before),
 	    (u_longlong_t)bytes);
+	check(sh->sh_space_gap == sh->sh_gap_before, "the move leaves no "
+	    "space unaccounted (%lld bytes, deflated)",
+	    (longlong_t)(sh->sh_space_gap - sh->sh_gap_before));
 	(void) printf("INFO move: %llu bytes moved in %.2f s\n",
 	    (u_longlong_t)bytes, (double)(gethrtime() - t0) / 1e9);
 	(void) printf("INFO move: %-36s %8s %8s %8s\n", "class", "moved",

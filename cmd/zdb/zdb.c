@@ -8104,6 +8104,28 @@ dump_block_stats(spa_t *spa)
 	    zcb->zcb_removing_size + zcb->zcb_checkpoint_size;
 	/* SPIKE: a moved block's claims differ from its DVA's asize. */
 	total_found += spike_redirect_claim_delta;
+	/*
+	 * SPIKE: and the redirect tables charge the pool's space exactly what
+	 * the claims of the blocks found add (accounting defect X2).
+	 */
+	if (spike_redirect_claim_enable && !dump_opt['L']) {
+		int64_t extra = 0;
+
+		for (uint64_t c = 0; c < spa->spa_root_vdev->vdev_children; c++)
+			extra += vdev_raidz_redirect_extra(spa, c);
+		(void) printf("\tSPIKE: moved raidz blocks: their claims add "
+		    "%llu bytes, the redirect tables charge %lld (deflated "
+		    "%lld)\n", (u_longlong_t)spike_redirect_claim_delta,
+		    (longlong_t)extra,
+		    (longlong_t)vdev_raidz_redirect_dspace(spa));
+		if (extra != (int64_t)spike_redirect_claim_delta) {
+			(void) printf("\tSPIKE: error: the redirect tables' "
+			    "charge differs from the claims by %lld\n",
+			    (longlong_t)(extra -
+			    (int64_t)spike_redirect_claim_delta));
+			leaks = B_TRUE;
+		}
+	}
 
 	if (total_found == total_alloc && !dump_opt['L']) {
 		(void) printf("\n\tNo leaks (block sum matches space"
