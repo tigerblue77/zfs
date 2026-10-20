@@ -7799,6 +7799,14 @@ spike_redirect_stat_t spike_redirect_stats[SPIKE_REDIRECT_TXGS];
 int spike_resilver_redirects = SPIKE_RESILVER_NEW_EXTENT |
     SPIKE_RESILVER_TABLE_PASS;
 int spike_redirect_move_live = 1;
+/* SPIKE (step 3A): 0 refuses root and meta-dnode blocks, as before. */
+int spike_redirect_live_objset = 1;
+/*
+ * SPIKE (step 3A): ZB_ZIL_OBJECT is 0, the meta-dnode's object and the
+ * root's, so testing it refused every root and meta-dnode block with
+ * EINVAL; a ZIL bookmark is told apart by its level alone.  1 restores it.
+ */
+int spike_redirect_zil_object_check = 0;
 
 /*
  * SPIKE, not for merge: test-only.  P3 keeps nothing of the old extent,
@@ -8103,16 +8111,57 @@ vdev_raidz_redirect_in_gang(spa_t *spa, const blkptr_t *gbp,
 }
 
 /*
+ * SPIKE (step 3A): dbuf_dnode_findbp(), but reading the indirect blocks
+ * without decrypting.  dbuf_read() otherwise decrypts the dnode block of
+ * an encrypted objset first, which fails with EACCES while its key is not
+ * loaded, so that no level-0 block below an indirect one could move.
+ * Indirect blocks are never encrypted, only authenticated.
+ */
+int spike_redirect_findbp_raw = 1;
+
+static int
+vdev_raidz_redirect_findbp(dnode_t *dn, int64_t level, uint64_t blkid,
+    blkptr_t *bp)
+{
+	int nlevels = MAX(dn->dn_phys->dn_nlevels, 1);
+	int epbs = dn->dn_phys->dn_indblkshift - SPA_BLKPTRSHIFT;
+	dmu_buf_impl_t *db;
+	int err;
+
+	if (!spike_redirect_findbp_raw)
+		return (dbuf_dnode_findbp(dn, level, blkid, bp, NULL, NULL));
+	if (level >= nlevels || (level * epbs < 64 &&
+	    blkid > (dn->dn_phys->dn_maxblkid >> (level * epbs))))
+		return (SET_ERROR(ENOENT));
+	if (level == nlevels - 1) {
+		if (blkid >= dn->dn_phys->dn_nblkptr)
+			return (SET_ERROR(ENOENT));
+		*bp = dn->dn_phys->dn_blkptr[blkid];
+		return (0);
+	}
+	db = dbuf_hold_level(dn, level + 1, blkid >> epbs, FTAG);
+	if (db == NULL)
+		return (SET_ERROR(EIO));
+	err = dbuf_read(db, NULL, DB_RF_CANFAIL | DB_RF_HAVESTRUCT |
+	    DMU_READ_NO_PREFETCH | DMU_READ_NO_DECRYPT);
+	if (err == 0)
+		*bp = ((blkptr_t *)db->db.db_data)[blkid &
+		    ((1ULL << epbs) - 1)];
+	dbuf_rele(db, FTAG);
+	return (err);
+}
+
+/*
  * SPIKE: B_TRUE if bp is still referenced from where zb says it lives: the
  * block that zb names in dataset zb_objset (a head, a snapshot or a clone)
  * is bp, or is a gang block whose tree holds bp.  A sync task runs after
  * the datasets of its txg have synced, so a block freed in this txg or
  * earlier is no longer found there, and a free in a later txg converts the
  * moved block.  That the old extent is allocated proves nothing: it may
- * have been freed and given to other blocks since the caller found bp.  A
- * bookmark that names no block of an object (an objset's root block, a
- * bonus buffer, the spill block of a dnode without one) is refused.  A real
- * mover would find its blocks by traversal instead.
+ * have been freed and given to other blocks since the caller found bp.  An
+ * objset's root block is checked against its dataset's, and a block of the
+ * meta-dnode against that dnode's tree.  A bookmark that names no block
+ * (a bonus buffer, the spill block of a dnode without one) is refused.
  */
 static boolean_t
 vdev_raidz_redirect_live(spa_t *spa, const zbookmark_phys_t *zb,
@@ -8122,14 +8171,37 @@ vdev_raidz_redirect_live(spa_t *spa, const zbookmark_phys_t *zb,
 	objset_t *os;
 	dnode_t *dn;
 	blkptr_t cur;
+	boolean_t mdn = B_FALSE;
 	int err;
 
 	if (dsl_dataset_hold_obj(spa_get_dsl(spa), zb->zb_objset, FTAG,
 	    &ds) != 0)
 		return (B_FALSE);
+	/*
+	 * SPIKE (step 3A): an objset's root block lives in its dataset, and
+	 * the blocks of its meta-dnode in no dnode that dnode_hold() gives.
+	 */
+	if (spike_redirect_live_objset && zb->zb_object == ZB_ROOT_OBJECT &&
+	    zb->zb_level == ZB_ROOT_LEVEL && zb->zb_blkid == ZB_ROOT_BLKID) {
+		cur = dsl_dataset_phys(ds)->ds_bp;
+		dsl_dataset_rele(ds, FTAG);
+		if (BP_IS_HOLE(&cur) || BP_IS_EMBEDDED(&cur))
+			return (B_FALSE);
+		return (BP_EQUAL(&cur, bp) ||
+		    vdev_raidz_redirect_in_gang(spa, &cur, bp, 0));
+	}
 	err = dmu_objset_from_ds(ds, &os);
-	if (err == 0)
+	/*
+	 * The meta-dnode takes no holds (dnode_add_ref() would refuse one):
+	 * the dataset's hold keeps its objset, and so that dnode, alive.
+	 */
+	if (err == 0 && zb->zb_object == DMU_META_DNODE_OBJECT &&
+	    spike_redirect_live_objset) {
+		dn = DMU_META_DNODE(os);
+		mdn = B_TRUE;
+	} else if (err == 0) {
 		err = dnode_hold(os, zb->zb_object, FTAG, &dn);
+	}
 	if (err == 0) {
 		rw_enter(&dn->dn_struct_rwlock, RW_READER);
 		/*
@@ -8150,11 +8222,12 @@ vdev_raidz_redirect_live(spa_t *spa, const zbookmark_phys_t *zb,
 				err = SET_ERROR(ENOENT);
 			mutex_exit(&dn->dn_mtx);
 		} else {
-			err = dbuf_dnode_findbp(dn, zb->zb_level, zb->zb_blkid,
-			    &cur, NULL, NULL);
+			err = vdev_raidz_redirect_findbp(dn, zb->zb_level,
+			    zb->zb_blkid, &cur);
 		}
 		rw_exit(&dn->dn_struct_rwlock);
-		dnode_rele(dn, FTAG);
+		if (!mdn)
+			dnode_rele(dn, FTAG);
 	}
 	dsl_dataset_rele(ds, FTAG);
 	if (err != 0 || BP_IS_HOLE(&cur) || BP_IS_EMBEDDED(&cur))
@@ -8190,10 +8263,12 @@ vdev_raidz_redirect_move_check(void *arg, dmu_tx_t *tx)
 		 * do not know about moves.
 		 */
 		if (bp == NULL || zb == NULL || BP_IS_HOLE(bp) ||
-		    BP_IS_EMBEDDED(bp) ||
-		    DVA_GET_VDEV(&bp->blk_dva[0]) != rma->rma_vdev ||
+		    BP_IS_EMBEDDED(bp) || rdm->rdm_dva < 0 ||
+		    rdm->rdm_dva >= BP_GET_NDVAS(bp) ||
+		    DVA_GET_VDEV(&bp->blk_dva[rdm->rdm_dva]) != rma->rma_vdev ||
 		    zb->zb_objset == DMU_META_OBJSET ||
-		    zb->zb_object == ZB_ZIL_OBJECT ||
+		    (spike_redirect_zil_object_check &&
+		    zb->zb_object == ZB_ZIL_OBJECT) ||
 		    zb->zb_level == ZB_ZIL_LEVEL ||
 		    BP_GET_TYPE(bp) == DMU_OT_INTENT_LOG ||
 		    rdm->rdm_psize == 0 || rdm->rdm_data == NULL)
@@ -8221,7 +8296,7 @@ vdev_raidz_redirect_move_sync(void *arg, dmu_tx_t *tx)
 	for (int i = 0; i < rma->rma_n; i++) {
 		raidz_redirect_move_t *rdm = &rma->rma_moves[i];
 		const blkptr_t *bp = rdm->rdm_bp;
-		const dva_t *dva = &bp->blk_dva[0];
+		const dva_t *dva = &bp->blk_dva[rdm->rdm_dva];
 		uint64_t offset = DVA_GET_OFFSET(dva);
 		uint64_t birth = BP_GET_PHYSICAL_BIRTH(bp);
 		uint64_t asize = DVA_GET_GANG(dva) ?

@@ -794,3 +794,56 @@ Neither fix changes the table, its lookup, its memory or its load, so
 step 7's measurements were not run again.  Fix 1 adds a lookup, skipped
 like the I/O path's when no entry can match, to each read of a block with
 several copies; its cost on reads was not measured.
+
+## Step 3A: encrypted datasets without their keys, and every DVA
+
+    crypt_probe <dir> <ashift> [nodva] [noroot] [noraw] [nomos] [keep]
+
+`crypt_probe.c` builds a raidz1 pool with plain, dedup, gang, embedded and
+`copies=2` blocks, an encrypted dataset (two snapshots, blocks only a
+snapshot holds, a clone, `copies=2`, dedup and gang blocks) and a raw full
+and incremental receive of it into a second encryption root, then adds a
+parity-2 epoch.  With every key unloaded, it rewrites the MOS by dirtying
+its old blocks in a sync task (the table lives in the MOS and cannot
+redirect it), then moves every other old DVA, found by a traversal with
+`TRAVERSE_NO_DECRYPT`.  A census counts each distinct DVA as new, moved or
+old, and a DVA oracle reads every DVA alone, raw, against its checksum, on
+ten copies of the pool, each with another pair of children inverted: a
+parity-1 extent cannot survive every pair, a parity-2 extent does.
+
+Three changes to the move were needed, each with a switch that brings its
+failure back:
+
+* `vdev_raidz_redirect_move()` takes `rdm_dva`, the DVA of the block
+  pointer to move (`nodva` moves DVA 0 only, as before): 107 DVAs stay old,
+  every second copy and the third copy of metadata;
+* the move check refused every bookmark of object 0 as a ZIL bookmark
+  (`ZB_ZIL_OBJECT` is 0, the meta-dnode's and the root's object), and the
+  liveness check could resolve neither an objset's root block nor a block
+  of its meta-dnode; it now checks a root against `ds_bp` and a meta-dnode
+  block through `DMU_META_DNODE()` (`noroot`, `spike_redirect_live_objset
+  = 0`): 105 stay old;
+* the liveness check found a block below an indirect one with
+  `dbuf_dnode_findbp()`, whose `dbuf_read()` decrypts the dnode block
+  first and fails with EACCES without the key; it now reads indirect
+  blocks with `DMU_READ_NO_DECRYPT` (`noraw`, `spike_redirect_findbp_raw =
+  0`): 120 encrypted level-0 blocks are refused with ESTALE.
+
+At ashift 12 and 9, the default passes: 360 DVAs outside the MOS moved
+with no key loaded (138 encrypted level-0, 14 authenticated level-0, 78
+indirect with MAC, 249 held by a snapshot, 94 raw-received, 24 of the
+clone, 4 gang headers and 4 children, 2 dedup, 98 second and 9 third
+copies), the MOS rewritten in one round, no DVA left old, every object
+bit-exact with the keys loaded, zdb -bcc clean, a scrub with no key
+loaded repairs nothing, and every one of 662 (ashift 12) or 668 (ashift 9)
+DVAs reads under each of the ten pairs.  Before the move, 460 to 476
+DVAs fail under some pair at ashift 12, and at ashift 9 no damaged copy
+imports.  Each switch, and `nomos`, leaves a residual of 105 to 120 DVAs
+that the census counts, and the DVA oracle fails every such run: it finds
+the same number for `nodva` and `noraw` at both ashifts and for `nomos`
+and `noroot` at ashift 12; at ashift 9, `noroot`'s damaged roots hide
+whole datasets from some copies (42 DVAs fail, 106 are not met under every
+pair) and no copy without the MOS rewrite imports.  The object oracle
+(children 1 and 3 only) passes `nodva`, `noroot` at ashift 12 and `nomos`
+at ashift 12: a small block can miss both children, and one surviving copy
+is enough to read an object, which is why the DVA oracle exists.

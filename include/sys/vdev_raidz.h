@@ -305,17 +305,21 @@ struct zbookmark_phys;
 
 /* One block to move, for vdev_raidz_redirect_move() (test-only). */
 typedef struct raidz_redirect_move {
-	const struct blkptr *rdm_bp;	/* never changed; DVA 0 moves */
+	const struct blkptr *rdm_bp;	/* never changed */
 	/* Where rdm_bp lives; for a gang child, where its gang block does. */
 	const struct zbookmark_phys *rdm_zb;
 	uint64_t rdm_psize;		/* bytes at the DVA */
 	abd_t *rdm_data;		/* those bytes, as stored */
 	uint64_t rdm_place;		/* if not 0, claim N there */
+	int rdm_dva;			/* the DVA of rdm_bp that moves */
 	/* Set by the move, as soon as each is known. */
 	uint64_t rdm_old_asize;
 	raidz_redirect_ent_t rdm_ent;
 	int rdm_error;
 } raidz_redirect_move_t;
+
+/* SPIKE: the move takes rdm_dva (step 3A). */
+#define	RAIDZ_REDIRECT_MOVE_DVA	1
 
 extern int vdev_raidz_redirect_move(spa_t *, uint64_t,
     raidz_redirect_move_t *, int, raidz_redirect_keep_t, boolean_t);
@@ -388,6 +392,9 @@ extern int spike_resilver_redirects;
 extern int spike_mirror_redirect_txg;
 extern uint64_t spike_mirror_redirect_repairs[2];
 extern int spike_redirect_move_live;
+extern int spike_redirect_live_objset;
+extern int spike_redirect_zil_object_check;
+extern int spike_redirect_findbp_raw;
 extern int spike_redirect_keep_none;
 
 /*
