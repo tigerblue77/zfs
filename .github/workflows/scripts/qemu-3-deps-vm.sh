@@ -233,8 +233,12 @@ case "$1" in
   ubuntu22|ubuntu24)
     debian
     echo "##[group]Install Ubuntu specific"
-    sudo apt-get install -yq linux-tools-common libtirpc-dev \
-      linux-modules-extra-$(uname -r)
+    sudo apt-get install -yq linux-tools-common libtirpc-dev
+    # Some runner kernels, such as 7.0.0-1017-azure, have no
+    # linux-modules-extra
+    if apt-cache show "linux-modules-extra-$(uname -r)" > /dev/null 2>&1; then
+      sudo apt-get install -yq "linux-modules-extra-$(uname -r)"
+    fi
     sudo apt-get install -yq dh-sequence-dkms
 
     # Need 'build-essential' explicitly for ARM builder

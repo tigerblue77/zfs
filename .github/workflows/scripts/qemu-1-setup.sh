@@ -47,7 +47,11 @@ cat /etc/apt/apt-mirrors.txt
 export DEBIAN_FRONTEND="noninteractive"
 sudo apt-get -y update
 sudo apt-get install -y axel cloud-image-utils daemonize guestfs-tools \
-  virt-manager linux-modules-extra-$(uname -r) zfsutils-linux
+  virt-manager zfsutils-linux
+# Some runner kernels, such as 7.0.0-1017-azure, have no linux-modules-extra
+if apt-cache show "linux-modules-extra-$(uname -r)" > /dev/null 2>&1; then
+  sudo apt-get install -y "linux-modules-extra-$(uname -r)"
+fi
 
 # generate ssh keys
 rm -f ~/.ssh/id_ed25519
