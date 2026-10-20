@@ -29,7 +29,7 @@
 .\" Copyright (c) 2019, Kjeld Schouten-Lebbing
 .\" Copyright (c) 2022 Hewlett Packard Enterprise Development LP.
 .\"
-.Dd September 9, 2026
+.Dd October 27, 2026
 .Dt ZFSPROPS 7
 .Os
 .
@@ -835,6 +835,19 @@ The
 and
 .Sy blake3
 checksum algorithms require enabling the appropriate features on the pool.
+The
+.Sy chksum_bench
+kstat
+.Po Pa /proc/spl/kstat/zfs/chksum_bench
+on Linux,
+.Sy kstat.zfs.misc.chksum_bench
+on FreeBSD
+.Pc
+reports the speed of the
+.Sy sha256 , sha512 , skein , edonr
+and
+.Sy blake3
+implementations on the running system.
 .Pp
 Please see
 .Xr zpool-features 7
