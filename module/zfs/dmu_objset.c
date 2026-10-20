@@ -1409,6 +1409,7 @@ dmu_objset_upgrade_task_cb(void *data)
 	dsl_dataset_long_rele(dmu_objset_ds(os), upgrade_tag);
 	os->os_upgrade_id = 0;
 	mutex_exit(&os->os_upgrade_lock);
+	delay(SEC_TO_TICK(2));	/* VM only: same delay as the bug branch */
 }
 
 static void
