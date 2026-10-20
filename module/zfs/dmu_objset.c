@@ -1403,6 +1403,7 @@ dmu_objset_upgrade_task_cb(void *data)
 	os->os_upgrade_exit = B_TRUE;
 	os->os_upgrade_id = 0;
 	mutex_exit(&os->os_upgrade_lock);
+	delay(SEC_TO_TICK(2));	/* VM only: widen the window */
 	dsl_dataset_long_rele(dmu_objset_ds(os), upgrade_tag);
 }
 
