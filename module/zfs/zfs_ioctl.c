@@ -5029,6 +5029,49 @@ zfs_ioc_ddt_prune(const char *poolname, nvlist_t *innvl, nvlist_t *outnvl)
 }
 
 /*
+ * innvl: {
+ *     "vdev_snapshots_vdev" -> guid of a top-level vdev (uint64)
+ * }
+ *
+ * outnvl: {
+ *     "vdev_snapshots_list" -> { snapshot name -> boolean }
+ *     "vdev_snapshots_heads" -> { file system or volume name -> boolean }
+ *     "vdev_snapshots_unchecked" -> { file system or volume name -> errno }
+ * }
+ *
+ * Lists the snapshots, file systems and volumes that refer to a block on the
+ * vdev, and the file systems and volumes that could not be read.
+ */
+static const zfs_ioc_key_t zfs_keys_vdev_snapshots[] = {
+	{ZPOOL_VDEV_SNAPSHOTS_VDEV,	DATA_TYPE_UINT64,	0},
+};
+
+static int
+zfs_ioc_vdev_snapshots(const char *poolname, nvlist_t *innvl,
+    nvlist_t *outnvl)
+{
+	uint64_t guid = fnvlist_lookup_uint64(innvl,
+	    ZPOOL_VDEV_SNAPSHOTS_VDEV);
+	nvlist_t *snaps = fnvlist_alloc();
+	nvlist_t *heads = fnvlist_alloc();
+	nvlist_t *unchecked = fnvlist_alloc();
+
+	int error = spa_vdev_snapshots(poolname, guid, snaps, heads,
+	    unchecked);
+	if (error == 0) {
+		fnvlist_add_nvlist(outnvl, ZPOOL_VDEV_SNAPSHOTS_LIST, snaps);
+		fnvlist_add_nvlist(outnvl, ZPOOL_VDEV_SNAPSHOTS_HEADS, heads);
+		fnvlist_add_nvlist(outnvl, ZPOOL_VDEV_SNAPSHOTS_UNCHECKED,
+		    unchecked);
+	}
+	fnvlist_free(snaps);
+	fnvlist_free(heads);
+	fnvlist_free(unchecked);
+
+	return (error);
+}
+
+/*
  * This ioctl waits for activity of a particular type to complete. If there is
  * no activity of that type in progress, it returns immediately, and the
  * returned value "waited" is false. If there is activity in progress, and no
@@ -8255,6 +8298,11 @@ zfs_ioctl_init(void)
 	    zfs_ioc_ddt_prune, zfs_secpolicy_config, POOL_NAME,
 	    POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY, B_TRUE, B_TRUE,
 	    zfs_keys_ddt_prune, ARRAY_SIZE(zfs_keys_ddt_prune));
+
+	zfs_ioctl_register("vdev_snapshots", ZFS_IOC_VDEV_SNAPSHOTS,
+	    zfs_ioc_vdev_snapshots, zfs_secpolicy_config, POOL_NAME,
+	    POOL_CHECK_SUSPENDED, B_FALSE, B_FALSE,
+	    zfs_keys_vdev_snapshots, ARRAY_SIZE(zfs_keys_vdev_snapshots));
 
 	/* IOCTLS that use the legacy function signature */
 

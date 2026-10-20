@@ -17,7 +17,7 @@
 .\" Copyright 2017 Nexenta Systems, Inc.
 .\" Copyright (c) 2017 Open-E, Inc. All Rights Reserved.
 .\"
-.Dd October 15, 2026
+.Dd October 20, 2026
 .Dt ZPOOL-REMOVE 8
 .Os
 .
@@ -29,6 +29,7 @@
 .Nm zpool
 .Cm remove
 .Op Fl npw
+.Op Fl -destroy-snapshots
 .Ar pool Ar device Ns …
 .Nm zpool
 .Cm remove
@@ -41,6 +42,7 @@
 .Nm zpool
 .Cm remove
 .Op Fl npw
+.Op Fl -destroy-snapshots
 .Ar pool Ar device Ns …
 .Xc
 Removes the specified device from the pool.
@@ -117,6 +119,41 @@ Do not actually perform the removal
 Instead, print the estimated amount of memory that will be used by the
 mapping table after the removal completes.
 This is nonzero only for top-level vdevs.
+With
+.Fl -destroy-snapshots ,
+also list the snapshots that it would destroy, and the file systems and volumes
+that would make it refuse.
+.El
+.Bl -tag -width Ds
+.It Fl -destroy-snapshots
+Destroy the snapshots that keep blocks on the device, then remove it.
+A block that a snapshot refers to stays allocated as long as the snapshot
+exists, so these snapshots keep the device from being emptied, which is the
+only way to remove it from a pool whose data cannot be evacuated.
+.Pp
+Before anything is destroyed, every file system and volume of the pool is
+read, and so is each snapshot up to its first block on the device, which may
+take long in a large pool.
+If a file system or volume still keeps blocks on the device, or cannot be
+read, for example because its encryption key is not loaded, it is named and
+nothing is destroyed: destroying the snapshots would not empty the device.
+To move the blocks of a file system or volume off the device, set the
+.Sy allocating
+property of the device to
+.Sy off ,
+see
+.Xr vdevprops 7 ,
+then rewrite or delete them.
+Blocks written in the current transaction group, and those of the ZIL, are not
+looked at.
+If one of the snapshots has clones or user holds
+.Pq see Xr zfs-hold 8 ,
+or belongs to the pool itself, nothing is destroyed either.
+In both cases the device is not removed.
+Otherwise the snapshots are all destroyed, the command waits until their space
+is freed, and the device is then removed as without this option.
+.Pp
+This cannot be undone.
 .El
 .Bl -tag -width Ds
 .It Fl p

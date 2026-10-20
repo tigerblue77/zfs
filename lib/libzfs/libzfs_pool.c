@@ -4481,12 +4481,15 @@ zpool_vdev_remove(zpool_handle_t *zhp, const char *path)
 			zfs_nicebytes(vs->vs_alloc, alloc, sizeof (alloc));
 			zfs_error_aux(hdl, "it still holds %s; data can be "
 			    "evacuated only if all top-level vdevs have the "
-			    "same sector size and none is raidz or dRAID.",
-			    alloc);
+			    "same sector size and none is raidz or dRAID.  "
+			    "'zpool remove -n --destroy-snapshots' lists the "
+			    "snapshots that keep blocks on it.", alloc);
 		} else {
 			zfs_error_aux(hdl, "it is not empty; data can be "
 			    "evacuated only if all top-level vdevs have the "
-			    "same sector size and none is raidz or dRAID.");
+			    "same sector size and none is raidz or dRAID.  "
+			    "'zpool remove -n --destroy-snapshots' lists the "
+			    "snapshots that keep blocks on it.");
 		}
 		(void) zfs_error(hdl, EZFS_INVALCONFIG, errbuf);
 		break;
