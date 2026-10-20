@@ -1400,9 +1400,13 @@ vdev_anyraid_write_map_sync(vdev_t *vd, zio_t *pio, uint64_t txg,
 	uint32_t header_size =
 	    VDEV_ANYRAID_MAP_HEADER_SIZE(vd->vdev_top->vdev_ashift);
 	uint32_t nvl_bytes = VDEV_ANYRAID_NVL_BYTES(vd->vdev_top->vdev_ashift);
-	uint8_t update_target = (var->vd_last_map + 1) %
-	    VDEV_ANYRAID_MAP_COPIES;
-	var->vd_last_map = update_target;
+	/* Every leaf of this vdev writes the same copy in a given txg. */
+	if (var->vd_last_map_txg != txg) {
+		var->vd_last_map = (var->vd_last_map + 1) %
+		    VDEV_ANYRAID_MAP_COPIES;
+		var->vd_last_map_txg = txg;
+	}
+	uint8_t update_target = var->vd_last_map;
 	uint64_t base_offset = vdev_anyraid_header_offset(vd, update_target);
 
 	abd_t *header_abd =
