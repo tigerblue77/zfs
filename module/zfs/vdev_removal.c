@@ -31,6 +31,8 @@
 #include <sys/dsl_pool.h>
 #include <sys/dsl_synctask.h>
 #include <sys/dsl_dir.h>
+#include <sys/dsl_dataset.h>
+#include <sys/dmu_objset.h>
 #include <sys/arc.h>
 #include <sys/zfeature.h>
 #include <sys/vdev_indirect_births.h>
@@ -2288,6 +2290,18 @@ vdev_retire_indirect_ready(vdev_t *vd)
 	return (empty);
 }
 
+/*
+ * Destroy the list of remapped blocks of a dataset or snapshot, once no
+ * removed vdev is left (see dsl_dataset_keep_remap_deadlist()).
+ */
+static int
+vdev_retire_remap_deadlist_cb(dsl_pool_t *dp, dsl_dataset_t *ds, void *arg)
+{
+	(void) dp;
+	(void) dsl_dataset_keep_remap_deadlist(ds, arg);
+	return (0);
+}
+
 typedef struct vdev_retire_arg {
 	uint64_t	vra_vdev_id;
 	uint64_t	vra_top_zap;
@@ -2366,6 +2380,20 @@ vdev_retire_indirect_sync(void *arg, dmu_tx_t *tx)
 	IMPLY(!spa_feature_is_active(spa, SPA_FEATURE_DEVICE_REMOVAL),
 	    !bpobj_is_open(&dp->dp_obsolete_bpobj) ||
 	    bpobj_is_empty(&dp->dp_obsolete_bpobj));
+
+	/*
+	 * For the same reason, the lists of remapped blocks that datasets
+	 * and snapshots still have are empty, and they keep obsolete_counts
+	 * active: destroy them now rather than when the next snapshot is
+	 * taken or destroyed, which may be never.  Syncing context holds the
+	 * config lock as writer, so the walk is serialized.
+	 */
+	if (!spa_feature_is_active(spa, SPA_FEATURE_DEVICE_REMOVAL) &&
+	    spa_feature_is_active(spa, SPA_FEATURE_OBSOLETE_COUNTS)) {
+		VERIFY0(dmu_objset_find_dp(dp, dp->dp_root_dir_obj,
+		    vdev_retire_remap_deadlist_cb, tx,
+		    DS_FIND_CHILDREN | DS_FIND_SNAPSHOTS));
+	}
 
 	spa_history_log_internal(spa, "vdev retire", tx, "%s vdev %llu",
 	    spa_name(spa), (u_longlong_t)vra->vra_vdev_id);

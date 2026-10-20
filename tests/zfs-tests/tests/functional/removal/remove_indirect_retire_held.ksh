@@ -19,9 +19,9 @@
 #	The indirect vdev left by a device removal stays indirect while
 #	something still refers to it, while zfs_retire_indirect_vdevs is 0
 #	and while the pool has a checkpoint, and becomes a hole once that
-#	is released.  Snapshots taken and destroyed afterwards drop the
-#	lists of remapped blocks left over, and feature@obsolete_counts
-#	returns to enabled.
+#	is released.  The lists of remapped blocks left over are dropped
+#	with the last indirect vdev, and feature@obsolete_counts returns to
+#	enabled.
 #
 # STRATEGY:
 #	For each case below, create a pool on a mirror with a special mirror,
@@ -34,13 +34,13 @@
 #	   tunable back to 1, then discard the checkpoint.
 #	2. A second copy of the file deduplicated onto the same blocks.
 #	3. A clone of the file's blocks.
-#	4. A snapshot whose blocks were remapped after the removal.  The
-#	   list of remapped blocks that the filesystem keeps for it outlives
-#	   the vdev, and keeps feature@obsolete_counts active, until a
-#	   snapshot is taken: take one and destroy it.
-#	5. The same, with a snapshot taken after the remapping, which keeps
-#	   that list after the vdev is retired: destroy it.
-#	After cases 4 and 5, verify that feature@obsolete_counts is enabled.
+#	4. A snapshot whose blocks were remapped after the removal, which
+#	   gives the filesystem a list of remapped blocks.  Take a snapshot
+#	   and destroy it once the vdev is gone.
+#	5. The same, with a snapshot taken after the remapping, which takes
+#	   that list over.  Destroy it once the vdev is gone.
+#	In cases 4 and 5, verify that feature@obsolete_counts is enabled as
+#	soon as the vdev is gone, and still after the snapshot is destroyed.
 #
 
 verify_runnable "global"
@@ -202,6 +202,7 @@ log_must rm $MNT/file
 check_held
 log_must zfs destroy $TESTPOOL/$TESTFS@snap
 check_retired
+check_counts_dropped
 log_must zfs snapshot $TESTPOOL/$TESTFS@after
 log_must zfs destroy $TESTPOOL/$TESTFS@after
 check_counts_dropped
@@ -217,7 +218,7 @@ log_must rm $MNT/file
 check_held
 log_must zfs destroy $TESTPOOL/$TESTFS@snap
 check_retired
-log_must test "$(get_pool_prop feature@obsolete_counts $TESTPOOL)" = "active"
+check_counts_dropped
 log_must zfs destroy $TESTPOOL/$TESTFS@remapped
 check_counts_dropped
 
