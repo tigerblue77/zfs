@@ -197,6 +197,59 @@ spa_sync_removing_state(spa_t *spa, dmu_tx_t *tx)
 	    &spa->spa_removing_phys, tx));
 }
 
+/*
+ * Return whether a top ZAP records a special or dedup allocation bias.
+ */
+static boolean_t
+vdev_top_zap_has_alloc_class(objset_t *mos, uint64_t zapobj)
+{
+	char bias[64];
+
+	if (zapobj == 0 || zap_lookup(mos, zapobj, VDEV_TOP_ZAP_ALLOCATION_BIAS,
+	    1, sizeof (bias), bias) != 0)
+		return (B_FALSE);
+
+	return (strcmp(bias, VDEV_ALLOC_BIAS_SPECIAL) == 0 ||
+	    strcmp(bias, VDEV_ALLOC_BIAS_DEDUP) == 0);
+}
+
+/*
+ * Give back the allocation_classes reference of the special or dedup vdev
+ * vdev_id, which is gone, and every reference once no such vdev is left,
+ * so that the feature returns to enabled.  A reference is taken for each
+ * special or dedup vdev added, and each time the alloc_bias property makes
+ * a vdev one, but none is given back when the property is cleared, so the
+ * refcount may be higher than the number of such vdevs; it is never made
+ * lower.  Called in syncing context, which holds SCL_CONFIG.
+ */
+static void
+spa_alloc_class_vdev_gone(spa_t *spa, uint64_t vdev_id, dmu_tx_t *tx)
+{
+	spa_feature_t f = SPA_FEATURE_ALLOCATION_CLASSES;
+	vdev_t *rvd = spa->spa_root_vdev;
+	uint64_t left = 0;
+	uint64_t refcount;
+
+	ASSERT(dmu_tx_is_syncing(tx));
+
+	for (uint64_t c = 0; c < rvd->vdev_children; c++) {
+		vdev_t *cvd = rvd->vdev_child[c];
+
+		if (c != vdev_id &&
+		    (cvd->vdev_alloc_bias == VDEV_BIAS_SPECIAL ||
+		    cvd->vdev_alloc_bias == VDEV_BIAS_DEDUP))
+			left++;
+	}
+
+	if (feature_get_refcount(spa, &spa_feature_table[f], &refcount) != 0 ||
+	    refcount <= left)
+		return;
+
+	uint64_t target = (left == 0) ? 0 : refcount - 1;
+	for (; refcount > target; refcount--)
+		spa_feature_decr(spa, f, tx);
+}
+
 static nvlist_t *
 spa_nvlist_lookup_by_guid(nvlist_t **nvpp, int count, uint64_t target_guid)
 {
@@ -1327,6 +1380,19 @@ vdev_remove_complete_sync(void *arg, dmu_tx_t *tx)
 	}
 	fnvlist_free(svr->svr_zaplist);
 
+	/*
+	 * The indirect vdev allocates nothing and belongs to no class (see
+	 * vdev_remove_replace_with_indirect()).  Without the bias in its top
+	 * ZAP, any implementation sees it as a removed normal vdev, which
+	 * only changes how zdb --class files the blocks not remapped yet.
+	 */
+	objset_t *mos = spa->spa_meta_objset;
+	if (vdev_top_zap_has_alloc_class(mos, vd->vdev_top_zap)) {
+		VERIFY0(zap_remove(mos, vd->vdev_top_zap,
+		    VDEV_TOP_ZAP_ALLOCATION_BIAS, tx));
+		spa_alloc_class_vdev_gone(spa, vd->vdev_id, tx);
+	}
+
 	spa_finish_removal(dmu_tx_pool(tx)->dp_spa, DSS_FINISHED, tx);
 	/* vd->vdev_path is not available here */
 	spa_history_log_internal(spa, "vdev remove completed",  tx,
@@ -1369,6 +1435,8 @@ vdev_remove_replace_with_indirect(vdev_t *vd, uint64_t txg)
 
 	ivd = vdev_add_parent(vd, &vdev_indirect_ops);
 	ivd->vdev_removing = 0;
+	/* Written to the top ZAP by vdev_remove_complete_sync(). */
+	ivd->vdev_alloc_bias = VDEV_BIAS_NONE;
 
 	vd->vdev_leaf_zap = 0;
 
@@ -2257,6 +2325,12 @@ vdev_retire_indirect_sync(void *arg, dmu_tx_t *tx)
 		ASSERT3S(zap_contains(mos, vra->vra_top_zap,
 		    VDEV_TOP_ZAP_INDIRECT_OBSOLETE_SM), ==, ENOENT);
 
+		/* Removed before vdev_remove_complete_sync() dropped it. */
+		if (vdev_top_zap_has_alloc_class(mos, vra->vra_top_zap)) {
+			spa_alloc_class_vdev_gone(spa, vra->vra_vdev_id,
+			    tx);
+		}
+
 		VERIFY0(zap_destroy(mos, vra->vra_top_zap, tx));
 		VERIFY0(zap_remove_int(mos, spa->spa_all_vdev_zaps,
 		    vra->vra_top_zap, tx));
@@ -2807,9 +2881,11 @@ vdev_remove_empty_draid_spares(vdev_t *vd)
 }
 
 typedef struct vdev_remove_empty_features {
+	uint64_t	vref_vdev_id;
 	boolean_t	vref_draid;
 	boolean_t	vref_draid_fail_domains;
 	uint64_t	vref_raidz_expansions;
+	boolean_t	vref_alloc_class;
 } vdev_remove_empty_features_t;
 
 /*
@@ -2828,6 +2904,8 @@ vdev_remove_empty_features_sync(void *arg, dmu_tx_t *tx)
 		spa_feature_decr(spa, SPA_FEATURE_DRAID_FAIL_DOMAINS, tx);
 	for (uint64_t i = 0; i < vref->vref_raidz_expansions; i++)
 		spa_feature_decr(spa, SPA_FEATURE_RAIDZ_EXPANSION, tx);
+	if (vref->vref_alloc_class)
+		spa_alloc_class_vdev_gone(spa, vref->vref_vdev_id, tx);
 
 	kmem_free(vref, sizeof (*vref));
 }
@@ -2839,6 +2917,9 @@ vdev_remove_empty_features(vdev_t *vd, uint64_t txg)
 	vdev_remove_empty_features_t *vref;
 
 	vref = kmem_zalloc(sizeof (*vref), KM_SLEEP);
+	vref->vref_vdev_id = vd->vdev_id;
+	vref->vref_alloc_class = (vd->vdev_alloc_bias == VDEV_BIAS_SPECIAL ||
+	    vd->vdev_alloc_bias == VDEV_BIAS_DEDUP);
 	if (vd->vdev_ops == &vdev_draid_ops) {
 		vdev_draid_config_t *vdc = vd->vdev_tsd;
 
@@ -2856,7 +2937,8 @@ vdev_remove_empty_features(vdev_t *vd, uint64_t txg)
 		mutex_exit(&vdrz->vd_expand_lock);
 	}
 
-	if (!vref->vref_draid && vref->vref_raidz_expansions == 0) {
+	if (!vref->vref_draid && vref->vref_raidz_expansions == 0 &&
+	    !vref->vref_alloc_class) {
 		kmem_free(vref, sizeof (*vref));
 		return;
 	}

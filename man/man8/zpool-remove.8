@@ -17,7 +17,7 @@
 .\" Copyright 2017 Nexenta Systems, Inc.
 .\" Copyright (c) 2017 Open-E, Inc. All Rights Reserved.
 .\"
-.Dd October 15, 2026
+.Dd October 20, 2026
 .Dt ZPOOL-REMOVE 8
 .Os
 .
@@ -108,6 +108,17 @@ The
 .Sy device_removal
 feature flag must be enabled to remove a top-level vdev, see
 .Xr zpool-features 7 .
+.Pp
+A removed special or dedup vdev gives back its reference to the
+.Sy allocation_classes
+feature, which returns to being
+.Sy enabled
+when no special or dedup vdev is left.
+The removed devices keep a label that names the pool, which
+.Nm zpool Cm import
+ignores;
+.Nm zpool Cm labelclear
+erases it.
 .Pp
 A mirrored top-level device (log or data) can be removed by specifying the top-
 level mirror for the

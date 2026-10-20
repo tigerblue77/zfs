@@ -997,7 +997,7 @@ tests = ['removal_all_vdev', 'removal_cancel', 'removal_check_space',
     'remove_indirect', 'remove_indirect_retire',
     'remove_indirect_retire_held', 'remove_attach_mirror',
     'removal_reservation', 'removal_with_hole', 'removal_with_missing_log',
-    'removal_with_resilver']
+    'removal_with_resilver', 'remove_special_traces']
 tags = ['functional', 'removal']
 
 [tests/functional/rename_dirs]

@@ -2154,6 +2154,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/removal/remove_raidz.ksh \
 	functional/removal/remove_raidz_busy.ksh \
 	functional/removal/remove_raidz_empty.ksh \
+	functional/removal/remove_special_traces.ksh \
 	functional/rename_dirs/cleanup.ksh \
 	functional/rename_dirs/rename_dirs_001_pos.ksh \
 	functional/rename_dirs/setup.ksh \
