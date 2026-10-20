@@ -2337,7 +2337,27 @@ vdev_retire_indirect_sync(void *arg, dmu_tx_t *tx)
 	}
 
 	spa_feature_decr(spa, SPA_FEATURE_DEVICE_REMOVAL, tx);
-	spa_sync_removing_state(spa, tx);
+
+	/*
+	 * Once no removed vdev is left, forget the last removal, which
+	 * zpool status would otherwise report for the life of the pool:
+	 * without the object, spa_remove_init() of any implementation sees
+	 * a pool that never had a vdev removed.
+	 */
+	spa_removing_phys_t *srp = &spa->spa_removing_phys;
+	if (srp->sr_prev_indirect_vdev == UINT64_MAX &&
+	    !spa_feature_is_active(spa, SPA_FEATURE_DEVICE_REMOVAL)) {
+		ASSERT3U(srp->sr_state, !=, DSS_SCANNING);
+		int error = zap_remove(mos, DMU_POOL_DIRECTORY_OBJECT,
+		    DMU_POOL_REMOVING, tx);
+		VERIFY(error == 0 || error == ENOENT);
+		memset(srp, 0, sizeof (*srp));
+		srp->sr_state = DSS_NONE;
+		srp->sr_removing_vdev = UINT64_MAX;
+		srp->sr_prev_indirect_vdev = UINT64_MAX;
+	} else {
+		spa_sync_removing_state(spa, tx);
+	}
 
 	/*
 	 * Without indirect vdevs nothing is left to mark obsolete, for the

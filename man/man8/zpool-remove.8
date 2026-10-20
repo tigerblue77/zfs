@@ -109,6 +109,13 @@ The
 feature flag must be enabled to remove a top-level vdev, see
 .Xr zpool-features 7 .
 .Pp
+The number of a removed top-level vdev is not reused: it stays in the pool
+configuration as a hole, and the next vdev added gets the following number.
+Once no removed vdev is left in the pool configuration as an indirect vdev,
+.Nm zpool Cm status
+no longer reports the last removal, and only
+.Nm zpool Cm history
+records the removals.
 A removed special or dedup vdev gives back its reference to the
 .Sy allocation_classes
 feature, which returns to being

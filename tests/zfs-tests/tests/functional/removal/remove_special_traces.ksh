@@ -16,15 +16,17 @@
 
 #
 # DESCRIPTION:
-#	Once a special vdev is removed, feature@allocation_classes is
-#	enabled again, nothing records the class of the vdev left in its
-#	place, and the label left on the removed devices can be cleared.
+#	Once a special vdev is removed and no removed vdev is left in the
+#	pool configuration, only the pool history tells that the pool had
+#	one: feature@allocation_classes is enabled again, zpool status does
+#	not report the removal, and the label left on the removed devices
+#	can be cleared.
 #
 # STRATEGY:
 #	1. Create a pool on a raidz vdev and add a special mirror, which
 #	   makes feature@allocation_classes active.  Remove it while it is
 #	   empty: it becomes a hole at once.  Verify that the feature is
-#	   enabled again.
+#	   enabled again and that zpool status reports no removal.
 #	2. Verify that the removed devices have a label of the pool, and
 #	   that zpool labelclear erases it.
 #	3. Create a pool on a mirror, add a special mirror and write a file,
@@ -33,9 +35,10 @@
 #	   ZAP no longer has an allocation bias, that the feature is enabled
 #	   again, and that zpool status reports the removal.
 #	4. Rewrite the pool, so that nothing refers to the indirect vdev any
-#	   more, and wait for it to become a hole.  Verify that the features
-#	   of the removal are enabled again and that zdb finds the pool
-#	   consistent, also after an export and import.
+#	   more, and wait for it to become a hole.  Verify that zpool status
+#	   no longer reports the removal, that the features of the removal
+#	   are enabled again and that zdb finds the pool consistent, also
+#	   after an export and import.
 #
 
 verify_runnable "global"
@@ -95,10 +98,11 @@ function check_no_trace
 	check_feature allocation_classes enabled
 	check_feature device_removal enabled
 	check_feature obsolete_counts enabled
+	log_mustnot reports_removal
 	log_must zdb -b $TESTPOOL
 }
 
-log_assert "A removed special vdev leaves no allocation class behind"
+log_assert "A removed special vdev leaves no trace but the pool history"
 log_onexit cleanup
 
 log_must save_tunable CONDENSE_INDIRECT_OBSOLETE_PCT
@@ -166,4 +170,4 @@ check_no_trace
 
 log_must test "$(zpool history -i $TESTPOOL | grep -c "vdev retire")" -eq 1
 
-log_pass "A removed special vdev leaves no allocation class behind"
+log_pass "A removed special vdev leaves no trace but the pool history"

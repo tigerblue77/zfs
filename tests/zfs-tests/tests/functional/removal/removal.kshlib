@@ -33,7 +33,13 @@ function wait_for_removal # pool
 	#
 	sync_pool $pool
 
-	log_must is_pool_removed $pool
+	#
+	# zpool status reports no removal once no removed vdev is left, as
+	# after the removal of an empty vdev, which leaves none.
+	#
+	if zpool status $pool | grep -q "remove:"; then
+		log_must is_pool_removed $pool
+	fi
 	return 0
 }
 
