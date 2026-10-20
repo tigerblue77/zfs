@@ -29,7 +29,7 @@
 .\" Copyright (c) 2019, Kjeld Schouten-Lebbing
 .\" Copyright (c) 2022 Hewlett Packard Enterprise Development LP.
 .\"
-.Dd September 9, 2026
+.Dd October 20, 2026
 .Dt ZFSPROPS 7
 .Os
 .
@@ -835,6 +835,22 @@ The
 and
 .Sy blake3
 checksum algorithms require enabling the appropriate features on the pool.
+On CPUs without SHA extensions,
+.Sy blake3
+is several times faster than
+.Sy sha256 ;
+with them the difference is smaller, and on some CPUs
+.Sy sha256
+is faster.
+The
+.Sy chksum_bench
+kstat
+.Po Pa /proc/spl/kstat/zfs/chksum_bench
+on Linux,
+.Sy kstat.zfs.misc.chksum_bench
+on FreeBSD
+.Pc
+reports the speed of each implementation on the running system.
 .Pp
 Please see
 .Xr zpool-features 7
@@ -1078,6 +1094,19 @@ Setting the value to
 .Sy verify
 has the same effect as the setting
 .Sy sha256 , Ns Sy verify .
+.Pp
+On CPUs without SHA extensions,
+.Sy blake3
+is several times faster than
+.Sy sha256 ,
+which lowers the CPU cost of every deduplicated write;
+see the
+.Sy checksum
+property for how to compare them on a given system.
+It requires the
+.Sy blake3
+pool feature, and once a block has been written with it the pool can no longer
+be imported by software that does not support that feature.
 .Pp
 If set to
 .Sy verify ,
