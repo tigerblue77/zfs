@@ -52,6 +52,12 @@ typedef struct raidz_test_opts {
 	uint64_t rto_expand_offset;
 	size_t rto_sanity;
 	size_t rto_gdb;
+	size_t rto_ec;
+	size_t rto_ec_parity;
+	size_t rto_ec_width;
+	size_t rto_ec_vand;
+	uint64_t rto_ec_samples;
+	unsigned rto_ec_seed;
 
 	/* non-user options */
 	boolean_t rto_should_stop;
@@ -72,6 +78,12 @@ static const raidz_test_opts_t rto_opts_defaults = {
 	.rto_expand_offset = -1ULL,
 	.rto_sanity = 0,
 	.rto_gdb = 0,
+	.rto_ec = 0,
+	.rto_ec_parity = 0,
+	.rto_ec_width = 32,
+	.rto_ec_vand = 0,
+	.rto_ec_samples = 2000,
+	.rto_ec_seed = 1,
 	.rto_should_stop = B_FALSE
 };
 
@@ -109,5 +121,28 @@ static inline size_t ilog2(size_t a)
 void init_zio_abd(zio_t *zio);
 
 void run_raidz_benchmark(void);
+
+/* Generic k+m code prototype, see raidz_ec.c */
+#define	RZEC_MAXPARITY	6
+
+typedef enum rzec_code {
+	RZEC_CAUCHY,
+	RZEC_VAND,
+} rzec_code_t;
+
+typedef enum rzec_kernel {
+	RZEC_KERNEL_SWAR,
+	RZEC_KERNEL_TABLE,
+} rzec_kernel_t;
+
+void rzec_init(void);
+void rzec_set_kernel(rzec_kernel_t);
+const char *rzec_kernel_name(rzec_kernel_t);
+const char *rzec_code_name(rzec_code_t);
+int rzec_max_data(rzec_code_t);
+void rzec_generate(raidz_map_t *, rzec_code_t);
+int rzec_reconstruct(raidz_map_t *, rzec_code_t, const int *, int);
+int run_rzec_check(void);
+void run_rzec_benchmark(void);
 
 #endif /* RAIDZ_TEST_H */

@@ -84,7 +84,8 @@ static void print_opts(raidz_test_opts_t *opts, boolean_t force)
 		    "  (-d) number of raidz data columns : %zu\n"
 		    "  (-s) size of DATA                 : 1 << %zu\n"
 		    "  (-S) sweep parameters             : %s \n"
-		    "  (-v) verbose                      : %s \n\n",
+		    "  (-v) verbose                      : %s \n"
+	    "  (-c) generic code prototype       : %s \n\n",
 		    opts->rto_ashift,				/* -a */
 		    ilog2(opts->rto_offset),			/* -o */
 		    opts->rto_expand ? "yes" : "no",		/* -e */
@@ -92,7 +93,8 @@ static void print_opts(raidz_test_opts_t *opts, boolean_t force)
 		    opts->rto_dcols,				/* -d */
 		    ilog2(opts->rto_dsize),			/* -s */
 		    opts->rto_sweep ? "yes" : "no",		/* -S */
-		    verbose);					/* -v */
+		    verbose,					/* -v */
+		    opts->rto_ec ? "yes" : "no");		/* -c */
 	}
 }
 
@@ -116,6 +118,12 @@ static void usage(boolean_t requested)
 	    "\t[-h (print help)]\n"
 	    "\t[-T test the test, see if failure would be detected]\n"
 	    "\t[-D debug (attach gdb on SIGSEGV)]\n"
+	    "\t[-c check (or with -B benchmark) the generic k+m code]\n"
+	    "\t[-m parity count for -c, 1..%d (default: 4 to 6)]\n"
+	    "\t[-w widest vdev checked exhaustively by -c (default: %zu)]\n"
+	    "\t[-n random erasure sets per sampled case (default: %llu)]\n"
+	    "\t[-g random seed for -c (default: %u)]\n"
+	    "\t[-V use generators 1, 2, 4, 8... instead of Cauchy]\n"
 	    "",
 	    o->rto_ashift,				/* -a */
 	    ilog2(o->rto_offset),			/* -o */
@@ -124,7 +132,11 @@ static void usage(boolean_t requested)
 	    rto_opts.rto_sweep ? "yes" : "no",		/* -S */
 	    rto_opts.rto_expand ? "yes" : "no",		/* -e */
 	    (u_longlong_t)o->rto_expand_offset,		/* -r */
-	    o->rto_v);					/* -v */
+	    o->rto_v,					/* -v */
+	    RZEC_MAXPARITY,				/* -m */
+	    o->rto_ec_width,				/* -w */
+	    (u_longlong_t)o->rto_ec_samples,		/* -n */
+	    o->rto_ec_seed);				/* -g */
 
 	exit(requested ? 0 : 1);
 }
@@ -137,7 +149,8 @@ static void process_options(int argc, char **argv)
 
 	memcpy(o, &rto_opts_defaults, sizeof (*o));
 
-	while ((opt = getopt(argc, argv, "TDBSvha:er:o:d:s:t:")) != -1) {
+	while ((opt = getopt(argc, argv,
+	    "TDBSVcvha:er:o:d:s:t:m:w:n:g:")) != -1) {
 		switch (opt) {
 		case 'a':
 			value = strtoull(optarg, NULL, 0);
@@ -180,6 +193,26 @@ static void process_options(int argc, char **argv)
 			break;
 		case 'T':
 			o->rto_sanity = 1;
+			break;
+		case 'c':
+			o->rto_ec = 1;
+			break;
+		case 'm':
+			value = strtoull(optarg, NULL, 0);
+			o->rto_ec_parity = MIN(RZEC_MAXPARITY, MAX(1, value));
+			break;
+		case 'w':
+			value = strtoull(optarg, NULL, 0);
+			o->rto_ec_width = MIN(255, MAX(2, value));
+			break;
+		case 'n':
+			o->rto_ec_samples = strtoull(optarg, NULL, 0);
+			break;
+		case 'g':
+			o->rto_ec_seed = strtoul(optarg, NULL, 0);
+			break;
+		case 'V':
+			o->rto_ec_vand = 1;
 			break;
 		case 'h':
 			usage(B_TRUE);
@@ -830,7 +863,13 @@ main(int argc, char **argv)
 
 	mprotect(rand_data, SPA_MAXBLOCKSIZE, PROT_READ);
 
-	if (rto_opts.rto_benchmark) {
+	if (rto_opts.rto_ec) {
+		rzec_init();
+		if (rto_opts.rto_benchmark)
+			run_rzec_benchmark();
+		else
+			err = run_rzec_check();
+	} else if (rto_opts.rto_benchmark) {
 		run_raidz_benchmark();
 	} else if (rto_opts.rto_sweep) {
 		err = run_sweep();

@@ -11,7 +11,7 @@
 .\"
 .\" Copyright (c) 2016 Gvozden Nešković. All rights reserved.
 .\"
-.Dd May 26, 2021
+.Dd October 20, 2026
 .Dt RAIDZ_TEST 1
 .Os
 .
@@ -20,12 +20,16 @@
 .Nd raidz implementation verification and benchmarking tool
 .Sh SYNOPSIS
 .Nm
-.Op Fl StBevTD
+.Op Fl StBevTDcV
 .Op Fl a Ar ashift
 .Op Fl o Ar zio_off_shift
 .Op Fl d Ar raidz_data_disks
 .Op Fl s Ar zio_size_shift
 .Op Fl r Ar reflow_offset
+.Op Fl m Ar parity
+.Op Fl w Ar width
+.Op Fl n Ar samples
+.Op Fl g Ar seed
 .
 .Sh DESCRIPTION
 The purpose of this tool is to run all supported raidz implementation and verify
@@ -86,6 +90,37 @@ when
 or
 .Sy SIGABRT
 are received.
+.It Fl c Ns Pq ode
+Check the prototype of a generic erasure code with up to 6 parity columns
+instead of the RAID-Z implementations.
+Every vdev width up to
+.Fl w
+is checked against every set of up to
+.Fl m
+lost columns, and wider vdevs against a random sample of
+.Fl n
+sets.
+With
+.Fl B ,
+benchmark it against the existing implementations instead.
+The prototype is not used by the module and writes nothing to disk.
+.It Fl m Ar parity Pq default: Sy 4 No to Sy 6
+Number of parity columns checked by
+.Fl c .
+.It Fl w Ar width Pq default: Sy 32
+Widest vdev checked exhaustively by
+.Fl c .
+.It Fl n Ar samples Pq default: Sy 2000
+Random sets of lost columns per sampled case of
+.Fl c .
+.It Fl g Ar seed Pq default: Sy 1
+Random seed for
+.Fl c .
+.It Fl V Ns Pq andermonde
+With
+.Fl c ,
+use the generators 1, 2, 4, 8, and so on, which match P, Q and R for up to
+3 parity columns, instead of the Cauchy code.
 .El
 .
 .Sh "SEE ALSO"
