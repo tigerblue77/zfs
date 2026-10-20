@@ -51,11 +51,23 @@ enum zio_compress {
 
 /* Compression algorithms that have levels */
 #define	ZIO_COMPRESS_HASLEVEL(compress)	((compress == ZIO_COMPRESS_ZSTD || \
+					compress == ZIO_COMPRESS_LZ4 || \
 					(compress >= ZIO_COMPRESS_GZIP_1 && \
 					compress <= ZIO_COMPRESS_GZIP_9)))
 
 #define	ZIO_COMPLEVEL_INHERIT	0
 #define	ZIO_COMPLEVEL_DEFAULT	255
+
+/*
+ * LZ4 levels 1 to 12 select the LZ4 HC compressor; any other level,
+ * ZIO_COMPLEVEL_DEFAULT included, selects the fast one. Both write the
+ * same block format, so the level is a property, never part of the BP.
+ */
+#define	ZIO_LZ4HC_LEVEL_MIN	1
+#define	ZIO_LZ4HC_LEVEL_DEFAULT	9
+#define	ZIO_LZ4HC_LEVEL_MAX	12
+#define	ZIO_LZ4_LEVEL_IS_HC(level)	\
+	((level) >= ZIO_LZ4HC_LEVEL_MIN && (level) <= ZIO_LZ4HC_LEVEL_MAX)
 
 enum zio_zstd_levels {
 	ZIO_ZSTD_LEVEL_INHERIT = 0,
@@ -141,6 +153,8 @@ extern zio_compress_info_t zio_compress_table[ZIO_COMPRESS_FUNCTIONS];
  */
 extern void lz4_init(void);
 extern void lz4_fini(void);
+extern void lz4hc_init(void);
+extern void lz4hc_fini(void);
 
 /*
  * Compression routines.
@@ -161,6 +175,8 @@ extern size_t zfs_lz4_compress(abd_t *src, abd_t *dst, size_t s_len,
     size_t d_len, int level);
 extern int zfs_lz4_decompress(abd_t *src, abd_t *dst, size_t s_len,
     size_t d_len, int level);
+extern size_t zfs_lz4hc_compress_buf(void *s_start, void *d_start,
+    size_t s_len, size_t d_len, int level);
 
 /*
  * Compress and decompress data if necessary.

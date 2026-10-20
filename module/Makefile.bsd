@@ -27,6 +27,7 @@ KMOD=	openzfs
 	${SRCDIR}/unicode \
 	${SRCDIR}/zcommon \
 	${SRCDIR}/zfs \
+	${SRCDIR}/lz4 \
 	${SRCDIR}/zstd \
 	${SRCDIR}/zstd/lib/common \
 	${SRCDIR}/zstd/lib/compress \
@@ -387,6 +388,9 @@ SRCS+=	abd.c \
 	zthr.c \
 	zvol.c
 
+#lz4
+SRCS+=	zfs_lz4hc.c
+
 #zstd
 SRCS+=	zfs_zstd.c
 
@@ -467,6 +471,7 @@ CFLAGS.ltable.c= -Wno-cast-qual
 CFLAGS.lvm.c= -Wno-cast-qual
 CFLAGS.lz4.c= -Wno-cast-qual
 CFLAGS.lz4_zfs.c= -Wno-cast-qual
+CFLAGS.zfs_lz4hc.c= -Wno-cast-qual
 CFLAGS.nvpair.c= -Wno-cast-qual -DHAVE_RPC_TYPES ${NO_WSTRINGOP_OVERREAD}
 CFLAGS.pool.c+= ${NO_WBITWISE_INSTEAD_OF_LOGICAL}
 CFLAGS.pool.c= -U__BMI__ -fno-tree-vectorize

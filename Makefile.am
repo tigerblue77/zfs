@@ -138,6 +138,7 @@ cstyle:
 		! -name 'zstd_compat_wrapper.h' \
 		! -path './module/zstd/zstd-in.c' \
 		! -path './module/zstd/lib/*' \
+		! -path './module/lz4/lib/*' \
 		! -path './include/sys/lua/*' \
 		! -path './module/lua/l*.[ch]' \
 		! -path './module/zfs/lz4.c' \

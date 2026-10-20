@@ -122,6 +122,24 @@ zfs_prop_init(void)
 		{ "gzip-9",	ZIO_COMPRESS_GZIP_9 },
 		{ "zle",	ZIO_COMPRESS_ZLE },
 		{ "lz4",	ZIO_COMPRESS_LZ4 },
+
+		/*
+		 * LZ4 HC levels are synthetic too: the blocks are plain LZ4
+		 * and are recorded as such in the block pointer.
+		 */
+		{ "lz4hc",	ZIO_COMPLEVEL_LZ4(ZIO_LZ4HC_LEVEL_DEFAULT) },
+		{ "lz4hc-1",	ZIO_COMPLEVEL_LZ4(1) },
+		{ "lz4hc-2",	ZIO_COMPLEVEL_LZ4(2) },
+		{ "lz4hc-3",	ZIO_COMPLEVEL_LZ4(3) },
+		{ "lz4hc-4",	ZIO_COMPLEVEL_LZ4(4) },
+		{ "lz4hc-5",	ZIO_COMPLEVEL_LZ4(5) },
+		{ "lz4hc-6",	ZIO_COMPLEVEL_LZ4(6) },
+		{ "lz4hc-7",	ZIO_COMPLEVEL_LZ4(7) },
+		{ "lz4hc-8",	ZIO_COMPLEVEL_LZ4(8) },
+		{ "lz4hc-9",	ZIO_COMPLEVEL_LZ4(9) },
+		{ "lz4hc-10",	ZIO_COMPLEVEL_LZ4(10) },
+		{ "lz4hc-11",	ZIO_COMPLEVEL_LZ4(11) },
+		{ "lz4hc-12",	ZIO_COMPLEVEL_LZ4(12) },
 		{ "zstd",	ZIO_COMPRESS_ZSTD },
 		{ "zstd-fast",
 		    ZIO_COMPLEVEL_ZSTD(ZIO_ZSTD_LEVEL_FAST_DEFAULT) },
@@ -423,7 +441,7 @@ zfs_prop_init(void)
 	    ZIO_COMPRESS_DEFAULT, PROP_INHERIT,
 	    ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME,
 	    "on | off | lzjb | gzip | gzip-[1-9] | zle | lz4 | "
-	    "zstd | zstd-[1-19] | "
+	    "lz4hc | lz4hc-[1-12] | zstd | zstd-[1-19] | "
 	    "zstd-fast | zstd-fast-[1-10,20,30,40,50,60,70,80,90,100,500,1000]",
 	    "COMPRESS", compress_table, sfeatures);
 	zprop_register_index(ZFS_PROP_SNAPDIR, "snapdir", ZFS_SNAPDIR_HIDDEN,

@@ -54,6 +54,7 @@ ZCP_SOURCES = \
 	module/zfs/zcp_synctask.c
 
 nodist_libzpool_la_SOURCES = \
+	module/lz4/zfs_lz4hc.c \
 	module/zcommon/cityhash.c \
 	module/zcommon/simd_stat.c \
 	module/zcommon/zfeature_common.c \

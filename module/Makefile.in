@@ -96,7 +96,7 @@ clean: clean-@ac_system@
 .PHONY: modules_uninstall-Linux-legacy
 @ZCP_ENABLED_TRUE@lua_dir = lua/
 modules_uninstall-Linux-legacy:
-	$(RM) -r $(addprefix $(KMODDIR)/$(INSTALL_MOD_DIR)/,spl/ avl/ icp/ $(lua_dir) nvpair/ unicode/ zcommon/ zfs/ zstd/)
+	$(RM) -r $(addprefix $(KMODDIR)/$(INSTALL_MOD_DIR)/,spl/ avl/ icp/ $(lua_dir) nvpair/ unicode/ zcommon/ zfs/ zstd/ lz4/)
 
 
 KMODDIR := $(INSTALL_MOD_PATH)/lib/modules/@LINUX_VERSION@
@@ -166,12 +166,13 @@ cppcheck-Linux:
 		--include=@top_builddir@/zfs_config.h \
 		--config-exclude=@LINUX_OBJ@/include \
 		-i zstd/lib \
+		-i lz4/lib \
 		-I @LINUX_OBJ@/include \
 		-I @top_srcdir@/include/os/linux/kernel \
 		-I @top_srcdir@/include/os/linux/spl \
 		-I @top_srcdir@/include/os/linux/zfs \
 		-I @top_srcdir@/include \
-		avl icp $(lua_dir) nvpair unicode zcommon zfs zstd os/linux
+		avl icp $(lua_dir) nvpair unicode zcommon zfs zstd lz4 os/linux
 
 cppcheck-FreeBSD:
 	@true

@@ -57,9 +57,12 @@ static size_t
 zfs_lz4_compress_buf(void *s_start, void *d_start, size_t s_len,
     size_t d_len, int n)
 {
-	(void) n;
 	uint32_t bufsiz;
 	char *dest = d_start;
+
+	if (ZIO_LZ4_LEVEL_IS_HC(n))
+		return (zfs_lz4hc_compress_buf(s_start, d_start, s_len,
+		    d_len, n));
 
 	ASSERT(d_len >= sizeof (bufsiz));
 
@@ -880,11 +883,13 @@ lz4_init(void)
 	lz4_cache = kmem_cache_create("lz4_cache",
 	    sizeof (struct refTables), 0, NULL, NULL, NULL, NULL, NULL,
 	    KMC_RECLAIMABLE);
+	lz4hc_init();
 }
 
 void
 lz4_fini(void)
 {
+	lz4hc_fini();
 	if (lz4_cache) {
 		kmem_cache_destroy(lz4_cache);
 		lz4_cache = NULL;

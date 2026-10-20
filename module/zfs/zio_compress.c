@@ -128,6 +128,8 @@ zio_compress_data(enum zio_compress c, abd_t *src, abd_t **dst, size_t s_len,
 			complevel = level;
 
 		ASSERT3U(complevel, !=, ZIO_COMPLEVEL_INHERIT);
+	} else if (c == ZIO_COMPRESS_LZ4) {
+		complevel = level;
 	}
 
 	if (*dst == NULL)

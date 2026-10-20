@@ -319,6 +319,13 @@ $(addprefix $(obj)/zstd/,$(ZSTD_UPSTREAM_OBJS)) : ccflags-y += -include $(zstd_i
 $(obj)/zstd/zfs_zstd.o : ccflags-y += -include $(zstd_include)/zstd_compat_wrapper.h
 
 
+# LZ4 HC: the upstream library is built inside zfs_lz4hc.o, with the zstd
+# shims standing in for its <string.h>, <limits.h> and <stdint.h>.
+zfs-objs += lz4/zfs_lz4hc.o
+
+$(obj)/lz4/zfs_lz4hc.o : ccflags-y += -I$(zstd_include)
+
+
 @ZCP_ENABLED_TRUE@ZCP_OBJS := \
 @ZCP_ENABLED_TRUE@	zcp.o \
 @ZCP_ENABLED_TRUE@	zcp_get.o \

@@ -29,7 +29,7 @@
 .\" Copyright (c) 2019, Kjeld Schouten-Lebbing
 .\" Copyright (c) 2022 Hewlett Packard Enterprise Development LP.
 .\"
-.Dd September 9, 2026
+.Dd October 20, 2026
 .Dt ZFSPROPS 7
 .Os
 .
@@ -843,7 +843,9 @@ for more information on these algorithms.
 Changing this property affects only newly-written data.
 .It Xo
 .Sy compression Ns = Ns Sy on Ns | Ns Sy off Ns | Ns Sy gzip Ns | Ns
-.Sy gzip- Ns Ar N Ns | Ns Sy lz4 Ns | Ns Sy lzjb Ns | Ns Sy zle Ns | Ns Sy zstd Ns | Ns
+.Sy gzip- Ns Ar N Ns | Ns Sy lz4 Ns | Ns
+.Sy lz4hc Ns | Ns Sy lz4hc- Ns Ar N Ns | Ns
+.Sy lzjb Ns | Ns Sy zle Ns | Ns Sy zstd Ns | Ns
 .Sy zstd- Ns Ar N Ns | Ns Sy zstd-fast Ns | Ns Sy zstd-fast- Ns Ar N
 .Xc
 Controls the compression algorithm used for this dataset.
@@ -883,6 +885,39 @@ See
 for details on ZFS feature flags and the
 .Sy lz4_compress
 feature.
+.Pp
+The
+.Sy lz4hc
+setting compresses with LZ4 HC, the high compression mode of
+.Sy lz4 .
+It writes ordinary
+.Sy lz4
+blocks, which are recorded as
+.Sy lz4
+and read by the
+.Sy lz4
+decoder, also in implementations that do not know
+.Sy lz4hc .
+Compression is much slower than with
+.Sy lz4 ,
+so it suits data that is written once and read often.
+You can specify the level by using the value
+.Sy lz4hc- Ns Ar N ,
+where
+.Ar N
+is an integer from 1
+.Pq fastest
+to 12
+.Pq best compression ratio .
+.Sy lz4hc
+is equivalent to
+.Sy lz4hc-9 .
+Because the level is not recorded in the blocks, data written with
+.Sy lz4hc
+cannot be recompressed identically once its dataset's setting has changed,
+which matters for the L2ARC when
+.Sy zfs_compressed_arc_enabled
+is 0.
 .Pp
 The
 .Sy lzjb

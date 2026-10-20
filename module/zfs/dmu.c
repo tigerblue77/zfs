@@ -2522,6 +2522,8 @@ dmu_write_policy(objset_t *os, dnode_t *dn, int level, int wp, zio_prop_t *zp)
 		 */
 		compress = zio_compress_select(os->os_spa,
 		    ZIO_COMPRESS_ON, ZIO_COMPRESS_ON);
+		/* The dataset's level, e.g. an LZ4 HC one, is for data. */
+		complevel = ZIO_COMPLEVEL_DEFAULT;
 
 		/*
 		 * Metadata always gets checksummed.  If the data
