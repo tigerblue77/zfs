@@ -360,6 +360,7 @@ typedef struct zio_prop {
 	uint8_t			zp_level;
 	uint8_t			zp_copies;
 	uint8_t			zp_gang_copies;
+	uint8_t			zp_raidz_parity;	/* spike: 0 = vdev's */
 	dmu_object_type_t	zp_type:8;
 	dmu_object_type_t	zp_storage_type:8;
 	boolean_t		zp_dedup:1;

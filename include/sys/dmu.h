@@ -939,6 +939,7 @@ int dmu_assign_arcbuf_by_dbuf(dmu_buf_t *handle, uint64_t offset,
     struct arc_buf *buf, dmu_tx_t *tx, dmu_flags_t flags);
 #define	dmu_assign_arcbuf	dmu_assign_arcbuf_by_dbuf
 extern uint_t zfs_max_recordsize;
+extern uint_t zfs_raidz_grid_parity;
 
 /*
  * Asynchronously try to read in the data.

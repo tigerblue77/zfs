@@ -2230,12 +2230,14 @@ vdev_raidz_reconstruct_row(raidz_map_t *rm, raidz_row_t *rr,
 }
 
 /*
- * The number of failed children that every block of the vdev survives: the
- * lowest parity of any layout the vdev has held, which is not necessarily the
- * parity of the layout new blocks are written in.
+ * The number of failed children that every block of the vdev but those with
+ * a GRID parity survives: the lowest parity of any layout the vdev has held,
+ * which is not necessarily the parity of the layout new blocks are written
+ * in.  The vdev stays open as long as these blocks, which hold its metadata,
+ * survive.
  */
 static uint64_t
-vdev_raidz_min_nparity(vdev_t *vd)
+vdev_raidz_open_nparity(vdev_t *vd)
 {
 	vdev_raidz_t *vdrz = vd->vdev_tsd;
 	uint64_t min = vdrz->vd_nparity;
@@ -2246,6 +2248,35 @@ vdev_raidz_min_nparity(vdev_t *vd)
 	mutex_exit(&vdrz->vd_expand_lock);
 
 	return (min);
+}
+
+/*
+ * The number of failed children that every block of the vdev survives,
+ * blocks with a GRID parity included.  Spike: the lowest GRID parity is the
+ * lowest this vdev has allocated or read since it was opened, where a real
+ * implementation would keep counters of the space allocated per parity.
+ */
+static uint64_t
+vdev_raidz_min_nparity(vdev_t *vd)
+{
+	vdev_raidz_t *vdrz = vd->vdev_tsd;
+
+	return (MIN(vdev_raidz_open_nparity(vd),
+	    atomic_load_64(&vdrz->vd_grid_min_parity)));
+}
+
+static void
+vdev_raidz_grid_seen(vdev_raidz_t *vdrz, uint64_t parity)
+{
+	uint64_t cur = atomic_load_64(&vdrz->vd_grid_min_parity);
+
+	while (parity < cur) {
+		uint64_t prev = atomic_cas_64(&vdrz->vd_grid_min_parity, cur,
+		    parity);
+		if (prev == cur)
+			break;
+		cur = prev;
+	}
 }
 
 static int
@@ -2300,7 +2331,7 @@ vdev_raidz_open(vdev_t *vd, uint64_t *asize, uint64_t *max_asize,
 		*max_asize *= vd->vdev_children;
 	}
 
-	if (numerrors > vdev_raidz_min_nparity(vd)) {
+	if (numerrors > vdev_raidz_open_nparity(vd)) {
 		vd->vdev_stat.vs_aux = VDEV_AUX_NO_REPLICAS;
 		return (lasterror);
 	}
@@ -2395,14 +2426,80 @@ vdev_raidz_layout_for_alloc(vdev_raidz_t *vdrz, uint64_t txg)
 }
 
 /*
- * Keep BP layout selection distinct from new-allocation selection even though
- * both paths intentionally have identical behavior before mixed-parity epochs.
+ * The layout of the DVA of bp at offset on the top-level vdev vd: the width
+ * (and parity) of its physical birth, with the parity of its GRID instead
+ * when it has one.  A DVA of bp found nowhere at that offset, as for a gang
+ * header, which has no GRID, keeps the layout of the birth.
  */
 static vdev_raidz_layout_t
-vdev_raidz_layout_for_bp(vdev_raidz_t *vdrz, const blkptr_t *bp)
+vdev_raidz_layout_for_bp(vdev_t *vd, const blkptr_t *bp, uint64_t offset)
 {
-	return (vdev_raidz_layout_for_alloc(vdrz,
-	    BP_GET_PHYSICAL_BIRTH(bp)));
+	vdev_raidz_t *vdrz = vd->vdev_tsd;
+	vdev_raidz_layout_t layout = vdev_raidz_layout_for_alloc(vdrz,
+	    BP_GET_PHYSICAL_BIRTH(bp));
+
+	for (int d = 0; d < BP_GET_NDVAS(bp); d++) {
+		const dva_t *dva = &bp->blk_dva[d];
+
+		if (DVA_GET_VDEV(dva) != vd->vdev_id ||
+		    DVA_GET_OFFSET(dva) != offset)
+			continue;
+		uint64_t grid = DVA_GET_GRID_PARITY(dva);
+		if (grid != 0 && grid < vdrz->vd_nparity) {
+			layout.vrl_nparity = grid;
+			vdev_raidz_grid_seen(vdrz, grid);
+		}
+		break;
+	}
+	return (layout);
+}
+
+/*
+ * The parity a new DVA on the top-level RAID-Z vdev vd records in its GRID
+ * for a block that asks for parity requested, or 0 for the parity of the
+ * vdev.  A block never gets more parity than its vdev, and never less than
+ * the number of children it cannot be written to, or its write would fail.
+ */
+uint64_t
+vdev_raidz_grid_parity(vdev_t *vd, uint64_t requested)
+{
+	vdev_raidz_t *vdrz = vd->vdev_tsd;
+	uint64_t parity = requested;
+	uint64_t unwritable = 0;
+
+	ASSERT3P(vd->vdev_ops, ==, &vdev_raidz_ops);
+
+	if (parity == 0 || parity >= vdrz->vd_nparity)
+		return (0);
+	for (uint64_t c = 0; c < vd->vdev_children; c++) {
+		if (!vdev_writeable(vd->vdev_child[c]))
+			unwritable++;
+	}
+	parity = MAX(parity, unwritable);
+	if (parity >= vdrz->vd_nparity)
+		return (0);
+
+	vdev_raidz_grid_seen(vdrz, parity);
+	return (parity);
+}
+
+/*
+ * The width and the parity that the I/O path maps the DVA of bp at offset
+ * on the top-level RAID-Z vdev vd with, for consumers outside it such as
+ * zdb.  Either pointer may be NULL.
+ */
+void
+vdev_raidz_layout_for_dva(vdev_t *vd, const blkptr_t *bp, uint64_t offset,
+    uint64_t *widthp, uint64_t *nparityp)
+{
+	ASSERT3P(vd->vdev_ops, ==, &vdev_raidz_ops);
+
+	vdev_raidz_layout_t layout = vdev_raidz_layout_for_bp(vd, bp, offset);
+
+	if (widthp != NULL)
+		*widthp = layout.vrl_width;
+	if (nparityp != NULL)
+		*nparityp = layout.vrl_nparity;
 }
 
 /*
@@ -2461,12 +2558,11 @@ vdev_raidz_same_logical_width(vdev_t *vd, uint64_t txg1, uint64_t txg2)
  * the psize_to_asize function.
  */
 static uint64_t
-vdev_raidz_asize_to_psize(vdev_t *vd, uint64_t asize, uint64_t txg)
+vdev_raidz_asize_to_psize_layout(vdev_t *vd, uint64_t asize,
+    vdev_raidz_layout_t layout)
 {
-	vdev_raidz_t *vdrz = vd->vdev_tsd;
 	uint64_t psize;
 	uint64_t ashift = vd->vdev_top->vdev_ashift;
-	vdev_raidz_layout_t layout = vdev_raidz_layout_for_alloc(vdrz, txg);
 	uint64_t nparity = layout.vrl_nparity;
 	uint64_t cols = layout.vrl_width;
 
@@ -2485,6 +2581,30 @@ vdev_raidz_asize_to_psize(vdev_t *vd, uint64_t asize, uint64_t txg)
 	psize <<= ashift;
 
 	return (psize);
+}
+
+static uint64_t
+vdev_raidz_asize_to_psize(vdev_t *vd, uint64_t asize, uint64_t txg)
+{
+	return (vdev_raidz_asize_to_psize_layout(vd, asize,
+	    vdev_raidz_layout_for_alloc(vd->vdev_tsd, txg)));
+}
+
+/*
+ * vdev_raidz_asize_to_psize() for a DVA born in txg with the GRID parity
+ * grid instead of the parity of the vdev.
+ */
+uint64_t
+vdev_raidz_asize_to_psize_grid(vdev_t *vd, uint64_t asize, uint64_t txg,
+    uint64_t grid)
+{
+	vdev_raidz_layout_t layout =
+	    vdev_raidz_layout_for_alloc(vd->vdev_tsd, txg);
+
+	ASSERT3U(grid, >, 0);
+	ASSERT3U(grid, <, layout.vrl_nparity);
+	layout.vrl_nparity = grid;
+	return (vdev_raidz_asize_to_psize_layout(vd, asize, layout));
 }
 
 /*
@@ -2527,6 +2647,23 @@ vdev_raidz_psize_to_asize(vdev_t *vd, uint64_t psize, uint64_t txg)
 #endif
 
 	return (asize);
+}
+
+/*
+ * vdev_raidz_psize_to_asize() for a DVA born in txg with the GRID parity
+ * grid instead of the parity of the vdev.
+ */
+uint64_t
+vdev_raidz_psize_to_asize_grid(vdev_t *vd, uint64_t psize, uint64_t txg,
+    uint64_t grid)
+{
+	vdev_raidz_layout_t layout =
+	    vdev_raidz_layout_for_alloc(vd->vdev_tsd, txg);
+
+	ASSERT3U(grid, >, 0);
+	ASSERT3U(grid, <, layout.vrl_nparity);
+	return (vdev_raidz_psize_to_asize_width(vd, psize, layout.vrl_width,
+	    grid));
 }
 
 static boolean_t
@@ -2650,10 +2787,12 @@ vdev_raidz_io_verify(zio_t *zio, raidz_map_t *rm, raidz_row_t *rr, int col)
 	(void) rm;
 #ifdef ZFS_DEBUG
 	zfs_range_seg64_t logical_rs, physical_rs, remain_rs;
+	vdev_raidz_layout_t layout = vdev_raidz_layout_for_bp(zio->io_vd,
+	    zio->io_bp, zio->io_offset);
 	logical_rs.rs_start = rr->rr_offset;
 	logical_rs.rs_end = logical_rs.rs_start +
-	    vdev_raidz_psize_to_asize(zio->io_vd, rr->rr_size,
-	    BP_GET_PHYSICAL_BIRTH(zio->io_bp));
+	    vdev_raidz_psize_to_asize_width(zio->io_vd, rr->rr_size,
+	    layout.vrl_width, layout.vrl_nparity);
 
 	raidz_col_t *rc = &rr->rr_col[col];
 	vdev_t *cvd = zio->io_vd->vdev_child[rc->rc_devidx];
@@ -2915,7 +3054,8 @@ vdev_raidz_io_start(zio_t *zio)
 	vdev_raidz_t *vdrz = vd->vdev_tsd;
 	raidz_map_t *rm;
 
-	vdev_raidz_layout_t layout = vdev_raidz_layout_for_bp(vdrz, zio->io_bp);
+	vdev_raidz_layout_t layout = vdev_raidz_layout_for_bp(vd, zio->io_bp,
+	    zio->io_offset);
 	if (zfs_flags & ZFS_DEBUG_RAIDZ_RECONSTRUCT)
 		zfs_dbgmsg("io_start: vrl_width=%llu phys=%d "
 		    "off=%llu type=%d", (u_longlong_t)layout.vrl_width,
@@ -4296,6 +4436,17 @@ vdev_raidz_io_done(zio_t *zio)
 			 * that is also a known failure, that's fine.
 			 */
 			zio->io_error = vdev_raidz_combrec(zio);
+			/*
+			 * A block of lower GRID parity than its vdev can
+			 * lose more children than it has parity while the
+			 * vdev stays open.  ENXIO would make zio_done()
+			 * suspend the pool over the loss of one block: it
+			 * is a data error, so report it as one.
+			 */
+			if (zio->io_error == ENXIO &&
+			    rm->rm_row[0]->rr_firstdatacol <
+			    vdev_get_nparity(zio->io_vd))
+				zio->io_error = SET_ERROR(EIO);
 			if (zio->io_error == ECKSUM &&
 			    !(zio->io_flags & ZIO_FLAG_SPECULATIVE)) {
 				vdev_raidz_io_done_unrecoverable(zio);
@@ -4312,7 +4463,7 @@ done:
 static void
 vdev_raidz_state_change(vdev_t *vd, int faulted, int degraded)
 {
-	if (faulted > vdev_raidz_min_nparity(vd))
+	if (faulted > vdev_raidz_open_nparity(vd))
 		vdev_set_state(vd, B_FALSE, VDEV_STATE_CANT_OPEN,
 		    VDEV_AUX_NO_REPLICAS);
 	else if (degraded + faulted != 0)
@@ -4343,6 +4494,9 @@ vdev_raidz_need_resilver(vdev_t *vd, const dva_t *dva, size_t psize,
 	uint64_t dcols = vd->vdev_children;
 	uint64_t nparity =
 	    vdev_raidz_layout_for_alloc(vdrz, phys_birth).vrl_nparity;
+	if (DVA_GET_GRID_PARITY(dva) != 0 &&
+	    DVA_GET_GRID_PARITY(dva) < nparity)
+		nparity = DVA_GET_GRID_PARITY(dva);
 	uint64_t ashift = vd->vdev_top->vdev_ashift;
 	/* The starting RAIDZ (parent) vdev sector of the block. */
 	uint64_t b = DVA_GET_OFFSET(dva) >> ashift;
@@ -6186,6 +6340,7 @@ vdev_raidz_init(spa_t *spa, nvlist_t *nv, void **tsd)
 	}
 
 	vdrz->vd_original_width = children;
+	vdrz->vd_grid_min_parity = nparity;
 
 	uint64_t *pe_label;
 	unsigned int pe_label_size = 0;

@@ -1303,6 +1303,17 @@ zfs_blkptr_verify(spa_t *spa, const blkptr_t *bp,
 			    "blkptr at %px DVA %u has invalid OFFSET %llu",
 			    bp, i, (longlong_t)offset);
 		}
+		/*
+		 * A GRID parity is lower than that of its RAID-Z vdev, and
+		 * only the DVA of a block that is not a gang header has one.
+		 */
+		uint64_t grid = DVA_GET_GRID(dva);
+		if (unlikely(grid != 0 && (vd->vdev_ops != &vdev_raidz_ops ||
+		    DVA_GET_GANG(dva) || grid >= vdev_get_nparity(vd)))) {
+			errors += zfs_blkptr_verify_log(spa, bp, blk_verify,
+			    "blkptr at %px DVA %u has invalid GRID %llu",
+			    bp, i, (longlong_t)grid);
+		}
 	}
 	if (blk_config == BLK_CONFIG_NEEDED || blk_config ==
 	    BLK_CONFIG_NEEDED_TRY)
@@ -3579,7 +3590,8 @@ zio_write_gang_block(zio_t *pio, metaslab_class_t *mc)
 	boolean_t any_failed = B_FALSE;
 	for (g = 0; resid != 0; g++) {
 		flags &= METASLAB_ASYNC_ALLOC;
-		flags |= METASLAB_GANG_CHILD;
+		flags |= METASLAB_GANG_CHILD |
+		    METASLAB_PARITY(gio->io_prop.zp_raidz_parity);
 		zp.zp_checksum = gio->io_prop.zp_checksum;
 		zp.zp_compress = ZIO_COMPRESS_OFF;
 		zp.zp_complevel = gio->io_prop.zp_complevel;
@@ -3587,6 +3599,7 @@ zio_write_gang_block(zio_t *pio, metaslab_class_t *mc)
 		zp.zp_level = 0;
 		zp.zp_copies = gio->io_prop.zp_copies;
 		zp.zp_gang_copies = gio->io_prop.zp_gang_copies;
+		zp.zp_raidz_parity = gio->io_prop.zp_raidz_parity;
 		zp.zp_dedup = B_FALSE;
 		zp.zp_dedup_verify = B_FALSE;
 		zp.zp_nopwrite = B_FALSE;
@@ -4750,6 +4763,7 @@ zio_dva_allocate(zio_t *zio)
 		flags |= METASLAB_GANG_CHILD;
 	if (zio->io_priority == ZIO_PRIORITY_ASYNC_WRITE)
 		flags |= METASLAB_ASYNC_ALLOC;
+	flags |= METASLAB_PARITY(zio->io_prop.zp_raidz_parity);
 
 	/*
 	 * If not already chosen, choose an appropriate allocation class.

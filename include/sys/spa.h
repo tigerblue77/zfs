@@ -118,15 +118,15 @@ typedef struct zio_cksum_salt {
  *
  *	64	56	48	40	32	24	16	8	0
  *	+-------+-------+-------+-------+-------+-------+-------+-------+
- * 0	|  pad  |	  vdev1         | pad   |	  ASIZE		|
+ * 0	|  pad  |	  vdev1         | GRID  |	  ASIZE		|
  *	+-------+-------+-------+-------+-------+-------+-------+-------+
  * 1	|G|			 offset1				|
  *	+-------+-------+-------+-------+-------+-------+-------+-------+
- * 2	|  pad  |	  vdev2         | pad   |	  ASIZE		|
+ * 2	|  pad  |	  vdev2         | GRID  |	  ASIZE		|
  *	+-------+-------+-------+-------+-------+-------+-------+-------+
  * 3	|G|			 offset2				|
  *	+-------+-------+-------+-------+-------+-------+-------+-------+
- * 4	|  pad  |	  vdev3         | pad   |	  ASIZE		|
+ * 4	|  pad  |	  vdev3         | GRID  |	  ASIZE		|
  *	+-------+-------+-------+-------+-------+-------+-------+-------+
  * 5	|G|			 offset3				|
  *	+-------+-------+-------+-------+-------+-------+-------+-------+
@@ -158,6 +158,8 @@ typedef struct zio_cksum_salt {
  * LSIZE	logical size
  * PSIZE	physical size (after compression)
  * ASIZE	allocated size (including RAID-Z parity and gang block headers)
+ * GRID		RAID-Z layout of this DVA (spike): the low nibble is the parity
+ *		the DVA was written with, 0 for the parity of its vdev
  * cksum	checksum function
  * comp		compression function
  * G		gang block indicator
@@ -187,7 +189,7 @@ typedef struct zio_cksum_salt {
  *	+-------+-------+-------+-------+-------+-------+-------+-------+
  * 1	|G|			 offset1				|
  *	+-------+-------+-------+-------+-------+-------+-------+-------+
- * 2	|  pad  |	  vdev2         | pad   |	  ASIZE		|
+ * 2	|  pad  |	  vdev2         | GRID  |	  ASIZE		|
  *	+-------+-------+-------+-------+-------+-------+-------+-------+
  * 3	|G|			 offset2				|
  *	+-------+-------+-------+-------+-------+-------+-------+-------+
@@ -410,6 +412,16 @@ typedef struct blkptr {
 #define	DVA_SET_ASIZE(dva, x)	\
 	BF64_SET_SB((dva)->dva_word[0], 0, SPA_ASIZEBITS, \
 	SPA_MINBLOCKSHIFT, 0, x)
+
+/*
+ * GRID (spike, not a stable format): bits 24-31 of word 0, reserved since
+ * the original format for RAID-Z layout information.  The low nibble is
+ * the parity a DVA on a RAID-Z top-level vdev was written with, 0 meaning
+ * the vdev's own; the high nibble stays zero.
+ */
+#define	DVA_GET_GRID(dva)	BF64_GET((dva)->dva_word[0], 24, 8)
+#define	DVA_SET_GRID(dva, x)	BF64_SET((dva)->dva_word[0], 24, 8, x)
+#define	DVA_GET_GRID_PARITY(dva)	BF64_GET((dva)->dva_word[0], 24, 4)
 
 #define	DVA_GET_VDEV(dva)	BF64_GET((dva)->dva_word[0], 32, SPA_VDEVBITS)
 #define	DVA_SET_VDEV(dva, x)	\
@@ -710,11 +722,16 @@ typedef struct blkptr {
 			if (DVA_IS_VALID(dva))				\
 				copies++;				\
 			len += func(buf + len, size - len,		\
-			    "DVA[%d]=<%llu:%llx:%llx>%c", d,		\
+			    "DVA[%d]=<%llu:%llx:%llx>", d,		\
 			    (u_longlong_t)DVA_GET_VDEV(dva),		\
 			    (u_longlong_t)DVA_GET_OFFSET(dva),		\
-			    (u_longlong_t)DVA_GET_ASIZE(dva),		\
-			    ws);					\
+			    (u_longlong_t)DVA_GET_ASIZE(dva));		\
+			if (DVA_GET_GRID(dva) != 0) {			\
+				len += func(buf + len, size - len,	\
+				    " grid=%llx",			\
+				    (u_longlong_t)DVA_GET_GRID(dva));	\
+			}						\
+			len += func(buf + len, size - len, "%c", ws);	\
 		}							\
 		if (BP_IS_ENCRYPTED(bp)) {				\
 			len += func(buf + len, size - len,		\

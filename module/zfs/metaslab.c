@@ -25,6 +25,7 @@
 #include <sys/metaslab_impl.h>
 #include <sys/vdev_impl.h>
 #include <sys/vdev_draid.h>
+#include <sys/vdev_raidz.h>
 #include <sys/zio.h>
 #include <sys/spa_impl.h>
 #include <sys/zfeature.h>
@@ -1813,11 +1814,11 @@ metaslab_block_picker(zfs_range_tree_t *rt, uint64_t *cursor, uint64_t size,
 }
 
 static uint64_t metaslab_df_alloc(metaslab_t *msp, uint64_t size,
-    uint64_t max_size, uint64_t txg, uint64_t *found_size);
+    uint64_t max_size, uint64_t mult, uint64_t *found_size);
 static uint64_t metaslab_cf_alloc(metaslab_t *msp, uint64_t size,
-    uint64_t max_size, uint64_t txg, uint64_t *found_size);
+    uint64_t max_size, uint64_t mult, uint64_t *found_size);
 static uint64_t metaslab_ndf_alloc(metaslab_t *msp, uint64_t size,
-    uint64_t max_size, uint64_t txg, uint64_t *found_size);
+    uint64_t max_size, uint64_t mult, uint64_t *found_size);
 metaslab_ops_t *metaslab_allocator(spa_t *spa);
 
 static metaslab_ops_t metaslab_allocators[] = {
@@ -1904,7 +1905,7 @@ metaslab_allocator(spa_t *spa)
  */
 static uint64_t
 metaslab_df_alloc(metaslab_t *msp, uint64_t size, uint64_t max_size,
-    uint64_t txg, uint64_t *found_size)
+    uint64_t mult, uint64_t *found_size)
 {
 	/*
 	 * Find the largest power of 2 block size that evenly divides the
@@ -1918,7 +1919,6 @@ metaslab_df_alloc(metaslab_t *msp, uint64_t size, uint64_t max_size,
 	zfs_range_tree_t *rt = msp->ms_allocatable;
 	uint_t free_pct = zfs_range_tree_space(rt) * 100 / msp->ms_size;
 	uint64_t offset;
-	uint64_t mult = vdev_alloc_factor(msp->ms_group->mg_vd, txg);
 	ASSERT(MUTEX_HELD(&msp->ms_lock));
 
 	/*
@@ -1986,14 +1986,13 @@ metaslab_df_alloc(metaslab_t *msp, uint64_t size, uint64_t max_size,
  */
 static uint64_t
 metaslab_cf_alloc(metaslab_t *msp, uint64_t size, uint64_t max_size,
-    uint64_t txg, uint64_t *found_size)
+    uint64_t mult, uint64_t *found_size)
 {
 	zfs_range_tree_t *rt = msp->ms_allocatable;
 	zfs_btree_t *t = &msp->ms_allocatable_by_size;
 	uint64_t *cursor = &msp->ms_lbas[0];
 	uint64_t *cursor_end = &msp->ms_lbas[1];
 	uint64_t offset = 0;
-	uint64_t mult = vdev_alloc_factor(msp->ms_group->mg_vd, txg);
 
 	ASSERT(MUTEX_HELD(&msp->ms_lock));
 
@@ -2044,7 +2043,7 @@ uint64_t metaslab_ndf_clump_shift = 4;
 
 static uint64_t
 metaslab_ndf_alloc(metaslab_t *msp, uint64_t size, uint64_t max_size,
-    uint64_t txg, uint64_t *found_size)
+    uint64_t mult, uint64_t *found_size)
 {
 	zfs_btree_t *t = &msp->ms_allocatable->rt_root;
 	zfs_range_tree_t *rt = msp->ms_allocatable;
@@ -2054,7 +2053,6 @@ metaslab_ndf_alloc(metaslab_t *msp, uint64_t size, uint64_t max_size,
 	uint64_t hbit = highbit64(max_size);
 	uint64_t *cursor = &msp->ms_lbas[hbit - 1];
 	uint64_t max_possible_size = metaslab_largest_allocatable(msp);
-	uint64_t mult = vdev_alloc_factor(msp->ms_group->mg_vd, txg);
 
 	ASSERT(MUTEX_HELD(&msp->ms_lock));
 
@@ -4905,7 +4903,7 @@ metaslab_group_alloc_decrement(spa_t *spa, uint64_t vdev, int allocator,
 
 static uint64_t
 metaslab_block_alloc(metaslab_t *msp, uint64_t size, uint64_t max_size,
-    uint64_t txg, uint64_t *actual_size)
+    uint64_t mult, uint64_t txg, uint64_t *actual_size)
 {
 	uint64_t start;
 	zfs_range_tree_t *rt = msp->ms_allocatable;
@@ -4916,7 +4914,7 @@ metaslab_block_alloc(metaslab_t *msp, uint64_t size, uint64_t max_size,
 	VERIFY0(msp->ms_disabled);
 	VERIFY0(msp->ms_new);
 
-	start = mc->mc_ops->msop_alloc(msp, size, max_size, txg, actual_size);
+	start = mc->mc_ops->msop_alloc(msp, size, max_size, mult, actual_size);
 	if (start != -1ULL) {
 		size = *actual_size;
 		metaslab_group_t *mg = msp->ms_group;
@@ -5061,7 +5059,7 @@ metaslab_active_mask_verify(metaslab_t *msp)
 
 static uint64_t
 metaslab_group_alloc(metaslab_group_t *mg, zio_alloc_list_t *zal,
-    uint64_t asize, uint64_t max_asize, uint64_t txg,
+    uint64_t asize, uint64_t max_asize, uint64_t mult, uint64_t txg,
     dva_t *dva, int d, int allocator, boolean_t try_hard,
     uint64_t *actual_asize)
 {
@@ -5278,8 +5276,8 @@ metaslab_group_alloc(metaslab_group_t *mg, zio_alloc_list_t *zal,
 			continue;
 		}
 
-		offset = metaslab_block_alloc(msp, asize, max_asize, txg,
-		    actual_asize);
+		offset = metaslab_block_alloc(msp, asize, max_asize, mult,
+		    txg, actual_asize);
 
 		if (offset != -1ULL) {
 			metaslab_trace_add(zal, mg, msp, *actual_asize, d,
@@ -5409,6 +5407,28 @@ metaslab_group_allocatable(spa_t *spa, metaslab_group_t *mg, uint64_t psize,
 	return (B_TRUE);
 }
 
+/*
+ * The allocated size of a block of psize bytes, or the reverse, for a DVA
+ * born in txg on vd with the GRID parity grid (0 for the vdev's own).
+ */
+static uint64_t
+metaslab_psize_to_asize(vdev_t *vd, uint64_t psize, uint64_t txg,
+    uint64_t grid)
+{
+	if (grid == 0)
+		return (vdev_psize_to_asize_txg(vd, psize, txg));
+	return (vdev_raidz_psize_to_asize_grid(vd, psize, txg, grid));
+}
+
+static uint64_t
+metaslab_asize_to_psize(vdev_t *vd, uint64_t asize, uint64_t txg,
+    uint64_t grid)
+{
+	if (grid == 0)
+		return (vdev_asize_to_psize_txg(vd, asize, txg));
+	return (vdev_raidz_asize_to_psize_grid(vd, asize, txg, grid));
+}
+
 static int
 metaslab_alloc_dva_range(spa_t *spa, metaslab_class_t *mc, uint64_t psize,
     uint64_t max_psize, dva_t *dva, int d, const dva_t *hintdva, uint64_t txg,
@@ -5488,13 +5508,27 @@ top:
 			goto next;
 
 		vd = mg->mg_vd;
-		uint64_t asize = vdev_psize_to_asize_txg(vd, psize, txg);
+
+		/*
+		 * A RAID-Z DVA of lower parity than its vdev is sized and
+		 * rounded for that parity, which its GRID records.
+		 */
+		uint64_t grid = 0;
+		if (METASLAB_GET_PARITY(flags) != 0 &&
+		    vd->vdev_ops == &vdev_raidz_ops) {
+			ASSERT0(flags & METASLAB_GANG_HEADER);
+			grid = vdev_raidz_grid_parity(vd,
+			    METASLAB_GET_PARITY(flags));
+		}
+		uint64_t asize = metaslab_psize_to_asize(vd, psize, txg, grid);
 		ASSERT0(P2PHASE(asize, 1ULL << vd->vdev_ashift));
-		uint64_t max_asize = vdev_psize_to_asize_txg(vd, max_psize,
-		    txg);
+		uint64_t max_asize = metaslab_psize_to_asize(vd, max_psize,
+		    txg, grid);
 		ASSERT0(P2PHASE(max_asize, 1ULL << vd->vdev_ashift));
+		uint64_t mult = grid != 0 ? (grid + 1) << vd->vdev_ashift :
+		    vdev_alloc_factor(vd, txg);
 		uint64_t offset = metaslab_group_alloc(mg, zal, asize,
-		    max_asize, txg, dva, d, allocator, try_hard,
+		    max_asize, mult, txg, dva, d, allocator, try_hard,
 		    &asize);
 
 		if (offset != -1ULL) {
@@ -5506,12 +5540,12 @@ top:
 			 * the vdev types that need one provide.
 			 */
 			IMPLY(vd->vdev_ops->vdev_op_alloc_factor != NULL,
-			    vdev_psize_to_asize_txg(vd,
-			    vdev_asize_to_psize_txg(vd, asize, txg), txg) <=
-			    asize);
+			    metaslab_psize_to_asize(vd,
+			    metaslab_asize_to_psize(vd, asize, txg, grid), txg,
+			    grid) <= asize);
 			if (actual_psize)
-				*actual_psize = vdev_asize_to_psize_txg(vd,
-				    asize, txg);
+				*actual_psize = metaslab_asize_to_psize(vd,
+				    asize, txg, grid);
 			metaslab_class_rotate(mg, allocator, psize, B_TRUE);
 
 			DVA_SET_VDEV(&dva[d], vd->vdev_id);
@@ -5519,6 +5553,7 @@ top:
 			DVA_SET_GANG(&dva[d],
 			    ((flags & METASLAB_GANG_HEADER) ? 1 : 0));
 			DVA_SET_ASIZE(&dva[d], asize);
+			DVA_SET_GRID(&dva[d], grid);
 			return (0);
 		}
 next:

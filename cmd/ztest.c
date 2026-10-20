@@ -7173,6 +7173,16 @@ ztest_fault_inject(ztest_ds_t *zd, uint64_t id)
 	if (ztest_pe_enabled())
 		maxfaults = MIN(maxfaults, ztest_pe_min_faults(spa));
 
+	/*
+	 * Spike: a data block that asked for less parity than its vdev
+	 * through zfs_raidz_grid_parity survives that many faults, 1 at
+	 * least when the parity is chosen per dataset or per block.
+	 */
+	if (zfs_raidz_grid_parity != 0) {
+		maxfaults = MIN(maxfaults, zfs_raidz_grid_parity <= 3 ?
+		    (int)zfs_raidz_grid_parity : 1);
+	}
+
 	ASSERT3U(leaves, >=, 1);
 
 	/*
@@ -9646,7 +9656,7 @@ ztest_epochs_picker_check(spa_t *spa, vdev_t *vd, uint64_t txg,
 			zfs_range_tree_remove(msp->ms_allocatable,
 			    msp->ms_start, start - msp->ms_start);
 			offset = ops->msop_alloc(msp, min_asize, max_asize,
-			    txg, &found);
+			    vdev_alloc_factor(vd, txg), &found);
 			zfs_range_tree_add(msp->ms_allocatable,
 			    msp->ms_start, start - msp->ms_start);
 			memcpy(msp->ms_lbas, lbas, sizeof (lbas));

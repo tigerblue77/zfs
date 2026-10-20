@@ -29,6 +29,7 @@ struct raidz_row;
 struct raidz_map;
 struct vdev_raidz;
 struct uberblock;
+struct blkptr;
 #if !defined(_KERNEL)
 struct kernel_param {};
 #endif
@@ -164,12 +165,25 @@ typedef struct vdev_raidz {
 	 */
 	uint64_t *vd_parity_epochs;
 	uint64_t vd_parity_epoch_count;
+
+	/*
+	 * Spike: the lowest GRID parity allocated or read since the vdev was
+	 * opened, its parity if none was.  Not persisted.
+	 */
+	uint64_t vd_grid_min_parity;
 } vdev_raidz_t;
 
 extern int vdev_raidz_attach_check(vdev_t *);
 extern boolean_t vdev_raidz_has_parity_epochs(vdev_t *);
 extern void vdev_raidz_layout_for_birth(vdev_t *, uint64_t, uint64_t *,
     uint64_t *);
+extern void vdev_raidz_layout_for_dva(vdev_t *, const struct blkptr *,
+    uint64_t, uint64_t *, uint64_t *);
+extern uint64_t vdev_raidz_grid_parity(vdev_t *, uint64_t);
+extern uint64_t vdev_raidz_psize_to_asize_grid(vdev_t *, uint64_t, uint64_t,
+    uint64_t);
+extern uint64_t vdev_raidz_asize_to_psize_grid(vdev_t *, uint64_t, uint64_t,
+    uint64_t);
 extern void vdev_raidz_parity_epochs_install(vdev_t *, const uint64_t *,
     uint64_t);
 extern uint64_t vdev_raidz_parity_epochs_first_start(dmu_tx_t *);

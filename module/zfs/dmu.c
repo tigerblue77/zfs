@@ -60,6 +60,32 @@
 static int zfs_nopwrite_enabled = 1;
 
 /*
+ * Spike, for testing only: the RAID-Z parity the level-0 data blocks of
+ * datasets ask for, which the allocator records in the GRID of their DVAs
+ * when it is lower than the parity of the vdev.  0 leaves every block at
+ * its vdev's parity, 1 to 3 ask for that parity, 4 gives each dataset a
+ * parity of its own (1 + objset id % 3) and 5 a random one to each block.
+ */
+uint_t zfs_raidz_grid_parity = 0;
+
+static uint8_t
+dmu_write_policy_raidz_parity(objset_t *os)
+{
+	switch (zfs_raidz_grid_parity) {
+	case 0:
+		return (0);
+	case 1:
+	case 2:
+	case 3:
+		return (zfs_raidz_grid_parity);
+	case 4:
+		return (1 + dmu_objset_id(os) % VDEV_RAIDZ_MAXPARITY);
+	default:
+		return (1 + random_in_range(VDEV_RAIDZ_MAXPARITY));
+	}
+}
+
+/*
  * Tunable to control percentage of dirtied L1 blocks from frees allowed into
  * one TXG. After this threshold is crossed, additional dirty blocks from frees
  * will wait until the next TXG.
@@ -2681,6 +2707,12 @@ dmu_write_policy(objset_t *os, dnode_t *dn, int level, int wp, zio_prop_t *zp)
 	zp->zp_copies = MIN(copies, spa_max_replication(os->os_spa));
 	zp->zp_gang_copies = MIN(MAX(gang_copies, copies),
 	    spa_max_replication(os->os_spa));
+	/*
+	 * Only the data of datasets may have less parity than its vdev:
+	 * metadata, the MOS and gang headers keep the vdev's.
+	 */
+	zp->zp_raidz_parity = (ismd || os->os_dsl_dataset == NULL ||
+	    (wp & WP_NOFILL)) ? 0 : dmu_write_policy_raidz_parity(os);
 	zp->zp_dedup = dedup;
 	zp->zp_dedup_verify = dedup && dedup_verify;
 	zp->zp_nopwrite = nopwrite;
@@ -3209,6 +3241,9 @@ EXPORT_SYMBOL(dmu_ot);
 
 ZFS_MODULE_PARAM(zfs, zfs_, nopwrite_enabled, INT, ZMOD_RW,
 	"Enable NOP writes");
+
+ZFS_MODULE_PARAM(zfs, zfs_, raidz_grid_parity, UINT, ZMOD_RW,
+	"Spike: RAID-Z parity of dataset data blocks (0 off, 1-3, 4, 5)");
 
 ZFS_MODULE_PARAM(zfs, zfs_, per_txg_dirty_frees_percent, UINT, ZMOD_RW,
 	"Percentage of dirtied blocks from frees in one TXG");

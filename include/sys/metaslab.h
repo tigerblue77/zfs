@@ -71,6 +71,16 @@ uint64_t metaslab_largest_allocatable(metaslab_t *);
 #define	METASLAB_GANG_CHILD		0x4
 #define	METASLAB_ASYNC_ALLOC		0x8
 
+/*
+ * Spike: the RAID-Z parity requested for the DVAs of a data block, recorded
+ * in their GRID when it is lower than the parity of the vdev.  0 asks for
+ * the vdev's own parity.
+ */
+#define	METASLAB_PARITY_SHIFT		8
+#define	METASLAB_PARITY(p)		(((p) & 0xf) << METASLAB_PARITY_SHIFT)
+#define	METASLAB_GET_PARITY(flags)	\
+	(((flags) >> METASLAB_PARITY_SHIFT) & 0xf)
+
 int metaslab_alloc(spa_t *, metaslab_class_t *, uint64_t, blkptr_t *, int,
     uint64_t, const blkptr_t *, int, zio_alloc_list_t *, int, const void *);
 int metaslab_alloc_range(spa_t *, metaslab_class_t *, uint64_t, uint64_t,

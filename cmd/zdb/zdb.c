@@ -2961,12 +2961,12 @@ print_file_layout_raidz(vdev_t *vd, blkptr_t *bp, uint64_t file_offset,
 	zio.io_abd = abd_alloc_for_io(zio.io_size, B_FALSE);
 
 	/*
-	 * Map the block with the parity of the epoch it was born in, as the
-	 * I/O path does.  The row shown spans every child, as the width of a
-	 * vdev with parity epochs does.
+	 * Map the block with the parity of the epoch it was born in, or of
+	 * its GRID, as the I/O path does.  The row shown spans every child,
+	 * as the width of a vdev with parity epochs does.
 	 */
 	uint64_t nparity;
-	vdev_raidz_layout_for_birth(vd, BP_GET_PHYSICAL_BIRTH(bp), NULL,
+	vdev_raidz_layout_for_dva(vd, bp, DVA_GET_OFFSET(&dva[0]), NULL,
 	    &nparity);
 	raidz_map_t *rm = vdev_raidz_map_alloc(&zio, vd->vdev_ashift,
 	    vd->vdev_children, nparity);
@@ -6292,6 +6292,10 @@ typedef struct zdb_brt_entry {
 	avl_node_t	zbre_node;
 } zdb_brt_entry_t;
 
+#define	ZDB_GRID_GANG		15
+#define	ZDB_GRID_VDEVS		4
+#define	ZDB_GRID_BUCKETS	(16 * ZDB_GRID_VDEVS)
+
 typedef struct zdb_cb {
 	zdb_blkstats_t	zcb_type[ZB_TOTAL + 1][ZDB_OT_TOTAL + 1];
 	uint64_t	zcb_removing_size;
@@ -6316,6 +6320,11 @@ typedef struct zdb_cb {
 	hrtime_t	zcb_lastprint;
 	uint64_t	zcb_totalasize;
 	uint64_t	zcb_errors[256];
+	/* Spike: see zdb_grid_bucket() */
+	uint64_t	zcb_grid_blocks[ZDB_GRID_BUCKETS];
+	uint64_t	zcb_grid_asize[ZDB_GRID_BUCKETS];
+	uint64_t	zcb_grid_reads[ZDB_GRID_BUCKETS];
+	uint64_t	zcb_grid_errors[ZDB_GRID_BUCKETS];
 	int		zcb_readfails;
 	int		zcb_haderrors;
 	spa_t		*zcb_spa;
@@ -6903,6 +6912,23 @@ hist_skipped:
 	}
 }
 
+/*
+ * Spike: 16 times the vdev of the first DVA of a block (the last bucket
+ * gathering the vdevs from ZDB_GRID_VDEVS - 1 on) plus its GRID parity, 0
+ * for the parity of the vdev, or ZDB_GRID_GANG for a gang block, whose
+ * header has none and whose children are not looked at.
+ */
+static uint64_t
+zdb_grid_bucket(const blkptr_t *bp)
+{
+	const dva_t *dva = &bp->blk_dva[0];
+	uint64_t v = MIN(DVA_GET_VDEV(dva), ZDB_GRID_VDEVS - 1);
+
+	if (DVA_GET_GANG(dva))
+		return (16 * v + ZDB_GRID_GANG);
+	return (16 * v + DVA_GET_GRID_PARITY(dva));
+}
+
 static void
 zdb_blkptr_done(zio_t *zio)
 {
@@ -6921,6 +6947,7 @@ zdb_blkptr_done(zio_t *zio)
 
 		zcb->zcb_haderrors = 1;
 		zcb->zcb_errors[ioerr]++;
+		zcb->zcb_grid_errors[zdb_grid_bucket(bp)]++;
 
 		if (dump_opt['b'] >= 2)
 			snprintf_blkptr(blkbuf, sizeof (blkbuf), bp);
@@ -6973,6 +7000,13 @@ zdb_blkptr_cb(spa_t *spa, zilog_t *zilog, const blkptr_t *bp,
 	zdb_count_block(zcb, zilog, bp,
 	    (type & DMU_OT_NEWTYPE) ? ZDB_OT_OTHER : type);
 
+	if (!BP_IS_EMBEDDED(bp)) {
+		uint64_t grid = zdb_grid_bucket(bp);
+
+		zcb->zcb_grid_blocks[grid]++;
+		zcb->zcb_grid_asize[grid] += BP_GET_ASIZE(bp);
+	}
+
 	is_metadata = (BP_GET_LEVEL(bp) != 0 || DMU_OT_IS_METADATA(type));
 
 	if (!BP_IS_EMBEDDED(bp) &&
@@ -6989,6 +7023,7 @@ zdb_blkptr_cb(spa_t *spa, zilog_t *zilog, const blkptr_t *bp,
 		while (spa->spa_load_verify_bytes > max_inflight_bytes)
 			cv_wait(&spa->spa_scrub_io_cv, &spa->spa_scrub_lock);
 		spa->spa_load_verify_bytes += size;
+		zcb->zcb_grid_reads[zdb_grid_bucket(bp)]++;
 		mutex_exit(&spa->spa_scrub_lock);
 
 		zio_nowait(zio_read(NULL, spa, bp, abd, size,
@@ -8079,6 +8114,32 @@ dump_block_stats(spa_t *spa)
 				    e, (u_longlong_t)zcb->zcb_errors[e]);
 			}
 		}
+	}
+
+	/*
+	 * Spike: blocks by the GRID parity of their first DVA, 0 standing
+	 * for the parity of the vdev.
+	 */
+	(void) printf("\nBlocks by GRID parity of DVA[0]:\n\n");
+	(void) printf("\t%4s  %4s  %12s  %14s  %12s  %12s\n", "vdev", "grid",
+	    "blocks", "asize", "read", "read errors");
+	for (e = 0; e < ZDB_GRID_BUCKETS; e++) {
+		char name[8];
+
+		if (zcb->zcb_grid_blocks[e] == 0)
+			continue;
+		if (e % 16 == ZDB_GRID_GANG)
+			(void) strlcpy(name, "gang", sizeof (name));
+		else if (e % 16 == 0)
+			(void) strlcpy(name, "vdev", sizeof (name));
+		else
+			(void) snprintf(name, sizeof (name), "%d", e % 16);
+		(void) printf("\t%4d  %4s  %12llu  %14llu  %12llu  %12llu\n",
+		    e / 16, name,
+		    (u_longlong_t)zcb->zcb_grid_blocks[e],
+		    (u_longlong_t)zcb->zcb_grid_asize[e],
+		    (u_longlong_t)zcb->zcb_grid_reads[e],
+		    (u_longlong_t)zcb->zcb_grid_errors[e]);
 	}
 
 	/*
