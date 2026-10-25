@@ -1214,8 +1214,7 @@ send_traverse_thread(void *arg)
 	fstrans_cookie_t cookie = spl_fstrans_mark();
 
 	err = traverse_dataset_resume(st_arg->os->os_dsl_dataset,
-	    st_arg->fromtxg, &st_arg->resume,
-	    st_arg->flags | TRAVERSE_LOGICAL, send_cb, st_arg);
+	    st_arg->fromtxg, &st_arg->resume, st_arg->flags, send_cb, st_arg);
 
 	if (err != EINTR)
 		st_arg->error_code = err;
@@ -2129,6 +2128,16 @@ setup_to_thread(struct send_thread_arg *to_arg, objset_t *to_os,
 	to_arg->flags = TRAVERSE_PRE | TRAVERSE_PREFETCH_METADATA;
 	if (rawok)
 		to_arg->flags |= TRAVERSE_NO_DECRYPT;
+	/*
+	 * A raw stream must carry every block whose ciphertext is not in the
+	 * incremental source: the receiver writes the dnode blocks with the
+	 * sender's MACs, which cover the MACs of all the blocks below them.
+	 * zfs rewrite -P re-encrypts blocks but keeps their logical birth,
+	 * so raw sends select blocks by BP_GET_BIRTH(), which is the rewrite
+	 * txg for those blocks and the logical birth for all others.
+	 */
+	if (!(rawok && to_os->os_encrypted))
+		to_arg->flags |= TRAVERSE_LOGICAL;
 	if (zfs_send_corrupt_data)
 		to_arg->flags |= TRAVERSE_HARD;
 	to_arg->num_blocks_visited = &dssp->dss_blocks;

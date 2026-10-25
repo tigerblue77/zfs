@@ -2284,6 +2284,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/rsend/send_raw_ashift.ksh \
 	functional/rsend/send_raw_spill_block.ksh \
 	functional/rsend/send_raw_large_blocks.ksh \
+	functional/rsend/send_raw_rewrite_physical.ksh \
 	functional/rsend/send_realloc_dnode_interior.ksh \
 	functional/rsend/send_realloc_dnode_mixed.ksh \
 	functional/rsend/send_realloc_dnode_nblkptr.ksh \

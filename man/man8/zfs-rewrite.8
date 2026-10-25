@@ -12,7 +12,7 @@
 .\" Copyright (c) 2025 iXsystems, Inc.
 .\" Copyright (c) 2025, Klara, Inc.
 .\"
-.Dd October 13, 2026
+.Dd October 25, 2026
 .Dt ZFS-REWRITE 8
 .Os
 .
@@ -46,6 +46,9 @@ By default, rewrite updates logical birth times, making blocks appear
 as modified in snapshots and incremental send streams.
 Physical rewrite preserves logical birth times, avoiding unnecessary
 inclusion in incremental streams.
+Raw incremental streams of encrypted datasets still include physically
+rewritten blocks, see
+.Sx NOTES .
 Physical rewrite requires the
 .Sy physical_rewrite
 feature to be enabled on the pool.
@@ -125,6 +128,12 @@ When the
 .Fl P
 flag is used, rewritten blocks preserve their logical birth time, since
 there are no user data changes.
+On an encrypted dataset, a rewritten block is normally encrypted again,
+so raw
+.Pq Fl w
+incremental
+.Nm zfs Cm send
+streams still include it.
 .
 .Sh SEE ALSO
 .Xr zfsprops 7 ,
