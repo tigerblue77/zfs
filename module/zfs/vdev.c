@@ -2141,10 +2141,38 @@ vdev_open_children_subset(vdev_t *vd, cred_t *cred,
 	vdev_open_children_impl(vd, cred, open_func);
 }
 
-static uint64_t
+uint64_t
 vdev_free_deflate_ratio(vdev_t *vd)
 {
+	if (vd->vdev_spa->spa_raidz_expand_acct_txg == 0)
+		return (vd->vdev_deflate_ratio);
 	return (MAX(vd->vdev_deflate_ratio, vd->vdev_deflate_ratio_current));
+}
+
+/*
+ * Activate raidz_expansion_accounting in this txg, and rebase the free space
+ * of every top-level vdev to the free deflate ratio that now applies.
+ */
+void
+vdev_raidz_expand_acct_activate(spa_t *spa, uint64_t txg)
+{
+	vdev_t *rvd = spa->spa_root_vdev;
+
+	ASSERT0(spa->spa_raidz_expand_acct_txg);
+	spa->spa_raidz_expand_acct_txg = txg;
+	for (uint64_t c = 0; c < rvd->vdev_children; c++) {
+		vdev_t *vd = rvd->vdev_child[c];
+		uint64_t r = vdev_free_deflate_ratio(vd);
+
+		if (vd->vdev_deflate_ratio == 0 || r == vd->vdev_deflate_ratio)
+			continue;
+		if (vd->vdev_mg != NULL)
+			metaslab_group_rebase_dspace(vd->vdev_mg,
+			    vd->vdev_deflate_ratio, r);
+		if (vd->vdev_log_mg != NULL)
+			metaslab_group_rebase_dspace(vd->vdev_log_mg,
+			    vd->vdev_deflate_ratio, r);
+	}
 }
 
 /*

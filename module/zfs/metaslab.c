@@ -2932,7 +2932,9 @@ metaslab_group_rebase_dspace(metaslab_group_t *mg, uint64_t old_ratio,
 	uint64_t free_space = mg->mg_space - mg->mg_alloc;
 
 	ASSERT(spa_config_held(mg->mg_vd->vdev_spa, SCL_ALL, RW_WRITER) ==
-	    SCL_ALL || (mg->mg_space == 0 && mg->mg_alloc == 0));
+	    SCL_ALL ||
+	    dsl_pool_sync_context(spa_get_dsl(mg->mg_vd->vdev_spa)) ||
+	    (mg->mg_space == 0 && mg->mg_alloc == 0));
 
 	metaslab_group_dspace_update(mg, 0, (int64_t)(free_space >>
 	    SPA_MINBLOCKSHIFT) * ((int64_t)new_ratio - (int64_t)old_ratio));
@@ -2956,10 +2958,11 @@ metaslab_space_update(metaslab_group_t *mg, int64_t alloc_delta,
 	int64_t dspace_delta = vdev_deflated_space(vd, space_delta);
 	int64_t corr_delta = 0;
 
-	if (vd->vdev_deflate_ratio_current > vd->vdev_deflate_ratio) {
+	uint64_t free_ratio = vdev_free_deflate_ratio(vd);
+	if (free_ratio > vd->vdev_deflate_ratio) {
 		corr_delta = ((space_delta - alloc_delta) >>
 		    SPA_MINBLOCKSHIFT) * (int64_t)
-		    (vd->vdev_deflate_ratio_current - vd->vdev_deflate_ratio);
+		    (free_ratio - vd->vdev_deflate_ratio);
 	}
 
 	atomic_add_64(&mg->mg_space, space_delta);
