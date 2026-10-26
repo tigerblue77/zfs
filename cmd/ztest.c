@@ -276,6 +276,7 @@ extern uint64_t raidz_expand_max_reflow_bytes;
 extern uint_t raidz_expand_pause_point;
 extern boolean_t ddt_prune_artificial_age;
 extern boolean_t ddt_dump_prune_histogram;
+extern int zfs_crypt_dedup_blake3;
 
 
 static ztest_shared_opts_t *ztest_shared_opts;
@@ -4717,6 +4718,9 @@ ztest_dataset_create_encrypted(char *dsname, uint64_t encryption)
 	 */
 	VERIFY0(gcm_impl_set("cycle"));
 	VERIFY0(aes_impl_set("cycle"));
+
+	/* Mix keys of both dedup salt and IV derivations in the pool. */
+	zfs_crypt_dedup_blake3 = ztest_random(2);
 
 	fnvlist_free(crypto_args);
 	fnvlist_free(props);
