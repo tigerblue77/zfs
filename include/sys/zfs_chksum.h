@@ -31,6 +31,7 @@ extern "C" {
 /* Benchmark the chksums of ZFS when the module is loading */
 void chksum_init(void);
 void chksum_fini(void);
+uint64_t chksum_bench_fastest(const char *name);
 
 #ifdef	__cplusplus
 }

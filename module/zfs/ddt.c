@@ -31,6 +31,7 @@
 #include <sys/dsl_scan.h>
 #include <sys/abd.h>
 #include <sys/zfeature.h>
+#include <sys/zfs_chksum.h>
 
 /*
  * # DDT: Deduplication tables
@@ -282,6 +283,13 @@ boolean_t zfs_dedup_log_hard_cap = B_FALSE;
  * Number of txgs to average flow rates across.
  */
 uint_t zfs_dedup_log_flush_flow_rate_txgs = 10;
+
+/*
+ * The checksum that a pool created with the blake3 feature enabled records
+ * for dedup=on: 0 the faster of BLAKE3 and SHA-256 on this host, 1 BLAKE3,
+ * 2 SHA-256.  Other values mean 0.
+ */
+static uint_t zfs_dedup_default_checksum = 0;
 
 static const ddt_ops_t *const ddt_ops[DDT_TYPES] = {
 	&ddt_zap_ops,
@@ -1810,12 +1818,107 @@ ddt_create(spa_t *spa)
 	}
 }
 
+/*
+ * Compare the fastest implementations of BLAKE3 and SHA-256 in the checksum
+ * benchmark, at 256 KiB: BLAKE3 unless SHA-256 is faster, and BLAKE3 when
+ * there are no figures to compare (userspace).
+ */
+static enum zio_checksum
+ddt_dedup_checksum_auto(spa_t *spa)
+{
+	uint64_t blake3 = chksum_bench_fastest("blake3");
+	uint64_t sha256 = chksum_bench_fastest("sha256");
+	enum zio_checksum checksum = ZIO_CHECKSUM_BLAKE3;
+
+	if (blake3 != 0 && sha256 > blake3)
+		checksum = ZIO_CHECKSUM_SHA256;
+
+	zfs_dbgmsg("pool '%s': dedup checksum %s (blake3 %llu MiB/s, "
+	    "sha256 %llu MiB/s)", spa_name(spa),
+	    zio_checksum_table[checksum].ci_name, (u_longlong_t)blake3,
+	    (u_longlong_t)sha256);
+	return (checksum);
+}
+
+/*
+ * dedup=on uses ZIO_DEDUPCHECKSUM unless the pool recorded another checksum
+ * when it was created.  Pools created with the blake3 feature enabled record
+ * the one zfs_dedup_default_checksum selects, SHA-256 included, so that it
+ * never depends on the host that imports the pool.  Other pools never record
+ * one, even once the feature is enabled: each checksum has its own DDT, so
+ * new blocks would no longer be deduplicated against existing ones.
+ */
+void
+ddt_create_dedup_checksum(spa_t *spa, dmu_tx_t *tx)
+{
+	uint64_t checksum;
+
+	ASSERT3U(spa_load_state(spa), ==, SPA_LOAD_CREATE);
+
+	if (!spa_feature_is_enabled(spa, SPA_FEATURE_BLAKE3))
+		return;
+
+	switch (zfs_dedup_default_checksum) {
+	case 1:
+		checksum = ZIO_CHECKSUM_BLAKE3;
+		break;
+	case 2:
+		checksum = ZIO_CHECKSUM_SHA256;
+		break;
+	default:
+		checksum = ddt_dedup_checksum_auto(spa);
+		break;
+	}
+
+	VERIFY0(zap_add(spa->spa_meta_objset, DMU_POOL_DIRECTORY_OBJECT,
+	    DMU_POOL_DEDUP_CHECKSUM, sizeof (uint64_t), 1, &checksum, tx));
+	spa->spa_dedup_checksum = checksum;
+}
+
+static int
+ddt_load_dedup_checksum(spa_t *spa)
+{
+	uint64_t checksum;
+	spa_feature_t f;
+	int error;
+
+	error = zap_lookup(spa->spa_meta_objset, DMU_POOL_DIRECTORY_OBJECT,
+	    DMU_POOL_DEDUP_CHECKSUM, sizeof (uint64_t), 1, &checksum);
+	if (error != 0)
+		return (error == ENOENT ? 0 : error);
+
+	/*
+	 * A checksum this code cannot dedup with, or whose feature is not
+	 * enabled, is ignored: dedup=on then uses what older releases use.
+	 */
+	if (!DDT_CHECKSUM_VALID(checksum) ||
+	    !(zio_checksum_table[checksum].ci_flags & ZCHECKSUM_FLAG_DEDUP)) {
+		spa_load_note(spa, "ignoring unsupported dedup checksum %llu",
+		    (u_longlong_t)checksum);
+		return (0);
+	}
+	f = zio_checksum_to_feature(checksum);
+	if (f != SPA_FEATURE_NONE && !spa_feature_is_enabled(spa, f)) {
+		spa_load_note(spa, "ignoring dedup checksum %s: feature %s is "
+		    "not enabled", zio_checksum_table[checksum].ci_name,
+		    spa_feature_table[f].fi_uname);
+		return (0);
+	}
+
+	spa->spa_dedup_checksum = checksum;
+	return (0);
+}
+
 int
 ddt_load(spa_t *spa)
 {
 	int error;
 
 	ddt_create(spa);
+
+	error = ddt_load_dedup_checksum(spa);
+	if (error != 0)
+		return (error);
 
 	error = zap_lookup(spa->spa_meta_objset, DMU_POOL_DIRECTORY_OBJECT,
 	    DMU_POOL_DDT_STATS, sizeof (uint64_t), 1,
@@ -3019,3 +3122,6 @@ ZFS_MODULE_PARAM(zfs_dedup, zfs_dedup_, log_hard_cap, UINT, ZMOD_RW,
 
 ZFS_MODULE_PARAM(zfs_dedup, zfs_dedup_, log_flush_flow_rate_txgs, UINT, ZMOD_RW,
 	"Number of txgs to average flow rates across");
+
+ZFS_MODULE_PARAM(zfs_dedup, zfs_dedup_, default_checksum, UINT, ZMOD_RW,
+	"Checksum new pools record for dedup=on: 0 auto, 1 blake3, 2 sha256");

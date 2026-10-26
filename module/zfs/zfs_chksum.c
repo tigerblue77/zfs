@@ -47,6 +47,7 @@ static chksum_stat_t *chksum_stat_data = 0;
 static kstat_t *chksum_kstat = NULL;
 static int chksum_stat_limit = AT_STARTUP;
 static int chksum_stat_cnt = 0;
+static kmutex_t chksum_stat_lock;
 static void chksum_benchmark(void);
 
 /*
@@ -236,9 +237,13 @@ chksum_benchmark(void)
 	const zfs_impl_t *sha256 = zfs_impl_get_ops("sha256");
 	const zfs_impl_t *sha512 = zfs_impl_get_ops("sha512");
 
+	mutex_enter(&chksum_stat_lock);
+
 	/* benchmarks are done */
-	if (chksum_stat_limit == AT_DONE)
+	if (chksum_stat_limit == AT_DONE) {
+		mutex_exit(&chksum_stat_lock);
 		return;
+	}
 
 	/* count implementations */
 	if (chksum_stat_limit == AT_STARTUP) {
@@ -335,6 +340,29 @@ chksum_benchmark(void)
 		chksum_stat_limit = AT_DONE;
 		break;
 	}
+
+	mutex_exit(&chksum_stat_lock);
+}
+
+/*
+ * Return the 256 KiB throughput in MiB/s of the fastest implementation of
+ * the checksum "name" ("sha256", "blake3", ...), as last measured: at module
+ * load, then once more by the first read of the chksum_bench kstat.  Return
+ * 0 if no implementation of it was measured, as in userspace.
+ */
+uint64_t
+chksum_bench_fastest(const char *name)
+{
+	uint64_t max = 0;
+
+	mutex_enter(&chksum_stat_lock);
+	for (int i = 0; i < chksum_stat_cnt; i++) {
+		if (strcmp(chksum_stat_data[i].name, name) == 0)
+			max = MAX(max, chksum_stat_data[i].bs256k);
+	}
+	mutex_exit(&chksum_stat_lock);
+
+	return (max);
 }
 
 void
@@ -343,6 +371,7 @@ chksum_init(void)
 #ifdef _KERNEL
 	blake3_per_cpu_ctx_init();
 #endif
+	mutex_init(&chksum_stat_lock, NULL, MUTEX_DEFAULT, NULL);
 
 	/* 256KiB benchmark */
 	chksum_benchmark();
@@ -376,6 +405,7 @@ chksum_fini(void)
 		chksum_stat_cnt = 0;
 		chksum_stat_data = 0;
 	}
+	mutex_destroy(&chksum_stat_lock);
 
 #ifdef _KERNEL
 	blake3_per_cpu_ctx_fini();

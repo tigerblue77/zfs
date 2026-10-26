@@ -16,7 +16,7 @@
 .\" Copyright (c) 2026, Mateusz Piotrowski <0mp@FreeBSD.org>
 .\" Copyright (c) 2026, TrueNAS.
 .\"
-.Dd September 9, 2026
+.Dd October 26, 2026
 .Dt ZFS 4
 .Os
 .
@@ -1251,6 +1251,54 @@ As long as the operation remains "hung",
 the deadman will be invoked every
 .Sy zfs_deadman_checktime_ms
 milliseconds until the operation completes.
+.
+.It Sy zfs_dedup_default_checksum Ns = Ns Sy 0 Ns | Ns 1 Ns | Ns 2 Pq uint
+The default deduplication checksum recorded by a pool created with the
+.Sy blake3
+feature enabled, which
+.Sy dedup Ns = Ns Sy on
+and
+.Sy dedup Ns = Ns Sy verify
+use on that pool from then on
+.Po see
+.Sy dedup
+in
+.Xr zfsprops 7
+.Pc .
+It is read only when a pool is created: changing it, or importing the pool
+on another system, does not change the checksum of an existing pool.
+A pool created with the
+.Sy blake3
+feature disabled always uses
+.Sy sha256 .
+.Bl -tag -compact -offset 4n -width "a"
+.It Sy 0
+whichever of
+.Sy blake3
+and
+.Sy sha256
+is faster on this system:
+.Sy sha256
+if its fastest implementation in the
+.Sy chksum_bench
+kstat hashes 256 KiB faster than the fastest implementation of
+.Sy blake3 ,
+otherwise
+.Sy blake3 .
+The figures are measured when the module is loaded, and again the first time
+the kstat is read.
+Without them, as in userspace programs such as
+.Xr ztest 1 ,
+it is
+.Sy blake3 .
+.It Sy 1
+.Sy blake3
+.It Sy 2
+.Sy sha256
+.El
+.Pp
+Other values mean 0.
+Set 1 or 2 for a choice that does not depend on the benchmark.
 .
 .It Sy zfs_dedup_prefetch Ns = Ns Sy 0 Ns | Ns 1 Pq int
 Enable prefetching dedup-ed blocks which are going to be freed.
