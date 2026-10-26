@@ -24,7 +24,8 @@ UNIT_TESTS = \
 	%D%/test_nvpair \
 	%D%/test_backtrace \
 	%D%/test_timer \
-	%D%/test_zfs_file
+	%D%/test_zfs_file \
+	%D%/test_lzjb
 noinst_PROGRAMS = $(UNIT_TESTS)
 
 
@@ -167,6 +168,20 @@ nodist_%C%_test_nvpair_SOURCES = \
 %C%_test_zfs_file_LDADD = \
 	libunit.la \
 	libspl.la
+
+
+%C%_test_lzjb_CFLAGS = $(AM_CFLAGS)
+
+nodist_%C%_test_lzjb_SOURCES = \
+	module/zfs/lzjb.c
+
+%C%_test_lzjb_SOURCES = \
+	%D%/test_lzjb.c
+
+%C%_test_lzjb_LDADD = \
+	libspl.la \
+	libunit.la
+
 
 
 # test run and coverage targets below

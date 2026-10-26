@@ -96,9 +96,10 @@ static int
 zfs_lzjb_decompress_buf(void *s_start, void *d_start,
     size_t s_len, size_t d_len, int n)
 {
-	(void) s_len, (void) n;
+	(void) n;
 	uchar_t *src = s_start;
 	uchar_t *dst = d_start;
+	uchar_t *s_end = (uchar_t *)s_start + s_len;
 	uchar_t *d_end = (uchar_t *)d_start + d_len;
 	uchar_t *cpy;
 	uchar_t copymap = 0;
@@ -107,9 +108,13 @@ zfs_lzjb_decompress_buf(void *s_start, void *d_start,
 	while (dst < d_end) {
 		if ((copymask <<= 1) == (1 << NBBY)) {
 			copymask = 1;
+			if (src >= s_end)
+				return (-1);
 			copymap = *src++;
 		}
 		if (copymap & copymask) {
+			if ((size_t)(s_end - src) < 2)
+				return (-1);
 			int mlen = (src[0] >> (NBBY - MATCH_BITS)) + MATCH_MIN;
 			int offset = ((src[0] << NBBY) | src[1]) & OFFSET_MASK;
 			src += 2;
@@ -118,6 +123,8 @@ zfs_lzjb_decompress_buf(void *s_start, void *d_start,
 			while (--mlen >= 0 && dst < d_end)
 				*dst++ = *cpy++;
 		} else {
+			if (src >= s_end)
+				return (-1);
 			*dst++ = *src++;
 		}
 	}
