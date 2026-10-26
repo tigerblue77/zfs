@@ -176,15 +176,28 @@ Proposed with it in #2, not built: once an epoch is retired, any I/O or
 free naming a birth inside it fails loudly.
 
 **5. One feature.** Epochs, mapping and census form one pool feature,
-active while a mapping is non-empty and not read-only compatible, since
-older code would read the old extent; it is registered only in the last
-step of section 5 (Q3 of #2, agreed 21 October). The epochs of
-openzfs/zfs#19262 then lose their own feature and land with this one
-(to be confirmed by rdmitry0911, its author). Neither prototype
-registers a feature for its mapping (redirect: none; virtual/backing: a
-private label entry that older code refuses, `vb:spa.c:5017-5020`, and
-"no supported administration interface or agreed integrated
-feature/format", `vb:README.md:15-17`).
+not read-only compatible, since older code would read the old extent;
+it is registered only in the last step of section 5 (Q3 of #2, agreed
+21 October). The epochs of openzfs/zfs#19262 lose their own feature and
+land with this one, as rdmitry0911, their author, agreed on 26 October;
+the experimental GUID of #19262 is not reused with a meaning that an
+epochs-only reader would accept. The feature is active before the first
+incompatible state becomes durable: an epoch table, a mapping row, or
+bootstrap or journal state if the design has them (points 7 and 11).
+Its guard is visible before any translated MOS read, at every crash
+and import point, so that older code refuses read-only imports as well
+as read-write ones. It stays active while any durable state on an
+affected vdev, or in a retained or recoverable root, still needs it:
+an empty mapping is not enough, since epoch layouts, a checkpoint,
+retained copies, a journal and a durable floor or completion record can
+outlive the last row. A first implementation may stay active for good;
+deactivation needs its own proof that every such root is fully readable
+by older code. Activation is separate from the durable record of
+point 4, which alone lets the new tolerance be reported. Neither
+prototype registers a feature for its mapping (redirect: none;
+virtual/backing: a private label entry that older code refuses,
+`vb:spa.c:5017-5020`, and "no supported administration interface or
+agreed integrated feature/format", `vb:README.md:15-17`).
 
 **6. Space, the parts agreed.** Dataset dsize never changes between a
 block's birth and its free. What a move adds is charged at pool level,
@@ -396,11 +409,12 @@ shape from points 2, 7, 8 and 11.
    nopwrite exceptions (point 2); the mapping of the rest; the traversal
    (point 13); the keyless ZIL (point 11); the checkpoint rule (point
    10); the interface (point 15).
-6. The feature, registered last: activated by the first mapping and
-   active while one is non-empty; the census of point 4, its durable
-   record, the new tolerance and the retirement of the old epoch; the
-   guard on retired births; `zpool-features.7` and the man page of the
-   command that starts a move.
+6. The feature, registered last: active before the first incompatible
+   state is durable and while any durable state needs it (point 5);
+   the census of point 4, its durable record, the new tolerance and the
+   retirement of the old epoch; the guard on retired births;
+   `zpool-features.7` and the man page of the command that starts a
+   move.
 
 Each step comes with its tests: ZTS for the kernel paths, `ztest` on
 RAID-Z, zdb's checks on the pools it leaves, and, from step 3 on, the
