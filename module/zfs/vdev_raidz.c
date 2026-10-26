@@ -4599,6 +4599,24 @@ raidz_reflow_impl(vdev_t *vd, vdev_raidz_expand_t *vre, zfs_range_tree_t *rt,
 	uint_t blocks = MIN(size >> ashift, next_overwrite_blkid - blkid);
 	size = (uint64_t)blocks << ashift;
 
+	/*
+	 * The writes below land where the old layout keeps the sectors
+	 * [overwrite_start, overwrite_end).  The on-disk progress is past
+	 * them, but an i/o can still be using their old location: one that
+	 * vdev_raidz_io_start() mapped after raidz_reflow_sync() committed
+	 * them and before spa_sync() moved spa_ubsync past them.  Wait for
+	 * such i/os to finish.  Any i/o that starts later maps these sectors
+	 * to their new location.
+	 */
+	uint64_t last_blkid = blkid + blocks - 1;
+	uint64_t overwrite_start = blkid - blkid / vd->vdev_children;
+	uint64_t overwrite_end = last_blkid -
+	    last_blkid / vd->vdev_children + 1;
+	ASSERT3U(overwrite_end, <=, ubsync_blkid);
+	zfs_rangelock_exit(zfs_rangelock_enter(&vre->vre_rangelock,
+	    overwrite_start << ashift,
+	    (overwrite_end - overwrite_start) << ashift, RL_WRITER));
+
 	zfs_range_tree_remove(rt, offset, size);
 
 	uint_t reads = MIN(blocks, old_children);
