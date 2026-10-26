@@ -401,20 +401,21 @@ shape from points 2, 7, 8 and 11.
    scrub and resilver following the mapping, copies written inside a
    resilver's window included; blocks with several DVAs; frees at the
    last reference; zdb's claims. Entries come only from test code until
-   step 5.
+   step 6.
 4. Lifetime and space: the reader exclusion and the no-deferral rule of
    point 8; the pool-level charge and the move's reservation (points 6
    and 12); the estimate and the budget (point 3).
 5. The mover: the rewrite of what a head owns alone, with its BRT and
    nopwrite exceptions (point 2); the mapping of the rest; the traversal
    (point 13); the keyless ZIL (point 11); the checkpoint rule (point
-   10); the interface (point 15).
-6. The feature, registered last: active before the first incompatible
-   state is durable and while any durable state needs it (point 5);
-   the census of point 4, its durable record, the new tolerance and the
-   retirement of the old epoch; the guard on retired births;
-   `zpool-features.7` and the man page of the command that starts a
-   move.
+   10). Until step 6 it runs only from test code, so that no supported
+   path writes a mapping before the feature exists.
+6. The feature, registered last, with the interface of point 15 that
+   starts a move: active before the first incompatible state is durable
+   and while any durable state needs it (point 5); the census of point
+   4, its durable record, the new tolerance and the retirement of the
+   old epoch; the guard on retired births; `zpool-features.7` and the
+   man page of the command that starts a move.
 
 Each step comes with its tests: ZTS for the kernel paths, `ztest` on
 RAID-Z, zdb's checks on the pools it leaves, and, from step 3 on, the
