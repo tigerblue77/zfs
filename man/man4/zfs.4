@@ -1141,6 +1141,10 @@ transaction record (itx).
 Enables storing ARC buffers in their on-disk compressed form, reducing
 memory pressure.
 When disabled, buffers are decompressed before being cached.
+The exception is the level-0 blocks of encrypted datasets whose object type
+is only authenticated, not encrypted, such as the ZPL master node:
+these are always cached in their on-disk form.
+Indirect blocks are decompressed like any other.
 .
 .It Sy zfs_condense_indirect_commit_entry_delay_ms Ns = Ns Sy 0 Ns ms Pq int
 Vdev indirection layer (used for device removal) sleeps for this many
