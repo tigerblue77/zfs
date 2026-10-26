@@ -24,7 +24,8 @@ UNIT_TESTS = \
 	%D%/test_nvpair \
 	%D%/test_backtrace \
 	%D%/test_timer \
-	%D%/test_zfs_file
+	%D%/test_zfs_file \
+	%D%/test_zio_crypt
 noinst_PROGRAMS = $(UNIT_TESTS)
 
 
@@ -167,6 +168,24 @@ nodist_%C%_test_nvpair_SOURCES = \
 %C%_test_zfs_file_LDADD = \
 	libunit.la \
 	libspl.la
+
+
+%C%_test_zio_crypt_CFLAGS = $(AM_CFLAGS)
+
+nodist_%C%_test_zio_crypt_SOURCES = \
+	module/zfs/hkdf.c \
+	module/zfs/zfs_impl.c \
+	module/zfs/zio_crypt.c \
+	module/zfs/zio_crypt_os_icp.c
+
+%C%_test_zio_crypt_SOURCES = \
+	%D%/test_zio_crypt.c
+
+%C%_test_zio_crypt_LDADD = \
+	libicp.la \
+	libavl.la \
+	libspl.la \
+	libunit.la
 
 
 # test run and coverage targets below
