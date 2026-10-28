@@ -18,9 +18,11 @@ How this branch works:
 Writes: tigerblue77. Reviews: rdmitry0911.
 
 Draft by tigerblue77, 26 October. The goal and the four constraints are
-those of #2, which rdmitry0911 signed "as written" on 21 October. The
-requirements after them collect what each author has since asked of
-either mechanism; section 3 holds the choices of how to meet them.
+those of #2, which rdmitry0911 signed "as written" on 21 October; the
+second now names the references it preserves, as his review of 27
+October asked. The requirements after them collect what each author has
+since asked of either mechanism; section 3 holds the choices of how to
+meet them.
 
 **Problem.** The parity-epoch table of openzfs/zfs#19262 writes the new
 blocks of a RAID-Z top-level vdev at a higher parity, but the blocks
@@ -41,7 +43,12 @@ is left at the old parity.
   (openzfs/zfs#9013). A parity change combined with an added disk is out
   of scope.
 - No block pointer rewrite. Snapshots are immutable: no block pointer,
-  checksum, MAC or IV changes.
+  checksum, MAC or IV changes. That covers every reference a snapshot
+  or clone origin holds, every one shared through dedup or BRT, and
+  every one in a dataset whose key is not loaded. A head with its key
+  loaded may still rewrite a block it owns alone through the normal
+  write path, as any write does (point 2 of section 3); that rewrites
+  no snapshot metadata.
 - Rewrite alone is not enough. It cannot reach blocks that only
   snapshots hold, or encrypted data whose key is not loaded, and one
   block left behind voids the guarantee (openzfs/zfs#19233). That is why
