@@ -1898,6 +1898,26 @@ ddt_class_contains(spa_t *spa, ddt_class_t max_class, const blkptr_t *bp)
 	ddt = spa->spa_ddt[BP_GET_CHECKSUM(bp)];
 
 	ddt_key_fill(&ddk, bp);
+
+	/*
+	 * Only flat tables are pruned, so the key of a legacy one is enough.
+	 * Not so for an unconfigured table: pruning may have emptied it.
+	 */
+	if (ddt->ddt_version == DDT_VERSION_LEGACY) {
+		if (max_class == DDT_CLASS_UNIQUE)
+			return (B_TRUE);
+
+		for (ddt_type_t type = 0; type < DDT_TYPES; type++) {
+			for (ddt_class_t class = 0; class <= max_class;
+			    class++) {
+				if (ddt_object_contains(ddt, type, class,
+				    &ddk) == 0)
+					return (B_TRUE);
+			}
+		}
+		return (B_FALSE);
+	}
+
 	dde = ddt_alloc(ddt, &ddk);
 
 	for (ddt_type_t type = 0; type < DDT_TYPES; type++) {
