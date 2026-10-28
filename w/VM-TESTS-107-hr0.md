@@ -2,7 +2,7 @@
 
 These instructions are for the session on VM 107 (Debian 13). They give
 kernel evidence for the fix on the fork branch `l2arc-headroom-zero` of
-https://github.com/tigerblue77/zfs, commit `33e2b1f648` "L2ARC: Do not stop
+https://github.com/tigerblue77/zfs, commit `a28f54925d` "L2ARC: Do not stop
 writing when l2arc_headroom is 0", whose parent is upstream master
 `5ebd13aa9a` "ZTS: sync checksum test data before fault injection". The
 session builds two debug trees in its own directories, runs the new ZTS test
@@ -15,7 +15,7 @@ STEP 7 removes it with the task's own directories.
 
 | Tree | Path | Source | Build | Runs |
 | --- | --- | --- | --- | --- |
-| B | `/var/tmp/zts-hr0-1028/B` | `33e2b1f648`, the fix: `arc.c` and the test-side files | debug (`./configure --enable-debug`) | `b1`, `b2`, `b3` (the test), then `bg` (`-T l2arc`) |
+| B | `/var/tmp/zts-hr0-1028/B` | `a28f54925d`, the fix: `arc.c` and the test-side files | debug (`./configure --enable-debug`) | `b1`, `b2`, `b3` (the test), then `bg` (`-T l2arc`) |
 | M | `/var/tmp/zts-hr0-1028/M` | `5ebd13aa9a` (B's parent) with B's four test-side files checked out on it, and nothing else: `module/` is the parent's | debug (`./configure --enable-debug`) | `m1`, `m2`, `m3` (the test) |
 
 M and B differ in `module/zfs/arc.c` only; STEP 2 checks it before the
@@ -57,46 +57,47 @@ other ZTS test sets `l2arc_headroom`: B adds its `tunables.cfg` entry.
 **The test** (new in B): it sets `l2arc_headroom=0` and
 `l2arc_noprefetch=0`, creates `testpool` on `$VDEV` with a 1120 MiB cache file,
 writes 800 MB with fio (`mkfiles.fio`, 4 jobs), reads it at random for 10 s
-(`random_reads.fio`), waits with `arcstat_quiescence_noecho l2_size`, logs
-`NOTE: l2_size=<n>` and requires it above 0. Its `log_onexit` cleanup
-destroys the pool and restores both tunables.
+(`random_reads.fio`), then waits at most 60 s, polling once a second, for a
+non-zero `l2_size`. It logs `NOTE: l2_size=<n>` and requires it above 0
+(`log_must test $l2_size -gt 0`). Its `log_onexit` cleanup destroys the pool
+and restores both tunables. (An earlier version of the commit, `33e2b1f648`,
+waited with `arcstat_quiescence_noecho l2_size`, which never returns while
+`l2_size` is 0; `a28f54925d` changes only that wait, `arc.c` is the same.)
 
-**What M does with it: the test is killed, it does not fail.**
-`arcstat_quiescence` in `libtest.shlib` waits for a *non-zero* quiescence:
+**What M does with it: the test fails about a minute after its reads.** On
+M, `l2_size` stays 0, so the wait runs its 60 s out; the test logs
+`NOTE: l2_size=0`, and `log_must test 0 -gt 0` fails (`ERROR: test 0 -gt 0
+exited 1`). `log_fail` then runs the test-fail callbacks, which print into the
+test's log the tails of the zfs debug log and of `dmesg` (`zfs_dmesg.ksh`
+clears the kernel ring buffer with `dmesg -c`: kernel messages are read here
+from the journal, which keeps them) and the multihost history, and then the
+test's own cleanup, which destroys the pool and restores both tunables. Every
+run here starts with its own module load (`scripts/zfs.sh -r`), so the L2ARC
+counters read from arcstats after a run are that run's alone: on M
+`l2_write_bytes` and `l2_writes_sent` 0 while `l2_feeds` counts tens of feeds
+(the feed thread ran every second with a cache device and found nothing to
+write), on B hundreds of MB written. That counter is this task's kernel-side
+measure of what M wrote, beside the `l2_size=0` the test logs. (`l2_size`
+read after a run is 0 on both trees: the pool is gone by then.)
 
-```
-	while $do_once || [ $stat1 -ne $stat2 ] || [ $stat2 -eq 0 ]; do
-```
-
-On M, `l2_size` stays 0, so the wait never ends: the test never logs its
-`l2_size` note and never reaches its check. The runner kills it at its 600 s
-timeout (`KILLED`, at about `[10:00]`). No trap is set, so its own cleanup
-does not run: the directory's `cleanup.ksh` destroys the pool after it, and
-`l2arc_headroom=0` and `l2arc_noprefetch=0` stay set until the next module
-load. Every run here starts with its own load (`scripts/zfs.sh -r`), so no
-run inherits them, and the L2ARC counters read from arcstats after a run are
-that run's alone: `l2_write_bytes` and `l2_writes_sent` 0 on M while
-`l2_feeds` counts hundreds of feeds (the feed thread ran every second with a
-cache device and found nothing to write), hundreds of MB written on B. That
-counter is this task's kernel-side measure of what M wrote; B's runs also
-log `l2_size` themselves. (`l2_size` read after a run is 0 on both trees: the
-pool is gone by then.)
-
-**What the runner writes to the kernel log when it kills a test.** Before it
-sends the kill, `kill_cmd()` in `test-runner.py` writes a debug dump to the
+**A guard: what the runner writes to the kernel log if it kills a test.** No
+test is expected to be killed here. If one runs past the runner's 600 s
+timeout, `kill_cmd()` in `test-runner.py` first writes a debug dump to the
 kernel log whenever `/dev/kmsg` exists, `-O` or not (`-O` sets an option
 nothing reads): a `##### ZTS timeout debug #####` record with `top`'s output
 (when it fits in one kernel record), then `echo l > /proc/sysrq-trigger`,
 which prints `sysrq: Show backtrace of all active CPUs` and an NMI backtrace,
-with `Call Trace:` lines, of every CPU that is not idle. So each M run puts
-one such dump in the kernel log, and its `Call Trace:` lines would match the
-findings pattern. The kernel checks of this task therefore set every dump
-apart: a dump runs from its first line (`ZTS timeout debug` or `Show
-backtrace of all active CPUs`) to the next `ZTS run` mark, which is the
-directory's `cleanup` starting right after the kill. Findings are counted
+with `Call Trace:` lines, of every CPU that is not idle. Those lines would
+match the findings pattern although nothing went wrong in the kernel, so the
+kernel checks of this task set every dump apart: a dump runs from its first
+line (`ZTS timeout debug` or `Show backtrace of all active CPUs`) to the next
+`ZTS run` mark (the next script the runner starts). Findings are counted
 outside dumps only; the dumps are counted, with their lines and those of them
-the pattern matches, and kept in the run's kernel file. A run must hold
-exactly one dump per test it killed: one more is a stop.
+the pattern matches, and kept in the run's kernel file. A run may hold one
+dump per test it killed (expected: none); one more is a stop. A killed test
+is a result, not a stop: its own cleanup does not run (no trap is set), so
+`l2arc_headroom=0` and `l2arc_noprefetch=0` stay set until the next load,
+which the helpers accept for a killed test only.
 
 **The disks.** No `DISKS` is given, as in the earlier l2arc runs on this VM:
 `zfs-tests.sh` makes its three sparse 4 GiB files `file-vdev0` to
@@ -136,9 +137,10 @@ the group does not start below 5 GB.
   `/var/log/zts-hr0-1028` (`$L`). Outside them, the only changes are those the
   tests and the runner make and undo themselves (module tunables, loop
   devices, the `/testpool` mount point, `/etc/zfs/zpool.cache`, which the
-  kernel writes, temporary files in `/tmp`, and the runner's timeout dump
-  through `/proc/sysrq-trigger`, above) and STEP 7's removal of the doc
-  checkout of this task.
+  kernel writes, temporary files in `/tmp`, the kernel ring buffer and the
+  zfs debug log, which a failing test's callbacks clear, and the runner's
+  timeout dump through `/proc/sysrq-trigger` should a test be killed, above)
+  and STEP 7's removal of the doc checkout of this task.
   `/var/tmp/vm-task-107v`, the doc checkout of the last task, is already gone:
   STEP 0 only records it. Never touch another `/var/tmp/zts-*` or
   `/var/log/zts-*` directory, another `/var/tmp/vm-task-*` checkout or
@@ -162,15 +164,15 @@ the group does not start below 5 GB.
   nothing by hand, and run no test more often than written. If your
   permission system refuses a command, report it and stop.
 - **A kernel finding** (panic, oops, VERIFY, ASSERT, BUG, call trace, hung
-  task, outside the runner's timeout dumps set apart as described above)
+  task, outside a runner's timeout dump set apart as described above)
   stops at once, and nothing touches the pool or the module after it:
   STEP 7 then runs no `zpool` command and leaves the module loaded. If a
   block hangs well past its stated time, interrupt it if your tool allows,
   run `touch /var/log/zts-hr0-1028/HELD`, then only STEP 7's first block
   (with `HELD` set it runs no pool command), and report. Never reboot.
 - The builds take about 10 to 15 minutes together, a B run 1 to 3 minutes,
-  an M run 11 to 13 (the test waits until the runner kills it at 600 s), the
-  group 10 to 25. Each run has an outer `timeout` of 1800 s. If your shell
+  an M run 2 to 4 (the test gives up 60 s after its reads), the group 10 to
+  25. Each run has an outer `timeout` of 1800 s. If your shell
   tool cannot wait that long in the foreground, start that one block with the
   tool's own background mode and wait for it to exit. Never use `&` or
   `nohup`, and run nothing meanwhile.
@@ -289,7 +291,7 @@ UPSTREAM=https://github.com/openzfs/zfs
 FIXBRANCH=l2arc-headroom-zero
 # B: the fix, the head of the fork branch l2arc-headroom-zero. HP: its
 # parent, upstream master; M is HP with B's test-side files.
-HB=33e2b1f648c8ad086ac8b33059ae931706039921
+HB=a28f54925d1b998b108ebfa37f90b76f4d5614bc
 HP=5ebd13aa9a2329cac7bc8b23bfe946a4cde8bb53
 ARC=module/zfs/arc.c
 Z=tests/zfs-tests
@@ -297,13 +299,13 @@ Z=tests/zfs-tests
 TFILES="tests/runfiles/common.run $Z/include/tunables.cfg $Z/tests/Makefile.am
 $Z/tests/functional/l2arc/l2arc_headroom_zero_pos.ksh"
 TFILES=$(echo $TFILES)
-TBLOBS="9c6a79239af28e800e6e6ec1f9da18f38f9ddc9d 5140f9a273b4aea2b60d1aaeb38e7d716fed8861 ec5fc93e59bb5a53f63eea0c89d75f535dd4fb6f 7c6d7c5542432729bceeb9fd024797c346c96baa"
+TBLOBS="9c6a79239af28e800e6e6ec1f9da18f38f9ddc9d 5140f9a273b4aea2b60d1aaeb38e7d716fed8861 ec5fc93e59bb5a53f63eea0c89d75f535dd4fb6f 548bd44cb6ee990b59e41332faab732dc410a5fb"
 # What B changes against HP: all of it (NUMB) and its test-side files
 # (NUMT), and the patch-ids of both.
-NUMB="2 1 $ARC 2 1 tests/runfiles/common.run 1 0 $Z/include/tunables.cfg 1 0 $Z/tests/Makefile.am 72 0 $Z/tests/functional/l2arc/l2arc_headroom_zero_pos.ksh"
-NUMT="2 1 tests/runfiles/common.run 1 0 $Z/include/tunables.cfg 1 0 $Z/tests/Makefile.am 72 0 $Z/tests/functional/l2arc/l2arc_headroom_zero_pos.ksh"
-PIDB=4614f88bb49b976e7ff35e66fca18039b30d1202
-PIDT=8c9ea2af0b9fc4208dc2ca6c731e4c4e9eb8e044
+NUMB="2 1 $ARC 2 1 tests/runfiles/common.run 1 0 $Z/include/tunables.cfg 1 0 $Z/tests/Makefile.am 78 0 $Z/tests/functional/l2arc/l2arc_headroom_zero_pos.ksh"
+NUMT="2 1 tests/runfiles/common.run 1 0 $Z/include/tunables.cfg 1 0 $Z/tests/Makefile.am 78 0 $Z/tests/functional/l2arc/l2arc_headroom_zero_pos.ksh"
+PIDB=8e8fe1714b9376f8c05a1de535bf988abee18c62
+PIDT=d4198c95a296a3aace2989ebac3b649fa98c5ba5
 # arc.c's blob in HP (and so in M) and in B; the guard B adds back, and the
 # check it guards as master has it.
 ARCP=15565d119261a6bcd741b4b16b4516d8a02a27c5
@@ -557,28 +559,30 @@ fails() {   # fails <runner log> <name>
 	END { flush() }' "$1"
 }
 
-# The new test's lines in a runner log: l2arc_headroom set to 0, the wait
-# for l2_size, the l2_size note(s), log_pass's message, its cleanup and the
-# restore of l2arc_headroom, ERROR lines, and its last line.
+# The new test's lines in a runner log: l2arc_headroom set to 0, the
+# l2_size note(s), the failed l2_size check, log_pass's message, the
+# test-fail callbacks, its cleanup and the restore of l2arc_headroom, ERROR
+# lines (the callbacks' tails can add some), and its last line.
 digest() {   # digest <runner log>
 	awk -v n="$T" '
 	function flush() {
 		if (sec)
-			printf "  %s: headroom set to 0 x%d, waited for l2_size x%d, l2_size note [%s], log_pass message x%d, local cleanup x%d, headroom restored x%d, ERROR lines x%d\n    last line: %s\n", n, h0, wt, sz, pas, cln, hr, err, prev
+			printf "  %s: headroom set to 0 x%d, l2_size note [%s], l2_size check failed x%d, log_pass message x%d, test-fail callbacks x%d, local cleanup x%d, headroom restored x%d, ERROR lines x%d\n    last line: %s\n", n, h0, sz, ck, pas, cb, cln, hr, err, prev
 		sec = 0
 	}
 	/Test( [(][^)]*[)])?: .* [(]run as [^)]*[)] +\[[0-9:]+\] \[[A-Z]+\]/ {
 		flush()
 		sec = index($0, "/" n " (") || index($0, "/" n ".ksh (")
-		h0 = 0; wt = 0; sz = ""; pas = 0; cln = 0; hr = 0; err = 0; prev = ""
+		h0 = 0; sz = ""; ck = 0; pas = 0; cb = 0; cln = 0; hr = 0; err = 0; prev = ""
 		next
 	}
 	!sec { next }
 	{ line = $0; sub(/^[0-9:.]+ /, "", line) }
 	line ~ /^SUCCESS: set_tunable64 L2ARC_HEADROOM 0$/ { h0++ }
-	line ~ /^Waiting for arcstat l2_size quiescence[.]$/ { wt++ }
 	line ~ /^NOTE: l2_size=[0-9]+$/ { v = line; sub(/^NOTE: l2_size=/, "", v); sz = sz (sz == "" ? "" : ",") v }
+	line ~ /^ERROR: test [0-9]+ -gt 0 exited [0-9]+$/ { ck++ }
 	line ~ /^l2arc_headroom=0 does not stop L2ARC writes[.]$/ { pas++ }
+	line ~ /^NOTE: Performing test-fail callback [(]/ { cb++ }
 	line ~ /^NOTE: Performing local cleanup via log_onexit [(]cleanup[)]$/ { cln++ }
 	line ~ /^SUCCESS: set_tunable64 L2ARC_HEADROOM [1-9][0-9]*$/ { hr++ }
 	line ~ /ERROR: / { err++ }
@@ -909,9 +913,9 @@ ok: their blobs in B
 ok: arc.c in the parent and in B
 ok: zfs.4 in the parent: l2arc_headroom=0 disables the limit
   5ebd13aa9a ZTS: sync checksum test data before fault injection
-  33e2b1f648 L2ARC: Do not stop writing when l2arc_headroom is 0
+  a28f54925d L2ARC: Do not stop writing when l2arc_headroom is 0
 upstream master now (recorded only): <its head>
-on GitHub now (recorded only): refs/heads/l2arc-headroom-zero=33e2b1f648
+on GitHub now (recorded only): refs/heads/l2arc-headroom-zero=a28f54925d
 ```
 
 A `MISMATCH`, or a failed init or fetch, means stop. The last two lines are
@@ -968,7 +972,7 @@ fi
 Expected:
 
 ```
-worktree B rc=0 at 33e2b1f648
+worktree B rc=0 at a28f54925d
 worktree M rc=0 at 5ebd13aa9a
 M: B's test-side files checked out rc=0
 ok: B as committed
@@ -979,9 +983,9 @@ ok: M: module/ as in the parent
 ok: M against B: arc.c only
 ok: M's arc.c is the parent's
 ok: B's arc.c
-B: arc.c 1fe44ed3bc, guard x2 at lines [9720 10067], bare check x0 at line []; test 7c6d7c5542 mode 755, in common.run x1, L2ARC_HEADROOM in tunables.cfg x1
+B: arc.c 1fe44ed3bc, guard x2 at lines [9720 10067], bare check x0 at line []; test 548bd44cb6 mode 755, in common.run x1, L2ARC_HEADROOM in tunables.cfg x1
 ok: B supports Linux 6.12 (META: 4.18 to 7.3)
-M: arc.c 15565d1192, guard x1 at lines [9720], bare check x1 at line [10067]; test 7c6d7c5542 mode 755, in common.run x1, L2ARC_HEADROOM in tunables.cfg x1
+M: arc.c 15565d1192, guard x1 at lines [9720], bare check x1 at line [10067]; test 548bd44cb6 mode 755, in common.run x1, L2ARC_HEADROOM in tunables.cfg x1
 ok: M supports Linux 6.12 (META: 4.18 to 7.3)
 ```
 
@@ -1073,7 +1077,7 @@ b1: load B rc=0, srcversion <SV_B>, pools []
 kernel ld-b1: 0 findings, 0 ZTS marks (expected 0), 0 timeout dumps (expected 0; 0 lines, 0 of them matching, set apart) (<n> lines)
 before b1: fd=/var/tmp/zts-hr0-1028/files-b1 (tigerblue77 1777, holds []) pools=[] loops=[] mounts=[] rootdirs=[] zed=[] others=[] tunables as loaded
 b1 (B) l2arc_headroom_zero_pos PASS x1 [<mm:ss>] rc=0 wall=<s>s; all results: PASS x3
-  l2arc_headroom_zero_pos: headroom set to 0 x1, waited for l2_size x1, l2_size note [<n>, above 0], log_pass message x1, local cleanup x1, headroom restored x1, ERROR lines x0
+  l2arc_headroom_zero_pos: headroom set to 0 x1, l2_size note [<n>, above 0], l2_size check failed x0, log_pass message x1, test-fail callbacks x0, local cleanup x1, headroom restored x1, ERROR lines x0
     last line: SUCCESS: set_tunable32 L2ARC_NOPREFETCH 1
 b1 arcstats since its load: l2_feeds <n>, l2_writes_sent <n>, l2_writes_done <n>, l2_writes_error 0, l2_write_bytes <n, above 0: hundreds of millions>, l2_size <n> (recorded), ...
 kernel b1: 0 findings, 3 ZTS marks (expected 3), 0 timeout dumps (expected 0; 0 lines, 0 of them matching, set apart) (<n> lines)
@@ -1084,9 +1088,10 @@ kernel b1: 0 findings, 3 ZTS marks (expected 3), 0 timeout dumps (expected 0; 0 
 leftovers after b1: as expected
 ```
 
-The `l2_size` note is the test's own reading of `l2_size` once it settled,
-in bytes. The tunables at load are the module's defaults (zfs.4:
-`l2arc_headroom=8`, `l2arc_noprefetch=1`); a value set by this VM's
+The `l2_size` note is the test's own reading of `l2_size`, in bytes, taken
+as soon as it is above 0 (so it can be small). The tunables at load are the
+module's defaults (zfs.4: `l2arc_headroom=8`, `l2arc_noprefetch=1`); a value
+set by this VM's
 configuration is fine, since each run is compared with what its own load
 found. Recorded only: the tunables, the runner time, the wall time, the
 `last line:` lines and every arcstats value. A test that does not pass is a
@@ -1097,8 +1102,9 @@ something else: the lines say what, and the step stops.
 ## STEP 4: M, the test three times (runs `m1`, `m2`, `m3`)
 
 Each run loads M's modules afresh (the reload first unloads B's), then runs
-the test, which waits until the runner kills it at 600 s: 11 to 13 minutes
-each, 35 to 40 together (see the rule about long commands):
+the test, which waits 60 s after its reads for a non-zero `l2_size` and then
+fails: 2 to 4 minutes each, 6 to 12 together (see the rule about long
+commands):
 
 ```sh
 . /var/log/zts-hr0-1028/env.sh
@@ -1112,14 +1118,14 @@ m1: load M rc=0, srcversion <SV_M>, pools []
   tunables: l2arc_headroom=8 l2arc_noprefetch=1 ... (recorded)
 kernel ld-m1: 0 findings, 0 ZTS marks (expected 0), 0 timeout dumps (expected 0; 0 lines, 0 of them matching, set apart) (<n> lines)
 before m1: fd=/var/tmp/zts-hr0-1028/files-m1 (tigerblue77 1777, holds []) pools=[] loops=[] mounts=[] rootdirs=[] zed=[] others=[] tunables as loaded
-m1 (M) l2arc_headroom_zero_pos KILLED x1 [10:00] rc=<1 or 2> wall=<about 650 to 750>s; all results: KILLED x1, PASS x2
-  l2arc_headroom_zero_pos: headroom set to 0 x1, waited for l2_size x1, l2_size note [], log_pass message x0, local cleanup x0, headroom restored x0, ERROR lines x0
-    last line: Waiting for arcstat l2_size quiescence.
-  l2arc_headroom_zero_pos: first ERROR line: none
-    last line: Waiting for arcstat l2_size quiescence.
-m1 arcstats since its load: l2_feeds <n, in the hundreds>, l2_writes_sent 0, l2_writes_done 0, l2_writes_error 0, l2_write_bytes 0, l2_size 0, ...
-kernel m1: 0 findings, 3 ZTS marks (expected 3), 1 timeout dumps (expected 1; <n> lines, <n> of them matching, set apart) (<n> lines)
-  tunables: l2arc_headroom=0 l2arc_noprefetch=0, as the killed test left them, the others as loaded (the next load resets them)
+m1 (M) l2arc_headroom_zero_pos FAIL x1 [<mm:ss>, about 01:30 to 03:00] rc=<1 or 2> wall=<s>s; all results: FAIL x1, PASS x2
+  l2arc_headroom_zero_pos: headroom set to 0 x1, l2_size note [0], l2_size check failed x1, log_pass message x0, test-fail callbacks x3, local cleanup x1, headroom restored x1, ERROR lines x<1 or more>
+    last line: SUCCESS: set_tunable32 L2ARC_NOPREFETCH 1
+  l2arc_headroom_zero_pos: first ERROR line: ERROR: test 0 -gt 0 exited 1
+    last line: SUCCESS: set_tunable32 L2ARC_NOPREFETCH 1
+m1 arcstats since its load: l2_feeds <n, tens>, l2_writes_sent 0, l2_writes_done 0, l2_writes_error 0, l2_write_bytes 0, l2_size 0, ...
+kernel m1: 0 findings, 3 ZTS marks (expected 3), 0 timeout dumps (expected 0; 0 lines, 0 of them matching, set apart) (<n> lines)
+  tunables: as loaded
   loop devices: []
   /var/tmp/zts-hr0-1028/files-m1 holds: [testdir] (expected [testdir])
     <the ls -la lines>
@@ -1128,18 +1134,15 @@ leftovers after m1: as expected
 
 **This is the bug in the kernel**: with `l2arc_headroom=0`, master's feed
 thread runs (`l2_feeds` grows every second while the cache device is there)
-and writes nothing (`l2_write_bytes` and `l2_writes_sent` 0); the test's wait
-for a non-zero `l2_size` never ends, and the runner kills it. Before the
-kill, the runner writes its timeout dump to the kernel log (see "What the
-runner writes ..." above): the `1 timeout dumps` of the kernel line, its
-`Call Trace:` lines among the `of them matching`, set apart and not counted
-as findings. The runner time is recorded as it comes (`[10:00]` or
-`[10:01]`), and so are the rc, the wall time, the `last line:` lines and the
-dump's line counts. A test that ends otherwise (`FAIL` with a note
-`l2_size=0`, or `PASS`) is a result, not a stop: record it, "What the results
-mean" says how to read it. The setup and the cleanup must pass (`all
-results: KILLED x1, PASS x2`); one that does not is listed as `not passed:`,
-recorded.
+and writes nothing (`l2_write_bytes` and `l2_writes_sent` 0); after its 60 s
+wait the test logs `l2_size=0` and its check fails. Recorded only: the runner
+time, the rc, the wall time, the `ERROR lines` count (the callbacks' tails of
+the zfs debug log and of `dmesg` can add some), the `last line:` lines and
+the arcstats values other than `l2_write_bytes` and `l2_writes_sent`. A test
+that ends otherwise (`PASS`, or `KILLED` at the runner's 600 s timeout, see
+"A guard ..." above) is a result, not a stop: record it, "What the results
+mean" says how to read it. The setup and the cleanup must pass (`all results:
+FAIL x1, PASS x2`); one that does not is listed as `not passed:`, recorded.
 
 ## STEP 5: B, the l2arc group (run `bg`)
 
@@ -1161,7 +1164,7 @@ kernel ld-bg: 0 findings, 0 ZTS marks (expected 0), 0 timeout dumps (expected 0;
 before bg: fd=/var/tmp/zts-hr0-1028/files-bg (tigerblue77 1777, holds []) pools=[] loops=[] mounts=[] rootdirs=[] zed=[] others=[] tunables as loaded
 bg (B) -T l2arc PASS x15 (Test: x15, Test (Linux): x0) rc=0 wall=<s>s
   Missing util(s): <whatever it lists, or no such line>
-  l2arc_headroom_zero_pos: headroom set to 0 x1, waited for l2_size x1, l2_size note [<n>, above 0], log_pass message x1, local cleanup x1, headroom restored x1, ERROR lines x0
+  l2arc_headroom_zero_pos: headroom set to 0 x1, l2_size note [<n>, above 0], l2_size check failed x0, log_pass message x1, test-fail callbacks x0, local cleanup x1, headroom restored x1, ERROR lines x0
     last line: SUCCESS: set_tunable32 L2ARC_NOPREFETCH 1
 bg arcstats since its load: ... (recorded)
 kernel bg: 0 findings, 15 ZTS marks (expected 15), 0 timeout dumps (expected 0; 0 lines, 0 of them matching, set apart) (<n> lines)
@@ -1207,7 +1210,7 @@ for r in m1 m2 m3; do
 done
 echo "B: $nb of 3 runs PASS, with an l2_size note above 0, l2_write_bytes above 0 and no kernel finding (expected 3)"
 echo "M: $nm of 3 runs not PASS, with no l2_size note above 0, l2_write_bytes 0, l2_writes_sent 0 and no kernel finding (expected 3)"
-echo "M results: $(for r in m1 m2 m3; do [ -s $L/row-$r.txt ] && awk '{ printf "%s=%s ", $1, $3 }' $L/row-$r.txt; done)(expected KILLED x3)"
+echo "M results: $(for r in m1 m2 m3; do [ -s $L/row-$r.txt ] && awk '{ printf "%s=%s ", $1, $3 }' $L/row-$r.txt; done)(expected FAIL x3)"
 if [ -s $L/row-bg.txt ]; then
 	set -- $(cat $L/row-bg.txt)
 	echo "bg: $3 (expected PASSx15), the new test's l2_size note [$7], kernel findings ${11}, timeout dumps ${12}"
@@ -1227,13 +1230,13 @@ run  tree result       time   rc  wall   l2_size_note l2_write_bytes  sent   fee
 b1   B    PASS         <m:s>  0   <s>    <n>          <n>             <n>    <n>     0       0
 b2   B    PASS         <m:s>  0   <s>    <n>          <n>             <n>    <n>     0       0
 b3   B    PASS         <m:s>  0   <s>    <n>          <n>             <n>    <n>     0       0
-m1   M    KILLED       10:00  <rc> <s>   -            0               0      <n>     0       1
-m2   M    KILLED       10:00  <rc> <s>   -            0               0      <n>     0       1
-m3   M    KILLED       10:00  <rc> <s>   -            0               0      <n>     0       1
+m1   M    FAIL         <m:s>  <rc> <s>   0            0               0      <n>     0       0
+m2   M    FAIL         <m:s>  <rc> <s>   0            0               0      <n>     0       0
+m3   M    FAIL         <m:s>  <rc> <s>   0            0               0      <n>     0       0
 bg   B    PASSx15      -      0   <s>    <n>          <n>             <n>    <n>     0       0
 B: 3 of 3 runs PASS, with an l2_size note above 0, l2_write_bytes above 0 and no kernel finding (expected 3)
 M: 3 of 3 runs not PASS, with no l2_size note above 0, l2_write_bytes 0, l2_writes_sent 0 and no kernel finding (expected 3)
-M results: m1=KILLED m2=KILLED m3=KILLED (expected KILLED x3)
+M results: m1=FAIL m2=FAIL m3=FAIL (expected FAIL x3)
 bg: PASSx15 (expected PASSx15), the new test's l2_size note [<n>], kernel findings 0, timeout dumps 0
 B srcversion <SV_B>
 M srcversion <SV_M>
@@ -1284,12 +1287,13 @@ echo "vdev_id.conf: $(ls -l /etc/zfs/vdev_id.conf 2>&1)"
 } 2>&1 | tee $L/end.txt
 ```
 
-Expected: `kernel, whole task: 0 findings, 33 ZTS marks, 3 timeout dumps
-(<n> lines, <c> of them matching, set apart)` (3 marks per test run, 15 for
-the group, one dump per M run; fewer after a stop), no kernel line, then
-`kernel, this boot: <the STEP 0 baseline plus c> counted as in STEP 0, <the
-baseline or less> outside timeout dumps` (less if an earlier task's dump is in
-this boot), `unload B rc=0`, `lsmod: []`, `loop devices: []`, `mounts under W:
+Expected: `kernel, whole task: 0 findings, 33 ZTS marks, 0 timeout dumps (0
+lines, 0 of them matching, set apart)` (3 marks per test run, 15 for the
+group; fewer after a stop), no kernel line, then `kernel, this boot: <the
+STEP 0 baseline> counted as in STEP 0, <the baseline or less> outside timeout
+dumps` (less if an earlier task's dump is in this boot; the first count is
+higher, by the matching lines of this task's dumps, only if a test was
+killed), `unload B rc=0`, `lsmod: []`, `loop devices: []`, `mounts under W:
 []`, a 0-byte or absent `zpool.cache`, no `vdev_id.conf`.
 
 Then release the `testdir` each run left, and only those (each still exactly
@@ -1328,7 +1332,7 @@ Then assemble `REPORT.txt`:
 ```sh
 . /var/log/zts-hr0-1028/env.sh
 {
-echo "VM 107: l2arc_headroom=0, B 33e2b1f648 (the fix, debug) against M (5ebd13aa9a with B's test-side files, debug) (w/VM-TESTS-107-hr0.md)"
+echo "VM 107: l2arc_headroom=0, B a28f54925d (the fix, debug) against M (5ebd13aa9a with B's test-side files, debug) (w/VM-TESTS-107-hr0.md)"
 for s in record fix trees build build-checks runs compare end; do
 	echo
 	echo "== $s.txt"
@@ -1360,19 +1364,19 @@ Expected summary:
 B srcversion <SV_B>
 M srcversion <SV_M>
 b1 (B) l2arc_headroom_zero_pos PASS x1 [<mm:ss>] rc=0 wall=<s>s; all results: PASS x3
-  l2arc_headroom_zero_pos: headroom set to 0 x1, waited for l2_size x1, l2_size note [<n>], log_pass message x1, local cleanup x1, headroom restored x1, ERROR lines x0
+  l2arc_headroom_zero_pos: headroom set to 0 x1, l2_size note [<n>], l2_size check failed x0, log_pass message x1, test-fail callbacks x0, local cleanup x1, headroom restored x1, ERROR lines x0
 b1 arcstats since its load: ...
 kernel b1: 0 findings, 3 ZTS marks (expected 3), 0 timeout dumps (expected 0; 0 lines, 0 of them matching, set apart) (<n> lines)
 leftovers after b1: as expected
 <the same five lines for b2 and b3>
-m1 (M) l2arc_headroom_zero_pos KILLED x1 [10:00] rc=<rc> wall=<s>s; all results: KILLED x1, PASS x2
-  l2arc_headroom_zero_pos: headroom set to 0 x1, waited for l2_size x1, l2_size note [], log_pass message x0, local cleanup x0, headroom restored x0, ERROR lines x0
+m1 (M) l2arc_headroom_zero_pos FAIL x1 [<mm:ss>] rc=<rc> wall=<s>s; all results: FAIL x1, PASS x2
+  l2arc_headroom_zero_pos: headroom set to 0 x1, l2_size note [0], l2_size check failed x1, log_pass message x0, test-fail callbacks x3, local cleanup x1, headroom restored x1, ERROR lines x<n>
 m1 arcstats since its load: l2_feeds <n>, l2_writes_sent 0, l2_writes_done 0, l2_writes_error 0, l2_write_bytes 0, ...
-kernel m1: 0 findings, 3 ZTS marks (expected 3), 1 timeout dumps (expected 1; <n> lines, <n> of them matching, set apart) (<n> lines)
+kernel m1: 0 findings, 3 ZTS marks (expected 3), 0 timeout dumps (expected 0; 0 lines, 0 of them matching, set apart) (<n> lines)
 leftovers after m1: as expected
 <the same five lines for m2 and m3>
 bg (B) -T l2arc PASS x15 (Test: x15, Test (Linux): x0) rc=0 wall=<s>s
-  l2arc_headroom_zero_pos: headroom set to 0 x1, ..., l2_size note [<n>], ...
+  l2arc_headroom_zero_pos: headroom set to 0 x1, l2_size note [<n>], l2_size check failed x0, log_pass message x1, ...
 bg arcstats since its load: ...
 kernel bg: 0 findings, 15 ZTS marks (expected 15), 0 timeout dumps (expected 0; 0 lines, 0 of them matching, set apart) (<n> lines)
 leftovers after bg: as expected
@@ -1422,23 +1426,27 @@ last block: nothing runs after the reply.
 
 ## What the results mean
 
-- **As expected** (STEP 6: B 3 of 3, M 3 of 3, `bg` `PASSx15`; no kernel
-  finding; a clean unload): on a kernel, with `l2arc_headroom=0`, master's
-  feed thread runs and writes nothing to the cache device
-  (`l2_write_bytes` 0), so the test's wait for a non-zero `l2_size` never
-  ends and the runner kills it, three times out of three; with the fix the
-  same test passes three times out of three, its cache device holding data
-  (the `l2_size` it logs, the bytes written), and the rest of the l2arc group
-  still passes.
+- **As expected** (STEP 6: B 3 of 3, M 3 of 3 with `FAIL x3`, `bg`
+  `PASSx15`; no kernel finding and no timeout dump; a clean unload): on a
+  kernel, with `l2arc_headroom=0`, master's feed thread runs and writes
+  nothing to the cache device (`l2_write_bytes` 0), so `l2_size` is still 0
+  a minute after the reads and the test fails, three times out of three; with
+  the fix the same test passes three times out of three, its cache device
+  holding data (the `l2_size` it logs, the bytes written), and the rest of
+  the l2arc group still passes.
 - **M writes to the cache device** (`l2_write_bytes` above 0), or its test
   passes: the bug did not show. Check STEP 2's `bare check x1 at line
   [10067]` for M, each M run's srcversion line, and that its digest says
   `headroom set to 0 x1`; report `$L/m<n>.arcstats`.
-- **M's test fails instead of being killed**, with a note `l2_size=0`: the
-  wait returned with `l2_size` 0, which this `libtest.shlib` does not do;
-  report its lines. Still master writing nothing, if `l2_write_bytes` is 0.
+- **M's test is killed** at the runner's 600 s timeout instead of failing
+  (`KILLED`, one timeout dump set apart in its kernel line): the bounded wait
+  did not end, which `a28f54925d`'s test should not allow; report the run's
+  lines and its `last line:`. Still master writing nothing, if
+  `l2_write_bytes` is 0. **M fails with a note above 0**: `l2_size` grew
+  without bytes written, or the check failed on something else; report the
+  run's lines.
 - **B's test does not pass, or B writes nothing** (`l2_write_bytes` 0, the
-  test killed like M's): the fix does not hold in the kernel, or the test
+  test failing like M's): the fix does not hold in the kernel, or the test
   cannot show it; check STEP 2's `guard x2` for B, report the runs' lines and
   `$L/b<n>.arcstats`. **B passes one or two times out of three**: flaky,
   report every run's lines.
@@ -1455,6 +1463,6 @@ last block: nothing runs after the reply.
   recorded, not a stop.
 - **Any kernel finding**: the line and the run are the result. Stop.
 
-Estimated duration: about 1 hour 30 minutes (checks 5, fetch and worktrees
-5, the builds 10 to 15, B's runs 5, M's runs 35 to 40, the group 10 to 25,
+Estimated duration: about 1 hour (checks 5, fetch and worktrees
+5, the builds 10 to 15, B's runs 5, M's runs 6 to 12, the group 10 to 25,
 the end 5).
