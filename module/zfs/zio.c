@@ -2731,11 +2731,16 @@ zio_execute_stage(zio_t *zio)
 	 * If we are in interrupt context and this pipeline stage will grab
 	 * a config lock that is held across I/O, or may wait for an I/O that
 	 * needs an interrupt thread to complete, issue async to avoid deadlock.
+	 * Starting I/O on a RAID-Z vdev that is being expanded may wait for
+	 * the expansion's range lock, whose holders need interrupt threads
+	 * to release it.
 	 *
 	 * For VDEV_IO_START, we cut in line so that the io will be sent to
 	 * disk promptly.
 	 */
-	if ((stage & ZIO_BLOCKING_STAGES) && zio->io_vd == NULL &&
+	if ((stage & ZIO_BLOCKING_STAGES) &&
+	    (zio->io_vd == NULL || (stage == ZIO_STAGE_VDEV_IO_START &&
+	    zio->io_vd->vdev_rz_expanding)) &&
 	    zio_taskq_member(zio, ZIO_TASKQ_INTERRUPT)) {
 		boolean_t cut = (stage == ZIO_STAGE_VDEV_IO_START) ?
 		    zio_requeue_io_start_cut_in_line : B_FALSE;
