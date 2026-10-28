@@ -84,12 +84,12 @@ Writes: tigerblue77. Reviews: rdmitry0911.
 Draft by tigerblue77, 26 October. It merges the six questions of #2, the
 points of the 25 October reply (rewind, readers in flight, dedup, BRT,
 expansion) and the open decisions rdmitry0911 has named on #2, in #4 and
-in #5; the table at the end shows where each went. rdmitry0911's own
-list of nine has not been posted, so he may add any of it that is
-missing. Each point gives the question, the options, where each
-prototype stands and what would settle it. "Redirect" is the prototype
-of #3 and "virtual/backing" the one of #4; their positions describe the
-code as published, not the converged design.
+in #5, which his review of 27 October lists as D1 to D8; the table at
+the end shows where each went. Each point gives the question, the
+options, where each prototype stands and what would settle it.
+"Redirect" is the prototype of #3 and "virtual/backing" the one of #4;
+their positions describe the code as published, not the converged
+design.
 
 References: `spike:` is `spike/bypass-free` at `094d2a05f` and `vb:` the
 head of #4 at `46d04a1af`. A path without a directory is under
@@ -354,7 +354,18 @@ converter walks the MOS, then each dataset with
 virtual/backing (4 s against 4-5 s, 22 October) and not yet measured for
 redirect.
 
-**14. Expansion.** Refuse, at first, to expand a vdev that holds a
+**14. Scope, expansion and removal.** At first, a move converts one
+top-level vdev, selected explicitly, per pool at a time, and no move
+runs while an expansion or a device removal does, nor does either
+start while a move runs (rdmitry0911, 27 October). Virtual/backing
+retains "one translated top-level vdev" per pool for an engine's
+lifetime (`vb:README.md:132-133`); redirect's move names one vdev
+(`spike:vdev_raidz.c:8335-8337`) and enforces no more, and several
+top-level vdevs are untested (#2). Master already keeps the removal
+of a data vdev apart: it refuses to remove a top-level vdev other than
+a log from a pool that has a RAID-Z vdev (`vdev_removal.c:2340-2363`),
+and to add a RAID-Z vdev during a removal or beside indirect vdevs
+(`spa.c:8277-8293`). Refuse, at first, to expand a vdev that holds a
 mapping and to move on an expanded one (both authors); the epoch series
 already refuses to expand an epoch-bearing vdev
 (`spike:spa.c:8543-8551`). The combination is first to be defined for
@@ -373,6 +384,32 @@ parity comes first (section 5). Neither prototype has an interface:
 redirect's mover is driven by probes, and virtual/backing has "no
 supported administration interface" (`vb:README.md:15-16`).
 
+**16. Degraded operation and metadata repair.** What permits a
+read-only or writable import, and a durable mapping, bootstrap, journal
+or completion update, while children are missing or stale? Point 7
+places the mapping and requirement 4 of section 1 covers the copies'
+DTLs; neither answers it. With raw replicas, read and write quorums
+need defining against the tolerance established at that stage, before
+completion included; with MOS storage, the native rules the mapping
+inherits, and the restrictions it adds, need naming. For returning or
+replacement members: how data and every required mapping, bootstrap,
+journal, floor and completion record are reconciled and repaired, and
+how stale copies are kept from authority. Redirect keeps the mapping
+in the MOS and adds no rule of its own; a move with a child offline,
+then the child's return, its resilver and a scrub that repairs
+nothing, is witnessed (`spike:README.md:403-406`, `418`).
+Virtual/backing, from reading: a raw write or required read tolerates
+as many absent or failing members as the certified parity, so needs
+every member before the certificate
+(`vb:vdev_reloc_engine.c:140-145`, `vb:vdev_reloc_store.c:576-580`); a
+writable import gives members that missed writes the live pages
+(`vb:vdev_reloc_store.c:1726-1746`); a kernel test imports a certified
+pool writable with two of six members hidden and resilvers them on
+return (`pr19262_degraded_pos.ksh:5-8`, in the directory of
+`vb:README.md:58`). These rules remain to be selected and demonstrated
+for the joint design; section 4 needs the publication and recovery
+cuts of an update made while a member is missing or stale.
+
 ### Where the earlier questions went
 
 | Raised | Point |
@@ -387,10 +424,14 @@ supported administration interface" (`vb:README.md:15-16`).
 | 25 October: readers in flight | 8 |
 | 25 October: dedup, BRT | 2 |
 | 25 October: expansion | 14 |
-| rdmitry0911: bootstrap, journal | 7, 11 |
-| rdmitry0911: floor, leases | 9, 8 |
-| rdmitry0911: checkpoint policy | 10 |
-| rdmitry0911: resource budgets, AVAIL promises, product controls | 3, 12, 15 |
+| rdmitry0911, D1: population, rewrite choice | 2, 3 |
+| rdmitry0911, D2: discovery, bootstrap | 7, 5 |
+| rdmitry0911, D3: ACK durability | 11 |
+| rdmitry0911, D4: old-copy lifetime, older roots | 8, 9, 10 |
+| rdmitry0911, D5: stronger-tolerance certificate | 4 |
+| rdmitry0911, D6: degraded authority, member catch-up | 16, section 4 |
+| rdmitry0911, D7: allocation credits, space promises | 6, 12 |
+| rdmitry0911, D8: initial scope, administration | 5, 14, 15 |
 
 ## 4. Measurements on one fixture
 
@@ -408,7 +449,7 @@ registered only in the last step, or the series merges together.
 Every step builds on the parity-epoch series of openzfs/zfs#19262, whose
 format lands with the feature of the last step. Steps 1 and 2 do not
 depend on the choice between the mechanisms; steps 3 to 6 take their
-shape from points 2, 7, 8 and 11.
+shape from points 2, 7, 8, 11 and 16.
 
 0. Evidence first: the measurements of section 4 on one fixture and the
    decisions of section 3, presented to the maintainers before any code
@@ -421,20 +462,22 @@ shape from points 2, 7, 8 and 11.
    RAID-Z read, write, repair and resilver check takes its layout from
    one place, so that a later step can give a block a layout other than
    the one its block pointer's birth implies.
-3. The mapping and its read paths: format, load and validation; reads
-   and repairs at the copy, with the copy's own birth for DTL checks;
-   scrub and resilver following the mapping, copies written inside a
-   resilver's window included; blocks with several DVAs; frees at the
-   last reference; zdb's claims. Entries come only from test code until
-   step 6.
+3. The mapping and its read paths: format, load and validation; the
+   rules of point 16 for missing and stale children, and the repair of
+   returning ones; reads and repairs at the copy, with the copy's own
+   birth for DTL checks; scrub and resilver following the mapping,
+   copies written inside a resilver's window included; blocks with
+   several DVAs; frees at the last reference; zdb's claims. Entries
+   come only from test code until step 6.
 4. Lifetime and space: the reader exclusion and the no-deferral rule of
    point 8; the pool-level charge and the move's reservation (points 6
    and 12); the estimate and the budget (point 3).
 5. The mover: the rewrite of what a head owns alone, with its BRT and
    nopwrite exceptions (point 2); the mapping of the rest; the traversal
    (point 13); the keyless ZIL (point 11); the checkpoint rule (point
-   10). Until step 6 it runs only from test code, so that no supported
-   path writes a mapping before the feature exists.
+   10); the scope and exclusions of point 14. Until step 6 it runs only
+   from test code, so that no supported path writes a mapping before
+   the feature exists.
 6. The feature, registered last, with the interface of point 15 that
    starts a move: active before the first incompatible state is durable
    and while any durable state needs it (point 5); the census of point
