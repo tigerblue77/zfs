@@ -172,8 +172,25 @@ Options:
   deferred and free bpobjs beside it and only reports an async-destroy
   bptree; a walk is not enough alone.
 
-Proposed with it in #2, not built: once an epoch is retired, any I/O or
-free naming a birth inside it fails loudly.
+The guard proposed with it in #2, not built, as rdmitry0911 corrected
+it on 27 October: once an epoch is retired, refuse a dispatch, free or
+claim that would use its obsolete physical layout without a valid
+mapping. An unchanged block pointer may still carry a birth in that
+epoch, so its mapping is validated and its copy resolved before the
+guard applies (redirect: the entry keyed by offset and physical birth;
+virtual/backing: the allocation identity, whose dispatch keeps the
+block pointer for verification and takes the copy's offset, size and
+birth, `vb:vdev_reloc_engine.c:1923-1937`). Read, repair, free and
+claim of that block remain valid. An absent or stale entry must never
+fall back to the old layout at the old extent, nor reach another block
+that has reused the address.
+
+The durable record needs validity rules of its own. A change that could
+make any reachable block's backing weaker than the record states is
+refused, or durably withdraws the record before that state is
+published; only a new record, after another census of zero, restores
+the new tolerance. Keeping the feature active (point 5) is a separate
+obligation.
 
 **5. One feature.** Epochs, mapping and census form one pool feature,
 not read-only compatible, since older code would read the old extent;
@@ -413,9 +430,13 @@ shape from points 2, 7, 8 and 11.
 6. The feature, registered last, with the interface of point 15 that
    starts a move: active before the first incompatible state is durable
    and while any durable state needs it (point 5); the census of point
-   4, its durable record, the new tolerance and the retirement of the
-   old epoch; the guard on retired births; `zpool-features.7` and the
-   man page of the command that starts a move.
+   4, its durable record and the rules that withdraw it, the new
+   tolerance and the retirement of the old epoch; the guard on retired
+   physical layouts, applied after a block's mapping is validated and
+   resolved, so that an unchanged block pointer with a birth in the
+   retired epoch is still read, repaired, freed and claimed (point 4);
+   `zpool-features.7` and the man page of the command that starts a
+   move.
 
 Each step comes with its tests: ZTS for the kernel paths, `ztest` on
 RAID-Z, zdb's checks on the pools it leaves, and, from step 3 on, the
