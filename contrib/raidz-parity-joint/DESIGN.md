@@ -265,18 +265,26 @@ holds for both; the options differ in when an old extent is reused.
   are not deferred. Cost: tails that cannot hold a block of the same size
   at the new parity, for as long as the block lives
   (`spike:README.md:935-941`).
-- Retire the old extent whole, and reuse it only once the leases on it
-  have drained and a durable fence has passed (virtual/backing): "a read
-  that meets a reused extent fails ESTALE and retries through the
-  catalog" (21 October). Cost: up to one batch of retired bytes until
-  the fence (64 MiB in its fixture, 21 October), and the floor of point
+- Retire the old extent whole, and reuse it only once its version
+  leases have drained and a durable fence permits it (virtual/backing).
+  A read or repair already bound keeps its selected backing across
+  publication and final-reference deletion. A fresh reference to a
+  freed or reused allocation is refused with ESTALE and cannot select a
+  different allocation at the same virtual address
+  (`vb:vdev_reloc_engine.c:1669-1679`); a converter that meets a stale
+  traversal item can revisit it from a fresh root (point 13). Cost:
+  retained bytes, which depend on held operations and fence progress
+  (its 21 October fixture used a 64 MiB batch), and the floor of point
   9.
 
 Settled by section 4, item 5: an ordinary read held across the reuse
 boundary, the no-deferral case included, in both prototypes.
 
 **9. Rewind.** `-F` reaches back at most `TXG_DEFER_SIZE` txgs
-(`spa.c:6583-6585`), which an ordinary deferred free covers. `-X`, and
+(`spa.c:6583-6585`), which an ordinary deferred free covers only in a
+txg that defers its frees. In one that does not (point 8), redirect's
+freed tail is reusable at once, and `-F` can meet what `-X` meets
+below, unless the move pauses there as point 8 proposes. `-X`, and
 `-T`, which implies it (`cmd/zpool/zpool_main.c:4470-4472`), guarantee
 no consistency (`zpool-import.8`) and can reach an old extent whose
 freed part another block now holds: a moved block then fails its
