@@ -47,8 +47,8 @@ is left at the old parity.
   or clone origin holds, every one shared through dedup or BRT, and
   every one in a dataset whose key is not loaded. A head with its key
   loaded may still rewrite a block it owns alone through the normal
-  write path, as any write does (point 2 of section 3); that rewrites
-  no snapshot metadata.
+  write path, which replaces its block pointer as any write does
+  (point 2 of section 3) and rewrites no snapshot metadata.
 - Rewrite alone is not enough. It cannot reach blocks that only
   snapshots hold, or encrypted data whose key is not loaded, and one
   block left behind voids the guarantee (openzfs/zfs#19233). That is why
@@ -91,9 +91,9 @@ Writes: tigerblue77. Reviews: rdmitry0911.
 Draft by tigerblue77, 26 October. It merges the six questions of #2, the
 points of the 25 October reply (rewind, readers in flight, dedup, BRT,
 expansion) and the open decisions rdmitry0911 has named on #2, in #4 and
-in #5, which his review of 27 October lists as D1 to D8; the table at
-the end shows where each went. Each point gives the question, the
-options, where each prototype stands and what would settle it.
+in #5 and consolidated as D1 to D8 in his review of 27 October; the
+table at the end shows where each went. Each point gives the question,
+the options, where each prototype stands and what would settle it.
 "Redirect" is the prototype of #3 and "virtual/backing" the one of #4;
 their positions describe the code as published, not the converged
 design.
@@ -102,8 +102,9 @@ References: `spike:` is `spike/bypass-free` at `094d2a05f` and `vb:` the
 head of #4 at `46d04a1af`. A path without a directory is under
 `module/zfs/`, except `README.md` and redirect's `*_probe.c`, which are
 under `contrib/raidz-redirect-spike/` (`spike:`) or
-`contrib/raidz-virtual-backing/` (`vb:`). A bare `file:line` is upstream
-master at `ea111ca50f`.
+`contrib/raidz-virtual-backing/` (`vb:`), and virtual/backing's
+`pr19262_*.ksh`, under `tests/zfs-tests/tests/functional/pr19262/`. A
+bare `file:line` is upstream master at `ea111ca50f`.
 
 ### Proposed by both authors, for the maintainers to confirm
 
@@ -184,13 +185,14 @@ it on 27 October: once an epoch is retired, refuse a dispatch, free or
 claim that would use its obsolete physical layout without a valid
 mapping. An unchanged block pointer may still carry a birth in that
 epoch, so its mapping is validated and its copy resolved before the
-guard applies (redirect: the entry keyed by offset and physical birth;
-virtual/backing: the allocation identity, whose dispatch keeps the
-block pointer for verification and takes the copy's offset, size and
-birth, `vb:vdev_reloc_engine.c:1923-1937`). Read, repair, free and
-claim of that block remain valid. An absent or stale entry must never
-fall back to the old layout at the old extent, nor reach another block
-that has reused the address.
+guard applies (redirect: the entry keyed by offset and physical birth,
+`spike:vdev_raidz.c:2911-2921`; virtual/backing: the allocation
+identity, whose dispatch keeps the block pointer for verification and
+takes the copy's offset, size and birth,
+`vb:vdev_reloc_engine.c:1923-1937`). Read, repair, free and claim of
+that block remain valid. An absent or stale entry must never fall back
+to the old layout at the old extent, nor reach another block that has
+reused the address.
 
 The durable record needs validity rules of its own. A change that could
 make any reachable block's backing weaker than the record states is
@@ -281,8 +283,8 @@ holds for both; the options differ in when an old extent is reused.
   (`vb:vdev_reloc_engine.c:1669-1679`); a converter that meets a stale
   traversal item can revisit it from a fresh root (point 13). Cost:
   retained bytes, which depend on held operations and fence progress
-  (its 21 October fixture used a 64 MiB batch), and the floor of point
-  9.
+  (its 21 October fixture used a 64 MiB batch); the floor policy
+  remains point 9.
 
 Settled by section 4, item 5: an ordinary read held across the reuse
 boundary, the no-deferral case included, in both prototypes.
@@ -367,13 +369,15 @@ runs while an expansion or a device removal does, nor does either
 start while a move runs (rdmitry0911, 27 October). Virtual/backing
 retains "one translated top-level vdev" per pool for an engine's
 lifetime (`vb:README.md:132-133`); redirect's move names one vdev
-(`spike:vdev_raidz.c:8335-8337`) and enforces no more, and several
-top-level vdevs are untested (#2). Master already keeps the removal
-of a data vdev apart: it refuses to remove a top-level vdev other than
-a log from a pool that has a RAID-Z vdev (`vdev_removal.c:2340-2363`),
-and to add a RAID-Z vdev during a removal or beside indirect vdevs
-(`spa.c:8277-8293`). Refuse, at first, to expand a vdev that holds a
-mapping and to move on an expanded one (both authors); the epoch series
+(`spike:vdev_raidz.c:8335-8337`) but enforces neither one move per
+pool nor these exclusions, and several top-level vdevs are untested
+(#2). Master already keeps the removal of a data vdev apart: it
+refuses to remove a top-level vdev other than a log from a pool that
+has a RAID-Z vdev (`vdev_removal.c:2340-2363`), and to add a RAID-Z
+vdev during a removal or beside indirect vdevs (`spa.c:8277-8293`), so
+on a pool with a RAID-Z vdev what is left to exclude is a log device's
+removal. Refuse, at first, to expand a vdev that holds a mapping and to
+move on an expanded one (both authors); the epoch series
 already refuses to expand an epoch-bearing vdev
 (`spike:spa.c:8543-8551`). The combination is first to be defined for
 the epochs (openzfs/zfs#19413, question 2). From reading, not tested:
@@ -396,14 +400,14 @@ read-only or writable import, and a durable mapping, bootstrap, journal
 or completion update, while children are missing or stale? Point 7
 places the mapping and requirement 4 of section 1 covers the copies'
 DTLs; neither answers it. With raw replicas, read and write quorums
-need defining against the tolerance established at that stage, before
-completion included; with MOS storage, the native rules the mapping
-inherits, and the restrictions it adds, need naming. For returning or
-replacement members: how data and every required mapping, bootstrap,
-journal, floor and completion record are reconciled and repaired, and
-how stale copies are kept from authority. Redirect keeps the mapping
-in the MOS and adds no rule of its own; a move with a child offline,
-then the child's return, its resilver and a scrub that repairs
+need defining against the tolerance established at that stage,
+including before completion; with MOS storage, the native rules the
+mapping inherits, and the restrictions it adds, need naming. For
+returning or replacement members: how data and every required mapping,
+bootstrap, journal, floor and completion record are reconciled and
+repaired, and how stale copies are kept from authority. Redirect keeps
+the mapping in the MOS and adds no rule of its own; a move with a child
+offline, then the child's return, its resilver and a scrub that repairs
 nothing, is witnessed (`spike:README.md:403-406`, `418`).
 Virtual/backing, from reading: a raw write or required read tolerates
 as many absent or failing members as the certified parity, so needs
@@ -412,10 +416,10 @@ every member before the certificate
 writable import gives members that missed writes the live pages
 (`vb:vdev_reloc_store.c:1726-1746`); a kernel test imports a certified
 pool writable with two of six members hidden and resilvers them on
-return (`pr19262_degraded_pos.ksh:5-8`, in the directory of
-`vb:README.md:58`). These rules remain to be selected and demonstrated
-for the joint design; section 4 needs the publication and recovery
-cuts of an update made while a member is missing or stale.
+return (`vb:pr19262_degraded_pos.ksh:5-8`). These rules remain to be
+selected and demonstrated for the joint design; section 4 needs the
+publication and recovery cuts of an update made while a member is
+missing or stale.
 
 ### Where the earlier questions went
 
@@ -470,31 +474,32 @@ shape from points 2, 7, 8, 11 and 16.
    one place, so that a later step can give a block a layout other than
    the one its block pointer's birth implies.
 3. The mapping and its read paths: format, load and validation; the
-   rules of point 16 for missing and stale children, and the repair of
-   returning ones; reads and repairs at the copy, with the copy's own
-   birth for DTL checks; scrub and resilver following the mapping,
-   copies written inside a resilver's window included; blocks with
-   several DVAs; frees at the last reference; zdb's claims. Entries
-   come only from test code until step 6.
+   rules of point 16 for the mapping when children are missing or
+   stale, and its repair on returning and replacement members; reads
+   and repairs at the copy, with the copy's own birth for DTL checks;
+   scrub and resilver following the mapping, copies written inside a
+   resilver's window included; blocks with several DVAs; frees at the
+   last reference; zdb's claims. Entries come only from test code until
+   step 6.
 4. Lifetime and space: the reader exclusion and the no-deferral rule of
    point 8; the pool-level charge and the move's reservation (points 6
    and 12); the estimate and the budget (point 3).
 5. The mover: the rewrite of what a head owns alone, with its BRT and
    nopwrite exceptions (point 2); the mapping of the rest; the traversal
-   (point 13); the keyless ZIL (point 11); the checkpoint rule (point
-   10); the scope and exclusions of point 14. Until step 6 it runs only
-   from test code, so that no supported path writes a mapping before
-   the feature exists.
+   (point 13); the keyless ZIL (point 11), with a journal's rules
+   under point 16; the checkpoint rule (point 10); the scope and
+   exclusions of point 14. Until step 6 it runs only from test code, so
+   that no supported path writes a mapping before the feature exists.
 6. The feature, registered last, with the interface of point 15 that
    starts a move: active before the first incompatible state is durable
    and while any durable state needs it (point 5); the census of point
-   4, its durable record and the rules that withdraw it, the new
-   tolerance and the retirement of the old epoch; the guard on retired
-   physical layouts, applied after a block's mapping is validated and
-   resolved, so that an unchanged block pointer with a birth in the
-   retired epoch is still read, repaired, freed and claimed (point 4);
-   `zpool-features.7` and the man page of the command that starts a
-   move.
+   4, its durable record, the record's rules under point 16 and the
+   rules that withdraw it, the new tolerance and the retirement of the
+   old epoch; the guard on retired physical layouts, applied after a
+   block's mapping is validated and resolved, so that an unchanged block
+   pointer with a birth in the retired epoch is still read, repaired,
+   freed and claimed (point 4); `zpool-features.7` and the man page of
+   the command that starts a move.
 
 Each step comes with its tests: ZTS for the kernel paths, `ztest` on
 RAID-Z, zdb's checks on the pools it leaves, and, from step 3 on, the
