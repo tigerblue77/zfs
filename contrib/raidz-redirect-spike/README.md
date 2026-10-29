@@ -939,3 +939,60 @@ extents back to back in the densest metaslab (`steer`) does not change
 that (gang rate 28 % instead of 27 %).  After `destroy` of the snapshot,
 the hybrid's free space is whole again; the all-redirect mover keeps the
 head's 1820 entries and their tails, and 11 % of new 128K blocks gang.
+
+## fixture_adapter: the hybrid mover on the common parity fixtures
+
+    fixture_adapter <dir> move <hybrid|redirect> [json=FILE]
+    fixture_adapter <dir> report [json=FILE]
+    fixture_adapter <dir> fill [json=FILE]
+
+`fixture_adapter.c` runs `hybrid_probe`'s mover on an input of the neutral
+generator agreed in tigerblue77/zfs#2 (`contrib/raidz-parity-fixtures` of
+rdmitry0911/zfs, used unchanged) instead of on its own setup.  `<dir>` is
+the generator's `create` directory: its exported pool `jointfixture`,
+found by scanning `<dir>`, and `objects.txt`.  The adapter includes
+`hybrid_probe.c` and calls its census, redirect, pre-flight, epoch,
+space-settle, fragmentation, fill and gang code; only what names the pool
+(import, export, the head's dataset, `rewrite_head` and the fill loop) is
+restated for `jointfixture`, since `hybrid_probe.c` names its pool with a
+compile-time literal.  No cache file is written outside `<dir>`.
+
+* `move` records, before any move, the inventory of the DVAs born before
+  the epoch (count, allocated and physical bytes: head-owned data, data
+  reached through the snapshot, head-owned metadata, other metadata, the
+  MOS), the time of a census walk alone and of a full scrub; then adds
+  `hybrid_probe`'s parity-2 epoch, runs the pre-flight check and the mover
+  (`hybrid` or all-`redirect`), ends with the census, which must count 0,
+  and exports.  It records the mover's wall time (census to final census),
+  the root vdev's read and write bytes and the txgs synced during the move,
+  the table's entries and bytes on disk (log and block-pointer ZAP), the
+  kept sectors (each live entry's `rde_old_reserved`, reached from the
+  block pointers with `vdev_raidz_redirect_get_live()`), and the heap:
+  `mallinfo2()` `uordblks`, sampled every 10 ms by a thread, at idle after
+  the import, at its peak during the move and at the end, and `getrusage()`
+  maxrss.  The heap includes the census's own arrays (`scratch_bytes`,
+  about 39 MiB) and libzpool's caches, the ARC included.
+* `report` imports read-only and records the table, its kept sectors and
+  the heap after a cold import.
+* `fill` runs `hybrid_probe`'s fill (128K writes until ENOSPC three times
+  in a row, the charge against "available", the gang rate of the new
+  blocks) on a writable copy of an input.
+
+The generator enables only `raidz_parity_epochs`.  `dmu_buf_will_rewrite()`
+activates `feature@physical_rewrite` (and `extensible_dataset`, which it
+needs), so `move hybrid` enables them first, as `zpool set
+feature@physical_rewrite=enabled` would: without them the first sync of a
+rewritten block fails `VERIFY3U(feature_get_refcount(...), !=, ENOTSUP)` in
+`feature_do_action()`.  `hybrid_probe`'s own pools enable every feature.
+
+Build it with `build-tool.sh` like the other probes, against a debug tree
+and, with `BUILD_TOOL_RELEASE=1`, against a release tree (its libraries
+made with `LIBZPOOL_CPPFLAGS='-UDEBUG -DNDEBUG -UZFS_DEBUG'`):
+
+    sh contrib/raidz-redirect-spike/build-tool.sh <tree> contrib/raidz-redirect-spike/fixture_adapter.c /tmp/fixture_adapter
+    mkdir <dir> && fixture create <dir> 128 30 100
+    LD_LIBRARY_PATH=<tree>/.libs /tmp/fixture_adapter <dir> move hybrid json=<dir>.json
+    LD_LIBRARY_PATH=<tree>/.libs fixture verify <dir>
+
+Exit status: 0 done, 1 a move refused or old DVAs left after the census, 2
+usage, 4 refused by the pre-flight check.
