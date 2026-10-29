@@ -1,0 +1,365 @@
+The hybrid mover of the redirect spike on the common parity fixtures (tigerblue77/zfs#2), userspace only
+
+== environment and sources
+uname -r 6.12.113+deb13-cloud-amd64; nproc 16; Mem:            11Gi       1.2Gi       8.0Gi       2.2Mi       2.9Gi        10Gi; /var/tmp avail 55G
+Sources (each SHA checked after the fetch; all three match):
+  our prototype: tigerblue77/zfs spike/bypass-free 094d2a05f9d568996163718155dad4b47a3e547c (branch head on GitHub
+    still 094d2a05f9 at fetch time)
+  generator:     rdmitry0911/zfs 6319a29f86a9771c62a4c59b029c9c18a839998b, contrib/raidz-parity-fixtures, used unchanged
+                 (its worktree has 0 changes after the task)
+  design:        rdmitry0911/zfs b5b56cce3829ad7bd739d67fbf2ce43c8c3ea8d6, contrib/raidz-parity-joint/DESIGN.md section 4 read
+Adapter commit: 8a9271538de8cee838dc12a31ee2f96cb84676f8 on spike/bypass-fixture-adapter, parent 094d2a05f9,
+  author and committer Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>; 2 files, 948 insertions
+  (contrib/raidz-redirect-spike/fixture_adapter.c new, README.md + the "fixture_adapter" section).
+Trees (worktrees of 094d2a05f9 under /var/tmp/joint-col-1029):
+  D: ./configure --with-config=user --enable-debug; make -j8 (niced). rc=0, 99 s.
+  R: ./configure --with-config=user --disable-debug; make -j8 V=1 LIBZPOOL_CPPFLAGS='-UDEBUG -DNDEBUG -UZFS_DEBUG'.
+     rc=2: only cmd/zdb/zdb.c fails (zdb.c:2861: 'raidz_row_t' has no member named 'rr_offset', a ZFS_DEBUG-only
+     field, as the spike README says of zdb). Continued with make -k, same flags: zdb is the only failed target;
+     libzpool, libzfs_core, libnvpair, librange_tree built. See deviation 1.
+Effective macros (macros/ holds the dumps, from the actual compile rows of module/zfs/vdev_raidz.c in libzpool):
+  D libzpool (vdev_raidz.c, actual compile row) effective: DEBUG=defined ZFS_DEBUG=defined NDEBUG=undef 
+  R libzpool (vdev_raidz.c, actual compile row) effective: DEBUG=undef ZFS_DEBUG=undef NDEBUG=defined 
+  D zfs_config.h '#define ZFS_DEBUG 1' lines: 3
+  R zfs_config.h '#define ZFS_DEBUG 1' lines: 1
+  R build logs: rows with '-UDEBUG -DNDEBUG -UZFS_DEBUG': 279; rows with -DZFS_DEBUG: 0
+  D adapter (build-tool.sh flags) effective: DEBUG=defined ZFS_DEBUG=defined NDEBUG=undef 
+  R adapter (build-tool.sh flags) effective: DEBUG=undef ZFS_DEBUG=undef NDEBUG=defined 
+  Makefile values: D: CFLAGS = -g -O2; DEBUG_CFLAGS = -Werror; DEBUG_CPPFLAGS = -DDEBUG -UNDEBUG; LIBZPOOL_CPPFLAGS = -DDEBUG -UNDEBUG -DZFS_DEBUG;  R: CFLAGS = -g -O2; DEBUG_CFLAGS = ; DEBUG_CPPFLAGS = -UDEBUG -DNDEBUG; LIBZPOOL_CPPFLAGS = -DDEBUG -UNDEBUG -DZFS_DEBUG;  
+  (R's Makefile keeps the Rules.am default LIBZPOOL_CPPFLAGS; the override was given on make's command line.)
+Generator builds (build.py, unchanged): D --profile debug; R --profile release --library-build-log build-R-full.log
+  (build-R.log + build-R-k.log). Both passed; driver macros D {DEBUG, ZFS_DEBUG} R {NDEBUG}; build.json kept as
+  gen-D-build.json, gen-R-build.json.
+Adapter builds: build-tool.sh against D, and BUILD_TOOL_RELEASE=1 against R (-DNDEBUG -UDEBUG -O2; ZFS_DEBUG is not
+  defined there since R's zfs_config.h defines it only under CONFIG_ZFS_DEBUG); both -Werror clean.
+Hashes (hashes.txt):
+  b5e6c8dbc547ef7c68ec85b9b18954a15b329f73c2a3a9cd32e68052a6e474d3  D/contrib/raidz-redirect-spike/fixture_adapter.c
+  f52397065083b2f5636000272762ea40354972a0221407ca4014285ab14cf8a8  D/contrib/raidz-redirect-spike/hybrid_probe.c
+  01e6f55bd630e7e2c0b547231ecbf10d19301e745e305d64b4b8e62a30656fca  bin/fixture_adapter-D
+  4d3cd2dfa6bb0525777f018480cb543162dfc57133634b5dd3092736aa6e5e73  bin/fixture_adapter-R
+  2e62c5ff0797a4195513c3ef356f93aa4987cab7638db41d2ed930a4fabb30d0  gen-D/fixture
+  954f145380f371273449c84ebf450c415c4397d931972b3dd8d7a56786c97753  gen-R/fixture
+  d3feb1aa03b6fbc7069ddbd78ee98917b1771486cadf5b55a11953a6c117ee20  D/.libs/libzpool.so.7.0.0
+  c03ec245d537c5db78f58c8a378a4e842736036e00148f1184c9153d5fd411c6  R/.libs/libzpool.so.7.0.0
+  dc655a0c6c9dfcd9583a6f7dc3f2fe3deb67d303fc2575209707e84488589398  fixtures/contrib/raidz-parity-fixtures/fixture.c
+  c8c470871b2a2d50eb677b0c49917cbaffc3b50f0224eb383525065c545aa648  fixtures/contrib/raidz-parity-fixtures/build.py
+  b21c647a11101a3da5ba535829577cc493571b3b1f0ba10de97936447dd0452d  fixtures/contrib/raidz-parity-fixtures/run.py
+Settings: generator default payload (100 x 128 KiB = 12.5 MiB logical), five 256 MiB sparse members, raidz1,
+  ashift 12, compression off; userland ARC at its default (arc_c_max 5164007424); every run under nice -n 10
+  ionice -c3 (this VM's rule); no kernel module, no pool on a real device.
+
+== protocol as run
+8 cases (retained 0, 10, 30, 100 % x 128 and 16 KiB) x 2 modes x 3 runs x 2 trees = 96 runs, R first then D, modes
+alternated within each case (run 1 and 3: hybrid then redirect; run 2: redirect then hybrid). Each run:
+  0. fixture create DIR <rec> <pct> 100 in a fresh DIR (runs/<tree>-r<rec>-p<pct>-<mode>-<n>);
+  1. fixture_adapter DIR move <mode>: import, inventory, census walk alone, scrub, parity-2 epoch, pre-flight,
+     mover, census (must be 0), export;
+  2. fixture verify DIR (cold, read-only); its VERIFY sha256 lines also compared with run.py's own expected_sha()
+     (imported unchanged);
+  3. fixture_adapter DIR report (read-only import): table entries, bytes, kept sectors, heap after a cold import;
+  4. fixture drop-retained DIR; 5. report again; 6. fixture verify DIR again;
+  7. D only: fill (hybrid_probe's ENOSPC and gang check) on a sparse copy of DIR taken after step 6.
+Mover wall time = from the move's census to its final census and txg sync (hybrid_probe's "migration, census
+included"); I/O and txgs = root vdev_stat and last synced txg deltas over the same window.
+Heap = mallinfo2().uordblks sampled every 10 ms (>= 147 samples per move); glibc serves the census's own arrays
+(scratch_bytes = 40894464, 39 MiB) by mmap, so they appear in hblkhd, not uordblks: the "peak+mmap" column adds
+hblkhd. Both include libzpool's caches (ARC, dbufs).
+
+== verify and drop-retained results
+96 of 96 runs completed every step; no stop condition was hit in the runs.
+  move: pre-flight accepted all 96 (error 0); refused DVAs 0; census after the move 0 in all 96.
+  scrub before the move: finished with 0 errors in all 96.
+  verify after the move: PASS in 96/96, C data comparison and sha256 = Python expectation (head, and @retained).
+  drop-retained: PASS in 96/96 (head sha256 as expected).
+  verify after drop-retained: PASS in 96/96.
+  read-only reports: 0 damaged entries; cold-import entry count = the count right after the move in 96/96; the
+    entries reached from block pointers = the table's count, after the move and in both reports, in 96/96.
+  fill (D, 48): ENOSPC reached, pool not suspended, charged/available within 0.97-1.03 in 48/48.
+Table entries left after drop-retained (identical over the 3 runs, on R and on D):
+  case        hybrid  redirect
+  128K 0%     0       116
+  128K 10%    0       106
+  128K 30%    0       86
+  128K 100%   14      14
+  16K 0%      0       816
+  16K 10%     0       736
+  16K 30%     0       576
+  16K 100%    14      14
+  At 0 % (no snapshot) the hybrid rewrote all 100 (128K) or 800 (16K) data blocks and left no table, as expected;
+  the redirect mover made 116 or 816 entries, none freed by drop-retained (there is no snapshot to drop).
+  At 100 % the head has no live payload, so the hybrid rewrote nothing: its census round 1 redirected 14 head
+  metadata DVAs, giving the same 130/830 entries as all-redirect; the 14 entries left after drop-retained in both
+  modes are those head metadata blocks, which the snapshot's deletion does not free.
+  The table's on-disk bytes do not shrink with its entries after drop-retained (e.g. 128K 10 % hybrid: 0 entries,
+  115.0 KiB): the log keeps the REMOVE records, and the condense threshold (twice the entries plus 65536 records)
+  is not reached at this size. Reported, not fixed.
+
+== tables (median [min-max] over the 3 runs; one block per tree)
+== tree R
+-- inventory of old-epoch DVAs before the move, tree R: median [min-max] over the runs
+  case       mode      n  head_data  head_data_KiB  snap_data  snap_data_KiB  head_meta  head_meta_KiB  other_meta  other_meta_KiB  mos            mos_KiB           gang
+  128K 0%    hybrid    3  100        16000          0          0              16         224            0           0               168 [165-168]  1368 [1344-1368]  0   
+  128K 0%    redirect  3  100        16000          0          0              16         224            0           0               168            1368              0   
+  128K 10%   hybrid    3  90         14400          10         1600           16         224            16          224             171 [171-174]  1416 [1416-1440]  0   
+  128K 10%   redirect  3  90         14400          10         1600           16         224            16          224             174            1440              0   
+  128K 30%   hybrid    3  70         11200          30         4800           16         224            16          224             174            1440              0   
+  128K 30%   redirect  3  70         11200          30         4800           16         224            16          224             174            1440              0   
+  128K 100%  hybrid    3  0          0              100        16000          14         192            16          224             174            1440              0   
+  128K 100%  redirect  3  0          0              100        16000          14         192            16          224             174            1440              0   
+  16K 0%     hybrid    3  800        19200          0          0              16         304 [288-304]  0           0               165 [165-168]  1344 [1344-1368]  0   
+  16K 0%     redirect  3  800        19200          0          0              16         304 [288-304]  0           0               168 [165-168]  1368 [1344-1368]  0   
+  16K 10%    hybrid    3  720        17280          80         1920           16         288            16          224             174 [171-174]  1440 [1416-1440]  0   
+  16K 10%    redirect  3  720        17280          80         1920           16         288            16          224             174 [171-174]  1440 [1416-1440]  0   
+  16K 30%    hybrid    3  560        13440          240        5760           16         272            16          240             171 [171-174]  1416 [1416-1440]  0   
+  16K 30%    redirect  3  560        13440          240        5760           16         272            16          240             171 [171-174]  1416 [1416-1440]  0   
+  16K 100%   hybrid    3  0          0              800        19200          14         192            16          288             174            1440              0   
+  16K 100%   redirect  3  0          0              800        19200          14         192            16          288             171 [171-174]  1416 [1416-1440]  0   
+
+-- mover time, I/O and walks, tree R: median [min-max] over the runs
+  case       mode      n  mover_s              redirect_s           rewrite_s            read_MiB             write_MiB            txgs  census_walk_s           scrub_s            
+  128K 0%    hybrid    3  0.082 [0.082-0.092]  0.000 [0.000-0.000]  0.069 [0.069-0.078]  12.50                23.40 [23.37-23.43]  6     0.0043 [0.0042-0.0043]  0.101 [0.094-0.106]
+  128K 0%    redirect  3  0.344 [0.343-0.352]  0.331 [0.329-0.339]  0.000                12.62                23.42 [23.38-23.45]  4     0.0043 [0.0042-0.0047]  0.097 [0.092-0.100]
+  128K 10%   hybrid    3  0.144 [0.137-0.148]  0.060 [0.058-0.061]  0.063 [0.059-0.067]  12.61                25.18 [25.12-25.18]  7     0.0064 [0.0063-0.0071]  0.106 [0.097-0.109]
+  128K 10%   redirect  3  0.389 [0.379-0.389]  0.368 [0.359-0.369]  0.000                12.72                25.31 [25.16-25.34]  5     0.0065 [0.0064-0.0067]  0.102 [0.102-0.118]
+  128K 30%   hybrid    3  0.186 [0.185-0.188]  0.112 [0.112-0.114]  0.055 [0.054-0.056]  12.61                25.29 [25.21-25.32]  7     0.0059 [0.0059-0.0061]  0.100 [0.098-0.101]
+  128K 30%   redirect  3  0.395 [0.381-0.400]  0.376 [0.361-0.377]  0.000                12.72                25.24 [25.16-25.38]  5     0.0070 [0.0060-0.0085]  0.106 [0.097-0.123]
+  128K 100%  hybrid    3  0.371 [0.369-0.378]  0.313 [0.309-0.314]  0.004 [0.003-0.004]  12.71                25.45 [25.41-25.45]  8     0.0056 [0.0055-0.0064]  0.099 [0.099-0.122]
+  128K 100%  redirect  3  0.370 [0.363-0.382]  0.350 [0.344-0.363]  0.000                12.71                25.17 [25.10-25.20]  5     0.0058 [0.0057-0.0058]  0.098 [0.095-0.101]
+  16K 0%     hybrid    3  0.167 [0.160-0.196]  0.000                0.153 [0.148-0.184]  12.50                30.40 [30.40-30.50]  6     0.0042 [0.0042-0.0062]  0.132 [0.130-0.153]
+  16K 0%     redirect  3  2.364 [2.309-2.366]  2.348 [2.293-2.353]  0.000                12.67 [12.66-12.67]  43.89 [43.78-44.04]  10    0.0042 [0.0040-0.0049]  0.129 [0.128-0.135]
+  16K 10%    hybrid    3  0.416 [0.409-0.423]  0.234 [0.231-0.269]  0.158 [0.134-0.163]  12.61                32.46 [32.40-32.50]  7     0.0065 [0.0057-0.0084]  0.137 [0.126-0.153]
+  16K 10%    redirect  3  2.403 [2.347-2.450]  2.381 [2.327-2.431]  0.000                12.77                44.44 [44.00-44.92]  10    0.0065 [0.0061-0.0068]  0.136 [0.126-0.136]
+  16K 30%    hybrid    3  0.796 [0.763-0.815]  0.647 [0.638-0.652]  0.127 [0.107-0.143]  12.62                34.36 [34.22-34.46]  8     0.0063 [0.0062-0.0065]  0.135 [0.127-0.141]
+  16K 30%    redirect  3  2.396 [2.310-2.459]  2.377 [2.289-2.439]  0.000                12.77                44.39 [44.30-44.77]  10    0.0066 [0.0064-0.0070]  0.137 [0.128-0.155]
+  16K 100%   hybrid    3  2.224 [2.189-2.267]  2.165 [2.131-2.211]  0.003 [0.003-0.003]  12.76                46.02 [46.02-46.37]  14    0.0060 [0.0058-0.0076]  0.135 [0.132-0.140]
+  16K 100%   redirect  3  2.190 [2.177-2.224]  2.172 [2.159-2.204]  0.000                12.76                44.18 [43.86-44.56]  10    0.0061 [0.0058-0.0062]  0.140 [0.135-0.140]
+
+-- what the mover did, the table, kept sectors, tree R: median [min-max] over the runs
+  case       mode      n  redirected  rewritten  round1  entries  table_KiB               kept_sectors      kept_KiB          extra_KiB  census_left
+  128K 0%    hybrid    3  0           100        -       0        0.0                     0                 0                 0          0          
+  128K 0%    redirect  3  116         0          -       116      230.0 [230.0-259.0]     120               480               6192       0          
+  128K 10%   hybrid    3  26          90         -       26       115.0                   30                120               792        0          
+  128K 10%   redirect  3  132         0          -       132      316.5                   140               560               6384       0          
+  128K 30%   hybrid    3  46          70         -       46       144.0                   50                200               1992       0          
+  128K 30%   redirect  3  132         0          -       132      316.5 [287.5-316.5]     140               560               6384       0          
+  128K 100%  hybrid    3  130         0          14      130      316.5 [287.5-316.5]     138               552               6360       0          
+  128K 100%  redirect  3  130         0          -       130      287.5 [287.5-316.5]     138               552               6360       0          
+  16K 0%     hybrid    3  0           800        -       0        0.0                     0                 0                 0          0          
+  16K 0%     redirect  3  816         0          -       816      1121.5 [1064.0-1150.5]  2422 [2422-2424]  9688 [9688-9696]  19416      0          
+  16K 10%    hybrid    3  96          720        -       96       230.0                   260               1040              2112       0          
+  16K 10%    redirect  3  832         0          -       832      1064.0 [1035.5-1121.5]  2444              9776              19608      0          
+  16K 30%    hybrid    3  256         560        -       256      460.0 [431.5-460.0]     744               2976              5976       0          
+  16K 30%    redirect  3  832         0          -       832      1064.0 [1064.0-1121.5]  2444              9776              19632      0          
+  16K 100%   hybrid    3  830         0          14      830      1121.5 [1093.0-1121.5]  2442              9768              19584      0          
+  16K 100%   redirect  3  830         0          -       830      1121.5                  2442              9768              19584      0          
+
+-- heap (mallinfo2 uordblks; peak+mmap adds hblkhd) and maxrss, tree R: median [min-max] over the runs
+  case       mode      n  idle_MiB          peak_move_MiB        end_MiB              peak+mmap_MiB        maxrss_MiB         
+  128K 0%    hybrid    3  3.09 [3.08-3.10]  28.17 [27.14-33.49]  16.25 [16.24-16.26]  76.57 [75.54-81.89]  121.0 [118.9-121.2]
+  128K 0%    redirect  3  3.10 [3.10-3.10]  17.22 [17.20-17.36]  3.81 [3.80-3.96]     65.63 [65.60-65.76]  66.4 [65.8-67.2]   
+  128K 10%   hybrid    3  3.08 [3.07-3.10]  25.52 [22.85-26.97]  15.25 [15.23-15.39]  73.92 [71.26-75.37]  115.0 [114.9-115.4]
+  128K 10%   redirect  3  3.10 [3.09-3.10]  16.90 [16.87-17.01]  3.92 [3.92-3.92]     65.30 [65.28-65.41]  67.6 [66.6-68.2]   
+  128K 30%   hybrid    3  3.10 [3.10-3.10]  22.83 [20.56-26.89]  12.89 [12.74-12.91]  71.23 [68.96-75.29]  96.7 [96.7-101.1]  
+  128K 30%   redirect  3  3.15 [3.14-3.16]  16.87 [16.84-16.89]  3.91 [3.90-3.92]     65.27 [65.25-65.29]  67.4 [67.3-67.6]   
+  128K 100%  hybrid    3  3.10 [3.09-3.10]  17.34 [17.33-17.35]  3.96 [3.94-3.97]     65.74 [65.73-65.75]  67.5 [67.0-67.8]   
+  128K 100%  redirect  3  3.10 [3.10-3.11]  17.24 [17.16-17.26]  3.91 [3.91-4.05]     65.64 [65.56-65.67]  67.2 [66.1-67.3]   
+  16K 0%     hybrid    3  3.07 [3.07-3.10]  37.00 [29.17-38.71]  16.50 [16.50-16.53]  85.40 [77.57-87.11]  127.0 [118.7-131.0]
+  16K 0%     redirect  3  3.10 [3.07-3.10]  7.16 [7.13-7.41]     4.25 [4.24-4.28]     55.56 [55.54-55.81]  55.9 [55.9-56.8]   
+  16K 10%    hybrid    3  3.09 [3.08-3.10]  28.26 [28.06-28.99]  15.54 [15.53-15.55]  76.67 [76.46-77.39]  112.2 [112.1-120.6]
+  16K 10%    redirect  3  3.10 [3.08-3.11]  7.35 [7.22-7.86]     4.31 [4.31-4.31]     55.75 [55.62-56.26]  56.6 [56.2-57.7]   
+  16K 30%    hybrid    3  3.08 [3.08-3.15]  22.60 [22.46-27.27]  13.07 [13.06-13.09]  71.00 [70.86-75.67]  99.7 [98.7-106.6]  
+  16K 30%    redirect  3  3.08 [3.08-3.15]  7.23 [7.23-7.25]     4.32 [4.30-4.32]     55.64 [55.64-55.65]  56.9 [56.7-57.1]   
+  16K 100%   hybrid    3  3.10 [3.10-3.13]  7.29 [7.29-7.29]     4.38 [4.38-4.39]     55.69 [55.69-55.69]  56.8 [56.1-58.4]   
+  16K 100%   redirect  3  3.08 [3.07-3.10]  7.22 [7.21-7.24]     4.31 [4.31-4.33]     55.62 [55.62-55.64]  56.5 [55.9-58.2]   
+
+-- cold read-only import, then after drop-retained, tree R: median [min-max] over the runs
+  case       mode      n  cold_entries  cold_table_KiB          cold_kept         cold_heap_MiB     cold_rss_MiB      drop_entries  drop_tombs  drop_table_KiB          drop_heap_MiB   
+  128K 0%    hybrid    3  0             0.0                     0                 2.16 [2.16-2.18]  48.4 [48.2-48.6]  0             0           0.0                     2.18 [2.17-2.18]
+  128K 0%    redirect  3  116           230.0 [230.0-259.0]     120               2.32 [2.31-2.48]  48.4 [48.3-48.7]  116           0           230.0 [230.0-259.0]     2.32 [2.32-2.48]
+  128K 10%   hybrid    3  26            115.0                   30                2.31 [2.31-2.47]  48.7 [48.5-48.8]  0             0           115.0                   2.50 [2.50-2.66]
+  128K 10%   redirect  3  132           316.5                   140               2.31 [2.31-2.33]  48.9 [48.4-48.9]  106           0           316.5                   2.33 [2.32-2.33]
+  128K 30%   hybrid    3  46            144.0                   50                2.47 [2.31-2.47]  48.8 [48.8-49.3]  0             0           115.0                   2.66 [2.50-2.66]
+  128K 30%   redirect  3  132           316.5 [287.5-316.5]     140               2.32 [2.31-2.32]  48.7 [48.4-49.1]  86            0           316.5 [287.5-316.5]     2.33 [2.32-2.33]
+  128K 100%  hybrid    3  130           316.5 [287.5-316.5]     138               2.31 [2.31-2.32]  48.7 [48.5-48.9]  14            0           316.5 [287.5-316.5]     2.50 [2.50-2.50]
+  128K 100%  redirect  3  130           287.5 [287.5-316.5]     138               2.32 [2.31-2.47]  48.8 [48.5-49.1]  14            0           287.5 [287.5-316.5]     2.33 [2.32-2.48]
+  16K 0%     hybrid    3  0             0.0                     0                 2.16 [2.16-2.16]  48.2 [48.1-48.5]  0             0           0.0                     2.18 [2.17-2.18]
+  16K 0%     redirect  3  816           1121.5 [1064.0-1150.5]  2422 [2422-2424]  2.34 [2.34-2.35]  48.5 [48.2-48.5]  816           0           1121.5 [1064.0-1150.5]  2.36 [2.36-2.36]
+  16K 10%    hybrid    3  96            230.0                   260               2.31 [2.31-2.31]  48.8 [48.4-49.1]  0             0           144.0                   2.50 [2.50-2.50]
+  16K 10%    redirect  3  832           1064.0 [1035.5-1121.5]  2444              2.35 [2.34-2.36]  49.0 [48.9-49.2]  736           0           1064.0 [1035.5-1121.5]  2.36 [2.36-2.36]
+  16K 30%    hybrid    3  256           460.0 [431.5-460.0]     744               2.32 [2.32-2.33]  48.8 [48.8-49.1]  0             0           144.0                   2.50 [2.50-2.50]
+  16K 30%    redirect  3  832           1064.0 [1064.0-1121.5]  2444              2.35 [2.34-2.36]  48.8 [48.6-49.2]  576           0           1064.0 [1064.0-1121.5]  2.35 [2.35-2.35]
+  16K 100%   hybrid    3  830           1121.5 [1093.0-1121.5]  2442              2.35 [2.34-2.35]  49.0 [48.7-49.0]  14            0           949.0 [862.5-1006.5]    2.51 [2.51-2.51]
+  16K 100%   redirect  3  830           1121.5                  2442              2.35 [2.34-2.36]  48.7 [48.0-49.3]  14            0           862.5 [776.5-920.0]     2.33 [2.33-2.33]
+
+== tree D
+-- inventory of old-epoch DVAs before the move, tree D: median [min-max] over the runs
+  case       mode      n  head_data  head_data_KiB  snap_data  snap_data_KiB  head_meta  head_meta_KiB  other_meta  other_meta_KiB  mos            mos_KiB           gang
+  128K 0%    hybrid    3  100        16000          0          0              16         224            0           0               168 [165-168]  1368 [1344-1368]  0   
+  128K 0%    redirect  3  100        16000          0          0              16         224            0           0               168 [165-168]  1368 [1344-1368]  0   
+  128K 10%   hybrid    3  90         14400          10         1600           16         224            16          224             171 [171-174]  1416 [1416-1440]  0   
+  128K 10%   redirect  3  90         14400          10         1600           16         224            16          224             174 [171-174]  1440 [1416-1440]  0   
+  128K 30%   hybrid    3  70         11200          30         4800           16         224            16          224             171 [171-174]  1416 [1416-1440]  0   
+  128K 30%   redirect  3  70         11200          30         4800           16         224            16          224             171 [171-174]  1416 [1416-1440]  0   
+  128K 100%  hybrid    3  0          0              100        16000          14         192            16          224             174 [171-174]  1440 [1416-1440]  0   
+  128K 100%  redirect  3  0          0              100        16000          14         192            16          224             174            1440              0   
+  16K 0%     hybrid    3  800        19200          0          0              16         288            0           0               168            1368              0   
+  16K 0%     redirect  3  800        19200          0          0              16         288 [288-304]  0           0               168 [165-168]  1368 [1344-1368]  0   
+  16K 10%    hybrid    3  720        17280          80         1920           16         288            16          224             174            1440              0   
+  16K 10%    redirect  3  720        17280          80         1920           16         288            16          224             174            1440              0   
+  16K 30%    hybrid    3  560        13440          240        5760           16         272            16          240             174            1440              0   
+  16K 30%    redirect  3  560        13440          240        5760           16         272            16          240             174 [171-174]  1440 [1416-1440]  0   
+  16K 100%   hybrid    3  0          0              800        19200          14         192            16          288             174 [171-174]  1440 [1416-1440]  0   
+  16K 100%   redirect  3  0          0              800        19200          14         192            16          288 [288-304]   174            1440              0   
+
+-- mover time, I/O and walks, tree D: median [min-max] over the runs
+  case       mode      n  mover_s              redirect_s           rewrite_s            read_MiB             write_MiB            txgs  census_walk_s           scrub_s            
+  128K 0%    hybrid    3  0.097 [0.090-0.126]  0.000 [0.000-0.000]  0.082 [0.076-0.113]  12.50                23.36 [23.33-23.43]  6     0.0044 [0.0040-0.0045]  0.109 [0.100-0.116]
+  128K 0%    redirect  3  0.388 [0.387-0.395]  0.373 [0.369-0.377]  0.000                12.62                23.38 [23.35-23.45]  4     0.0046 [0.0044-0.0051]  0.107 [0.104-0.112]
+  128K 10%   hybrid    3  0.162 [0.156-0.179]  0.063 [0.063-0.071]  0.078 [0.072-0.089]  12.61                25.18 [25.18-25.21]  7     0.0071 [0.0067-0.0072]  0.111 [0.105-0.120]
+  128K 10%   redirect  3  0.421 [0.412-0.436]  0.398 [0.392-0.413]  0.000                12.72                25.23 [25.16-25.34]  5     0.0067 [0.0066-0.0069]  0.109 [0.108-0.114]
+  128K 30%   hybrid    3  0.213 [0.204-0.229]  0.125 [0.122-0.145]  0.062 [0.061-0.063]  12.61                25.21                7     0.0075 [0.0067-0.0085]  0.104 [0.101-0.110]
+  128K 30%   redirect  3  0.412 [0.396-0.447]  0.392 [0.377-0.426]  0.000                12.72                25.20 [24.99-25.20]  5     0.0069 [0.0064-0.0095]  0.106 [0.104-0.126]
+  128K 100%  hybrid    3  0.392 [0.385-0.398]  0.329 [0.321-0.332]  0.004 [0.004-0.004]  12.71                25.52 [25.41-25.60]  8     0.0060 [0.0059-0.0063]  0.105 [0.099-0.111]
+  128K 100%  redirect  3  0.386 [0.383-0.387]  0.365 [0.362-0.366]  0.000                12.71                25.24 [25.24-25.32]  5     0.0060 [0.0059-0.0063]  0.104 [0.099-0.113]
+  16K 0%     hybrid    3  0.164 [0.157-0.174]  0.000 [0.000-0.000]  0.149 [0.143-0.161]  12.50                30.39 [30.39-30.46]  6     0.0043 [0.0042-0.0043]  0.143 [0.143-0.156]
+  16K 0%     redirect  3  2.507 [2.438-2.567]  2.491 [2.424-2.552]  0.000                12.66 [12.66-12.67]  43.90 [43.64-43.94]  10    0.0048 [0.0044-0.0067]  0.145 [0.143-0.151]
+  16K 10%    hybrid    3  0.436 [0.434-0.503]  0.244 [0.243-0.266]  0.171 [0.149-0.230]  12.61                32.46 [32.39-32.53]  7     0.0067 [0.0065-0.0075]  0.139 [0.135-0.142]
+  16K 10%    redirect  3  2.479 [2.436-2.581]  2.457 [2.413-2.560]  0.000                12.77                44.57 [44.21-45.03]  10    0.0074 [0.0069-0.0081]  0.140 [0.133-0.142]
+  16K 30%    hybrid    3  0.871 [0.839-0.941]  0.736 [0.674-0.738]  0.146 [0.114-0.181]  12.62                34.46 [34.36-34.50]  8     0.0064 [0.0063-0.0071]  0.142 [0.140-0.159]
+  16K 30%    redirect  3  2.449 [2.433-2.482]  2.428 [2.410-2.461]  0.000                12.77                44.45 [44.39-44.80]  10    0.0067 [0.0066-0.0069]  0.152 [0.146-0.168]
+  16K 100%   hybrid    3  2.406 [2.392-2.453]  2.342 [2.326-2.383]  0.003 [0.003-0.003]  12.76                46.12 [45.98-46.33]  14    0.0066 [0.0061-0.0067]  0.140 [0.135-0.141]
+  16K 100%   redirect  3  2.346 [2.271-2.371]  2.317 [2.251-2.351]  0.000                12.76 [12.76-12.77]  44.46 [44.14-44.66]  10    0.0068 [0.0063-0.0090]  0.147 [0.142-0.150]
+
+-- what the mover did, the table, kept sectors, tree D: median [min-max] over the runs
+  case       mode      n  redirected  rewritten  round1  entries  table_KiB               kept_sectors      kept_KiB          extra_KiB  census_left
+  128K 0%    hybrid    3  0           100        -       0        0.0                     0                 0                 0          0          
+  128K 0%    redirect  3  116         0          -       116      230.0 [230.0-259.0]     120               480               6192       0          
+  128K 10%   hybrid    3  26          90         -       26       115.0                   30                120               792        0          
+  128K 10%   redirect  3  132         0          -       132      316.5 [287.5-345.0]     140               560               6384       0          
+  128K 30%   hybrid    3  46          70         -       46       144.0                   50                200               1992       0          
+  128K 30%   redirect  3  132         0          -       132      316.5 [287.5-345.0]     140               560               6384       0          
+  128K 100%  hybrid    3  130         0          14      130      287.5 [287.5-316.5]     138               552               6360       0          
+  128K 100%  redirect  3  130         0          -       130      316.5 [287.5-316.5]     138               552               6360       0          
+  16K 0%     hybrid    3  0           800        -       0        0.0                     0                 0                 0          0          
+  16K 0%     redirect  3  816         0          -       816      1121.5 [1093.0-1150.5]  2424 [2422-2424]  9696 [9688-9696]  19416      0          
+  16K 10%    hybrid    3  96          720        -       96       230.0                   260               1040              2112       0          
+  16K 10%    redirect  3  832         0          -       832      1121.5 [1093.0-1150.5]  2444              9776              19608      0          
+  16K 30%    hybrid    3  256         560        -       256      489.0 [489.0-517.5]     744               2976              5976       0          
+  16K 30%    redirect  3  832         0          -       832      1064.0 [1064.0-1121.5]  2444              9776              19632      0          
+  16K 100%   hybrid    3  830         0          14      830      1064.0                  2442              9768              19584      0          
+  16K 100%   redirect  3  830         0          -       830      1121.5 [1064.0-1150.5]  2442 [2440-2442]  9768 [9760-9768]  19584      0          
+
+-- heap (mallinfo2 uordblks; peak+mmap adds hblkhd) and maxrss, tree D: median [min-max] over the runs
+  case       mode      n  idle_MiB          peak_move_MiB        end_MiB              peak+mmap_MiB        maxrss_MiB         
+  128K 0%    hybrid    3  3.21 [3.18-3.21]  35.89 [26.15-36.01]  16.34 [16.31-16.50]  84.29 [74.55-84.41]  121.7 [120.4-123.0]
+  128K 0%    redirect  3  3.21 [3.18-3.21]  17.22 [17.22-17.35]  3.84 [3.83-3.96]     65.62 [65.62-65.75]  67.6 [67.4-68.9]   
+  128K 10%   hybrid    3  3.19 [3.19-3.21]  30.97 [27.20-32.66]  15.29 [15.29-15.32]  79.37 [75.60-81.06]  115.3 [114.8-115.5]
+  128K 10%   redirect  3  3.20 [3.19-3.21]  16.89 [16.86-17.05]  3.94 [3.90-3.95]     65.30 [65.26-65.45]  67.8 [67.6-68.1]   
+  128K 30%   hybrid    3  3.19 [3.19-3.21]  21.36 [18.34-22.47]  12.77 [12.76-12.80]  69.76 [66.74-70.87]  97.7 [97.3-101.6]  
+  128K 30%   redirect  3  3.19 [3.19-3.21]  16.91 [16.89-16.95]  3.93 [3.91-3.94]     65.31 [65.30-65.35]  67.6 [67.2-68.0]   
+  128K 100%  hybrid    3  3.21 [3.19-3.21]  17.39 [17.37-17.55]  3.97 [3.96-4.14]     65.80 [65.77-65.95]  68.7 [68.0-69.0]   
+  128K 100%  redirect  3  3.21 [3.21-3.22]  17.14 [17.12-17.15]  3.94 [3.92-3.94]     65.54 [65.52-65.55]  67.3 [67.3-67.8]   
+  16K 0%     hybrid    3  3.20 [3.20-3.21]  33.67 [32.83-33.69]  16.78 [16.77-16.78]  82.08 [81.23-82.09]  124.1 [122.8-124.1]
+  16K 0%     redirect  3  3.21 [3.20-3.22]  7.21 [7.20-7.22]     4.27 [4.27-4.30]     55.62 [55.60-55.62]  57.0 [56.8-58.5]   
+  16K 10%    hybrid    3  3.24 [3.21-3.25]  28.79 [27.33-36.91]  15.77 [15.75-15.92]  77.20 [75.73-85.31]  118.2 [113.4-123.3]
+  16K 10%    redirect  3  3.21 [3.21-3.22]  7.27 [7.25-7.28]     4.35 [4.35-4.39]     55.67 [55.65-55.68]  57.5 [56.8-60.8]   
+  16K 30%    hybrid    3  3.21 [3.21-3.22]  23.24 [23.03-23.69]  13.27 [13.26-13.27]  71.64 [71.43-72.10]  100.8 [100.3-103.2]
+  16K 30%    redirect  3  3.21 [3.18-3.21]  7.29 [7.28-7.82]     4.35 [4.34-4.46]     55.70 [55.69-56.22]  57.2 [57.1-57.4]   
+  16K 100%   hybrid    3  3.22 [3.19-3.22]  7.33 [7.31-7.33]     4.38 [4.36-4.38]     55.73 [55.71-55.74]  57.4 [56.7-57.6]   
+  16K 100%   redirect  3  3.21 [3.21-3.22]  7.27 [7.27-7.54]     4.34 [4.31-4.37]     55.68 [55.67-55.94]  57.8 [57.5-57.9]   
+
+-- cold read-only import, then after drop-retained, tree D: median [min-max] over the runs
+  case       mode      n  cold_entries  cold_table_KiB          cold_kept         cold_heap_MiB     cold_rss_MiB      drop_entries  drop_tombs  drop_table_KiB          drop_heap_MiB   
+  128K 0%    hybrid    3  0             0.0                     0                 2.25 [2.23-2.41]  48.8 [48.7-48.9]  0             0           0.0                     2.25 [2.25-2.41]
+  128K 0%    redirect  3  116           230.0 [230.0-259.0]     120               2.39 [2.38-2.54]  49.0 [48.8-49.3]  116           0           230.0 [230.0-259.0]     2.40 [2.40-2.55]
+  128K 10%   hybrid    3  26            115.0                   30                2.38 [2.38-2.38]  49.5 [49.4-49.5]  0             0           115.0                   2.58 [2.58-2.58]
+  128K 10%   redirect  3  132           316.5 [287.5-345.0]     140               2.39 [2.38-2.40]  49.5 [49.4-49.5]  106           0           316.5 [287.5-345.0]     2.41 [2.40-2.41]
+  128K 30%   hybrid    3  46            144.0                   50                2.39 [2.38-2.39]  49.7 [49.2-49.7]  0             0           115.0                   2.57 [2.57-2.58]
+  128K 30%   redirect  3  132           316.5 [287.5-345.0]     140               2.38 [2.38-2.38]  50.0 [49.4-50.2]  86            0           316.5 [287.5-345.0]     2.40 [2.40-2.40]
+  128K 100%  hybrid    3  130           287.5 [287.5-316.5]     138               2.40 [2.39-2.56]  49.4 [49.2-49.5]  14            0           287.5 [287.5-316.5]     2.58 [2.58-2.73]
+  128K 100%  redirect  3  130           316.5 [287.5-316.5]     138               2.40 [2.40-2.40]  49.3 [49.2-49.4]  14            0           316.5 [287.5-316.5]     2.40 [2.40-2.41]
+  16K 0%     hybrid    3  0             0.0                     0                 2.23 [2.23-2.25]  48.9 [48.6-49.0]  0             0           0.0                     2.26 [2.25-2.26]
+  16K 0%     redirect  3  816           1121.5 [1093.0-1150.5]  2424 [2422-2424]  2.42 [2.41-2.43]  49.3 [49.1-49.5]  816           0           1121.5 [1093.0-1150.5]  2.44 [2.44-2.44]
+  16K 10%    hybrid    3  96            230.0                   260               2.41 [2.40-2.54]  49.6 [49.5-50.0]  0             0           144.0                   2.58 [2.57-2.73]
+  16K 10%    redirect  3  832           1121.5 [1093.0-1150.5]  2444              2.42 [2.42-2.44]  49.7 [49.7-49.8]  736           0           1121.5 [1093.0-1150.5]  2.43 [2.43-2.44]
+  16K 30%    hybrid    3  256           489.0 [489.0-517.5]     744               2.41 [2.39-2.41]  49.7 [49.6-49.9]  0             0           144.0                   2.58 [2.58-2.58]
+  16K 30%    redirect  3  832           1064.0 [1064.0-1121.5]  2444              2.44 [2.42-2.58]  49.5 [49.2-49.9]  576           0           1064.0 [1064.0-1121.5]  2.44 [2.43-2.59]
+  16K 100%   hybrid    3  830           1064.0                  2442              2.42 [2.42-2.44]  49.7 [49.7-49.8]  14            0           805.0 [747.5-862.5]     2.58 [2.58-2.59]
+  16K 100%   redirect  3  830           1121.5 [1064.0-1150.5]  2442 [2440-2442]  2.44 [2.42-2.44]  49.6 [49.2-49.7]  14            0           862.5 [862.5-920.0]     2.41 [2.40-2.41]
+
+-- post-move fill on a copy (after drop-retained), tree D: median [min-max] over the runs
+  case       mode      n  fill_entries  charged/avail           enospc  new_128K  gang  gang_pct  fill_s          
+  128K 0%    hybrid    3  0             1.0001 [1.0001-1.0002]  4       4888      0     0.00      3.07 [2.81-3.62]
+  128K 0%    redirect  3  116           1.0009 [1.0008-1.0010]  4       4888      0     0.00      2.86 [2.86-2.92]
+  128K 10%   hybrid    3  0             1.0003 [1.0000-1.0003]  4       4896      0     0.00      2.91 [2.86-2.92]
+  128K 10%   redirect  3  106           1.0005 [1.0005-1.0006]  4       4896      0     0.00      2.82 [2.82-2.86]
+  128K 30%   hybrid    3  0             1.0012 [1.0008-1.0012]  4       4920      0     0.00      3.12 [3.02-3.16]
+  128K 30%   redirect  3  86            1.0013 [1.0012-1.0013]  4       4920      0     0.00      2.96 [2.87-2.97]
+  128K 100%  hybrid    3  14            1.0014 [1.0013-1.0014]  4       4992      0     0.00      2.91 [2.76-2.91]
+  128K 100%  redirect  3  14            1.0011                  4       4992      0     0.00      2.86 [2.81-2.91]
+  16K 0%     hybrid    3  0             1.0004 [1.0004-1.0007]  4       4856      0     0.00      2.86 [2.76-2.86]
+  16K 0%     redirect  3  816           1.0013 [1.0012-1.0013]  4       4808      0     0.00      2.86 [2.71-2.86]
+  16K 10%    hybrid    3  0             1.0014 [1.0014-1.0015]  4       4872      0     0.00      2.86 [2.71-2.92]
+  16K 10%    redirect  3  736           1.0009 [1.0008-1.0009]  4       4824      0     0.00      2.81 [2.71-2.86]
+  16K 30%    hybrid    3  0             1.0008 [1.0008-1.0011]  4       4896      0     0.00      2.87 [2.76-3.12]
+  16K 30%    redirect  3  576           1.0001 [1.0000-1.0002]  4       4856      0     0.00      2.91 [2.76-3.02]
+  16K 100%   hybrid    3  14            1.0014 [1.0014-1.0014]  4       4992      0     0.00      3.01 [2.87-3.01]
+  16K 100%   redirect  3  14            1.0012 [1.0012-1.0012]  4       4992      0     0.00      2.86 [2.81-2.96]
+
+Column notes: head_data/snap_data = level-0 DMU_OT_PLAIN_FILE_CONTENTS DVAs, head-owned by hybrid_probe's rule (the
+head's objset, logical birth after its previous snapshot) or reached through the snapshot (snapshot-only by
+construction in these inputs: R is freed from the head); *_KiB columns of the inventory are allocated sizes
+(DVA asize); mos = MOS DVAs, never moved. kept_sectors = the sum of each live entry's rde_old_reserved, in 4 KiB
+sectors (exposed through vdev_raidz_redirect_get_live()); extra = vdev_raidz_redirect_extra(). table_KiB = log +
+block-pointer ZAP, as allocated. For the redirect runs the kept bytes equal the pre-flight's predicted
+rmn_redirect_keep in 48/48.
+
+== development finding before the runs (logs and core kept in dev-findings/1-physical-rewrite)
+The first trial of "move hybrid" on a smoke input (128K, 30 %, D) aborted in the sync thread:
+  VERIFY3U(feature_get_refcount(spa, feature, &refcount), !=, ENOTSUP) failed (95 != 95), zfeature.c:413,
+  feature_do_action(SPA_FEATURE_PHYSICAL_REWRITE, INCR) <- dsl_dataset_activate_feature <- dsl_dataset_sync_done.
+dmu_buf_will_rewrite() (the hybrid's rewrite, as zfs rewrite -P) activates feature@physical_rewrite; the generator
+enables only raidz_parity_epochs (hybrid_probe's own pools enable every feature). The adapter now enables
+physical_rewrite (and extensible_dataset, its dependency) in a sync task before the move in hybrid mode, as zpool set
+feature@physical_rewrite=enabled would, and records it (physical_rewrite_enabled_by_adapter=1 in all 48 hybrid runs;
+it was enabled in none of the inputs). A change the spike could take instead (not made): have the hybrid's rewrite
+path check the feature and refuse or enable it, as the kernel's zfs rewrite -P checks it.
+
+== pending (required by the protocol, not run here)
+  clones: pending (the generator's core has none; the adapter does not handle a clone's own blocks)
+  dedup and BRT sharing: pending (not in the generator's core inputs)
+  keyless encryption with an ACK-bearing ZIL: pending (not in the inputs; hybrid_probe redirects a keyless head)
+  gang and multi-DVA: pending (the inputs have 0 gang DVAs and copies=1)
+  crash cuts: pending (not run on these inputs; crash_probe covers the spike's own fixtures only)
+  too-full pools: pending (all 96 inputs are nearly empty; the pre-flight never refused)
+  readers held across reuse (including no-deferral): pending
+  offline child / return / resilver / replacement: pending
+  kernel: pending (userspace libzpool only)
+
+== deviations from the instructions
+1. R did not build in full: zdb fails without ZFS_DEBUG, as the spike README says. Instead of falling back to D only,
+   I continued R with make -k and the same override; R's build logs hold 279 compile rows with
+   -UDEBUG -DNDEBUG -UZFS_DEBUG and none with -DZFS_DEBUG, and only zdb is missing. R's results stand for a
+   release libzpool without zdb; discard them if R must be a complete build.
+2. A VERIFY in the adapter (above) is a listed stop condition. It happened during development, on a smoke input,
+   before any protocol run; I kept its core and logs, fixed the adapter (it now enables physical_rewrite for the
+   hybrid: a mutation of the input's feature set beyond the epoch), and then ran the protocol.
+3. Not every hybrid_probe path is reused verbatim: hybrid_probe.c is #included and its census, redirect,
+   pre-flight (need_add, preflight, print_need), epoch, space_settle, print_frag, write_range/new_object, watchdog,
+   gang_cb and report_fill are called as they are; import, export, the head's dataset lookup, rewrite_head and the
+   fill loop are restated with the pool name "jointfixture", because hybrid_probe.c names its pool with a
+   compile-time literal ("hyb"). A spike change that would remove the copies (not made): take the pool name as a
+   variable in hybrid_probe.c.
+4. The fill (step 6) ran on a copy taken after drop-retained and verify (the order given), i.e. as hybrid_probe's
+   "destroy" fill; a fill with the snapshot still held was not run. Each fill copy (about 1.1 GB written) was removed
+   once its result was recorded, so that 48 of them would not fill the disk.
+5. The raw-member hashes before and after each read-only verify (run.py's check) were not taken; verify used the
+   generator's binary directly, with its sha256 lines checked against run.py's expected_sha().
+6. All runs and builds ran under nice -n 10 ionice -c3 (this VM's resource rule), timings included.
+7. The commit was pushed from another checkout, unchanged (same SHA).
+
+== final cleanup check
+lsmod zfs/spl: []; /dev/zfs absent; no task process left
+  Filesystem      Size  Used Avail Use% Mounted on
+  /dev/sdb         64G   17G   48G  26% /var/tmp
+  kept: /var/tmp/joint-col-1029 (6.3G: repo, trees D and R, generator builds, 96 inputs), /var/log/joint-col-1029 (148M)
