@@ -405,11 +405,11 @@ stopped() {
 }
 
 tunables() {
-	for p in $TUN; do
-		if [ -e /sys/module/zfs/parameters/$p ]; then
-			printf '%s=%s ' "$p" "$(cat /sys/module/zfs/parameters/$p)"
+	for tp in $TUN; do
+		if [ -e /sys/module/zfs/parameters/$tp ]; then
+			printf '%s=%s ' "$tp" "$(cat /sys/module/zfs/parameters/$tp)"
 		else
-			printf '%s=absent ' "$p"
+			printf '%s=absent ' "$tp"
 		fi
 	done
 }
