@@ -366,7 +366,11 @@ redirect.
 **14. Scope, expansion and removal.** At first, a move converts one
 top-level vdev, selected explicitly, per pool at a time, and no move
 runs while an expansion or a device removal does, nor does either
-start while a move runs (rdmitry0911, 27 October). Virtual/backing
+start while a move runs (rdmitry0911, 27 October). These exclusions
+are pool-wide, a log device's removal included, and they remain an
+open policy and qualification condition of D8, which neither
+prototype has selected or proved; a later design narrows them only
+with the matching proof (rdmitry0911, 29 October). Virtual/backing
 retains "one translated top-level vdev" per pool for an engine's
 lifetime (`vb:README.md:132-133`); redirect's move names one vdev
 (`spike:vdev_raidz.c:8335-8337`) but enforces neither one move per
@@ -409,17 +413,21 @@ repaired, and how stale copies are kept from authority. Redirect keeps
 the mapping in the MOS and adds no rule of its own; a move with a child
 offline, then the child's return, its resilver and a scrub that repairs
 nothing, is witnessed (`spike:README.md:403-406`, `418`).
-Virtual/backing, from reading: a raw write or required read tolerates
-as many absent or failing members as the certified parity, so needs
-every member before the certificate
+Virtual/backing, from reading, confirmed by its author for a private
+candidate and its kernel fixture, not as a qualification of
+replacement or of other topologies (29 October): a raw write or
+required read tolerates at most as many absent or failing members as
+the certified parity, and certification, initial or renewed, is
+refused until every direct child is readable and writable
 (`vb:vdev_reloc_engine.c:140-145`, `vb:vdev_reloc_store.c:576-580`); a
 writable import gives members that missed writes the live pages
-(`vb:vdev_reloc_store.c:1726-1746`); a kernel test imports a certified
-pool writable with two of six members hidden and resilvers them on
-return (`vb:pr19262_degraded_pos.ksh:5-8`). These rules remain to be
-selected and demonstrated for the joint design; section 4 needs the
-publication and recovery cuts of an update made while a member is
-missing or stale.
+(`vb:vdev_reloc_store.c:1726-1746`); a kernel test imports a pool
+certified at parity 2 writable with two of six members hidden, reads
+and writes, is refused with three hidden, and resilvers and scrubs
+the members on return (`vb:pr19262_degraded_pos.ksh:5-8`). These
+rules remain to be selected and demonstrated for the joint design;
+section 4 needs the publication and recovery cuts of an update made
+while a member is missing or stale.
 
 ### Where the earlier questions went
 
