@@ -1100,7 +1100,7 @@ again:
 }
 
 int
-zfs_rezget(znode_t *zp)
+zfs_rezget(znode_t *zp, boolean_t drop_cache)
 {
 	zfsvfs_t *zfsvfs = zp->z_zfsvfs;
 	dmu_object_info_t doi;
@@ -1115,11 +1115,12 @@ zfs_rezget(znode_t *zp)
 	uint64_t projid = ZFS_DEFAULT_PROJID;
 
 	/*
-	 * Remove cached pages before reloading the znode, so that they are not
-	 * lingering after we run into any error.  Ideally, we should vgone()
-	 * the vnode in case of error, but currently we cannot do that
-	 * because of the LOR between the vnode lock and z_teardown_lock.
-	 * So, instead, we have to "doom" the znode in the illumos style.
+	 * If the contents were replaced, remove cached pages before reloading
+	 * the znode, so that they are not lingering after we run into any
+	 * error.  Ideally, we should vgone() the vnode in case of error, but
+	 * currently we cannot do that because of the LOR between the vnode
+	 * lock and z_teardown_lock.  So, instead, we have to "doom" the znode
+	 * in the illumos style.
 	 *
 	 * Ignore invalid pages during the scan.  This is to avoid deadlocks
 	 * between page busying and the teardown lock, as pages are busied prior
@@ -1127,11 +1128,13 @@ zfs_rezget(znode_t *zp)
 	 * Such pages will be invalid and can safely be skipped here.
 	 */
 	vp = ZTOV(zp);
+	if (drop_cache) {
 #if __FreeBSD_version >= 1400042
-	vn_pages_remove_valid(vp, 0, 0);
+		vn_pages_remove_valid(vp, 0, 0);
 #else
-	vn_pages_remove(vp, 0, 0);
+		vn_pages_remove(vp, 0, 0);
 #endif
+	}
 
 	ZFS_OBJ_HOLD_ENTER(zfsvfs, obj_num);
 

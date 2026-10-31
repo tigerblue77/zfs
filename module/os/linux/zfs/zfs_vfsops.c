@@ -1832,10 +1832,11 @@ zfs_resume_hold_next_znode(zfsvfs_t *zfsvfs, znode_t *zp)
  * is an invariant across any of the operations that can be performed while the
  * filesystem was suspended.  Whether it succeeded or failed, the preconditions
  * are the same: the relevant objset and associated dataset are owned by
- * zfsvfs, held, and long held on entry.
+ * zfsvfs, held, and long held on entry.  If the dataset contents were
+ * replaced, callers set drop_cache to drop the cached file data.
  */
 int
-zfs_resume_fs(zfsvfs_t *zfsvfs, dsl_dataset_t *ds)
+zfs_resume_fs(zfsvfs_t *zfsvfs, dsl_dataset_t *ds, boolean_t drop_cache)
 {
 	int err, err2;
 	znode_t *zp;
@@ -1887,7 +1888,7 @@ zfs_resume_fs(zfsvfs_t *zfsvfs, dsl_dataset_t *ds)
 
 		mutex_exit(&zfsvfs->z_znodes_lock);
 
-		err2 = zfs_rezget(zp);
+		err2 = zfs_rezget(zp, drop_cache);
 		if (err2 != 0 || zp->z_unlinked) {
 			zpl_d_drop_aliases(ZTOI(zp));
 			remove_inode_hash(ZTOI(zp));

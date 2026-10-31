@@ -5147,7 +5147,7 @@ zfs_ioc_rollback(const char *fsname, nvlist_t *innvl, nvlist_t *outnvl)
 
 			error = dsl_dataset_rollback(fsname, target, zfsvfs,
 			    outnvl);
-			resume_err = zfs_resume_fs(zfsvfs, ds);
+			resume_err = zfs_resume_fs(zfsvfs, ds, error == 0);
 			error = error ? error : resume_err;
 		}
 		zfs_vfs_rele(zfsvfs);
@@ -5911,7 +5911,8 @@ zfs_ioc_recv_impl(char *tofs, char *tosnap, const char *origin,
 			    stream_is_redacted && !tofs_was_redacted) {
 				error = zfs_end_fs(zfsvfs, ds);
 			} else if (error == 0) {
-				error = zfs_resume_fs(zfsvfs, ds);
+				error = zfs_resume_fs(zfsvfs, ds,
+				    end_err == 0 && !drc.drc_heal);
 			}
 			error = error ? error : end_err;
 			zfs_vfs_rele(zfsvfs);
@@ -6877,7 +6878,7 @@ zfs_ioc_userspace_upgrade(zfs_cmd_t *zc)
 			if (error == 0) {
 				dmu_objset_refresh_ownership(ds, &newds,
 				    B_TRUE, zfsvfs);
-				error = zfs_resume_fs(zfsvfs, newds);
+				error = zfs_resume_fs(zfsvfs, newds, B_FALSE);
 			}
 		}
 		if (error == 0) {

@@ -2057,10 +2057,11 @@ zfs_suspend_fs(zfsvfs_t *zfsvfs)
  * is an invariant across any of the operations that can be performed while the
  * filesystem was suspended.  Whether it succeeded or failed, the preconditions
  * are the same: the relevant objset and associated dataset are owned by
- * zfsvfs, held, and long held on entry.
+ * zfsvfs, held, and long held on entry.  If the dataset contents were
+ * replaced, callers set drop_cache to drop the cached file data.
  */
 int
-zfs_resume_fs(zfsvfs_t *zfsvfs, dsl_dataset_t *ds)
+zfs_resume_fs(zfsvfs_t *zfsvfs, dsl_dataset_t *ds, boolean_t drop_cache)
 {
 	int err;
 	znode_t *zp;
@@ -2098,7 +2099,7 @@ zfs_resume_fs(zfsvfs_t *zfsvfs, dsl_dataset_t *ds)
 	mutex_enter(&zfsvfs->z_znodes_lock);
 	for (zp = list_head(&zfsvfs->z_all_znodes); zp;
 	    zp = list_next(&zfsvfs->z_all_znodes, zp)) {
-		(void) zfs_rezget(zp);
+		(void) zfs_rezget(zp, drop_cache);
 	}
 	mutex_exit(&zfsvfs->z_znodes_lock);
 

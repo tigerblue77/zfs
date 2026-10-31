@@ -1195,7 +1195,7 @@ again:
 }
 
 int
-zfs_rezget(znode_t *zp)
+zfs_rezget(znode_t *zp, boolean_t drop_cache)
 {
 	zfsvfs_t *zfsvfs = ZTOZSB(zp);
 	dmu_object_info_t doi;
@@ -1224,13 +1224,14 @@ zfs_rezget(znode_t *zp)
 		return (0);
 
 	/*
-	 * Drop cached pages before reloading the znode.  After a rollback or
-	 * a forced receive the object may hold different data under the same
-	 * inode, size and generation; stale Uptodate pages would otherwise be
-	 * served by mappedread() and mmap() (see #10931).  FreeBSD does the
-	 * same here via vn_pages_remove().
+	 * If the contents were replaced, drop cached pages before reloading
+	 * the znode.  After a rollback or a forced receive the object may hold
+	 * different data under the same inode, size and generation; stale
+	 * Uptodate pages would otherwise be served by mappedread() and mmap()
+	 * (see #10931).  FreeBSD does the same here via vn_pages_remove().
 	 */
-	truncate_inode_pages(ZTOI(zp)->i_mapping, 0);
+	if (drop_cache)
+		truncate_inode_pages(ZTOI(zp)->i_mapping, 0);
 
 	zh = zfs_znode_hold_enter(zfsvfs, obj_num);
 
