@@ -238,7 +238,15 @@ update_pages(znode_t *zp, int64_t start, int len, objset_t *os)
 		uint64_t nbytes = MIN(PAGE_SIZE - off, len);
 
 		struct page *pp = find_lock_page(mp, start >> PAGE_SHIFT);
-		if (pp) {
+		if (pp && !PageUptodate(pp)) {
+			/*
+			 * The next access reads in the whole page, including
+			 * this write, so don't fill in just the written range
+			 * and mark it up to date.
+			 */
+			unlock_page(pp);
+			put_page(pp);
+		} else if (pp) {
 			if (mapping_writably_mapped(mp))
 				flush_dcache_page(pp);
 
