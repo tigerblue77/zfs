@@ -3877,9 +3877,6 @@ zfs_putpage(struct inode *ip, struct page *pp, struct writeback_control *wbc,
 	int		cnt = 0;
 	struct address_space *mapping;
 
-	if ((err = zfs_enter_verify_zp(zfsvfs, zp, FTAG)) != 0)
-		return (err);
-
 	ASSERT(PageLocked(pp));
 
 	pgoff = page_offset(pp);	/* Page byte-offset in file */
@@ -3890,7 +3887,6 @@ zfs_putpage(struct inode *ip, struct page *pp, struct writeback_control *wbc,
 	/* Page is beyond end of file */
 	if (pgoff >= offset) {
 		unlock_page(pp);
-		zfs_exit(zfsvfs, FTAG);
 		return (0);
 	}
 
@@ -3920,9 +3916,11 @@ zfs_putpage(struct inode *ip, struct page *pp, struct writeback_control *wbc,
 	 * rules in order to avoid deadlocking in either zfs_read() or
 	 * zfs_free_range() due to a lock inversion.
 	 *
-	 * 1) The page must be unlocked prior to acquiring the range lock.
-	 *    This is critical because zfs_read() calls find_lock_page()
-	 *    which may block on the page lock while holding the range lock.
+	 * 1) The page must be unlocked prior to acquiring the teardown and
+	 *    range locks.  This is critical because zfs_read() calls
+	 *    find_lock_page() which may block on the page lock while holding
+	 *    the teardown and range locks, and zfs_rezget() locks pages while
+	 *    zfs_resume_fs() holds the teardown lock as writer.
 	 *
 	 * 2) Before setting or clearing write back on a page the range lock
 	 *    must be held in order to prevent a lock inversion with the
@@ -3941,6 +3939,9 @@ zfs_putpage(struct inode *ip, struct page *pp, struct writeback_control *wbc,
 	mapping = pp->mapping;
 	redirty_page_for_writepage(wbc, pp);
 	unlock_page(pp);
+
+	if ((err = zfs_enter_verify_zp(zfsvfs, zp, FTAG)) != 0)
+		return (err);
 
 	zfs_locked_range_t *lr = zfs_rangelock_enter(&zp->z_rangelock,
 	    pgoff, pglen, RL_WRITER);

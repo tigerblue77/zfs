@@ -779,12 +779,29 @@ zpl_writepages(struct address_space *mapping, struct writeback_control *wbc)
 static int
 zpl_writepage(struct page *pp, struct writeback_control *wbc)
 {
-	if (ITOZSB(pp->mapping->host)->z_os->os_sync == ZFS_SYNC_ALWAYS)
+	zfsvfs_t *zfsvfs = ITOZSB(pp->mapping->host);
+	boolean_t for_sync;
+	int error;
+
+	/*
+	 * Reclaim holds no reference on the inode, which zfs_putpage() still
+	 * uses after unlocking the page, so leave the page dirty rather than
+	 * wait for the teardown lock in that window.
+	 */
+	if (zpl_tryenter(zfsvfs, FTAG) != 0) {
+		redirty_page_for_writepage(wbc, pp);
+		unlock_page(pp);
+		return (0);
+	}
+
+	if (zfsvfs->z_os->os_sync == ZFS_SYNC_ALWAYS)
 		wbc->sync_mode = WB_SYNC_ALL;
 
-	boolean_t for_sync = (wbc->sync_mode == WB_SYNC_ALL);
+	for_sync = (wbc->sync_mode == WB_SYNC_ALL);
+	error = zpl_putpage(pp, wbc, &for_sync);
+	zpl_exit(zfsvfs, FTAG);
 
-	return (zpl_putpage(pp, wbc, &for_sync));
+	return (error);
 }
 #endif
 

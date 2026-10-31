@@ -86,6 +86,19 @@ zfs_enter(zfsvfs_t *zfsvfs, const char *tag)
 	return (0);
 }
 
+/* Like zfs_enter(), but returns EAGAIN instead of waiting for the lock. */
+static inline int
+zfs_tryenter(zfsvfs_t *zfsvfs, const char *tag)
+{
+	if (!ZFS_TEARDOWN_TRY_ENTER_READ(zfsvfs, tag))
+		return (SET_ERROR(EAGAIN));
+	if (unlikely(zfsvfs->z_unmounted)) {
+		ZFS_TEARDOWN_EXIT_READ(zfsvfs, tag);
+		return (SET_ERROR(EIO));
+	}
+	return (0);
+}
+
 /* Must be called before exiting the operation. */
 static inline void
 zfs_exit(zfsvfs_t *zfsvfs, const char *tag)
@@ -98,6 +111,12 @@ static inline int
 zpl_enter(zfsvfs_t *zfsvfs, const char *tag)
 {
 	return (-zfs_enter(zfsvfs, tag));
+}
+
+static inline int
+zpl_tryenter(zfsvfs_t *zfsvfs, const char *tag)
+{
+	return (-zfs_tryenter(zfsvfs, tag));
 }
 
 static inline void

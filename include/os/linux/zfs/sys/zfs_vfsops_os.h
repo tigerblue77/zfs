@@ -141,6 +141,9 @@ struct zfsvfs {
 #define	ZFS_TEARDOWN_ENTER_READ(zfsvfs, tag)	\
 	rrm_enter_read(&(zfsvfs)->z_teardown_lock, tag);
 
+#define	ZFS_TEARDOWN_TRY_ENTER_READ(zfsvfs, tag)	\
+	rrm_tryenter_read(&(zfsvfs)->z_teardown_lock, tag)
+
 #define	ZFS_TEARDOWN_EXIT_READ(zfsvfs, tag)	\
 	rrm_exit(&(zfsvfs)->z_teardown_lock, tag)
 
