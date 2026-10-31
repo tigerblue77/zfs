@@ -151,8 +151,9 @@ rrw_destroy(rrwlock_t *rrl)
 	zfs_refcount_destroy(&rrl->rr_linked_rcount);
 }
 
-static void
-rrw_enter_read_impl(rrwlock_t *rrl, boolean_t prio, const void *tag)
+static boolean_t
+rrw_enter_read_impl(rrwlock_t *rrl, boolean_t prio, boolean_t nowait,
+    const void *tag)
 {
 	mutex_enter(&rrl->rr_lock);
 #ifndef ZFS_DEBUG
@@ -160,7 +161,7 @@ rrw_enter_read_impl(rrwlock_t *rrl, boolean_t prio, const void *tag)
 	    !rrl->rr_track_all) {
 		rrl->rr_anon_rcount.rc_count++;
 		mutex_exit(&rrl->rr_lock);
-		return;
+		return (B_TRUE);
 	}
 	DTRACE_PROBE(zfs__rrwfastpath__rdmiss);
 #endif
@@ -169,8 +170,13 @@ rrw_enter_read_impl(rrwlock_t *rrl, boolean_t prio, const void *tag)
 
 	while (rrl->rr_writer != NULL || (rrl->rr_writer_wanted &&
 	    zfs_refcount_is_zero(&rrl->rr_anon_rcount) && !prio &&
-	    rrn_find(rrl) == NULL))
+	    rrn_find(rrl) == NULL)) {
+		if (nowait) {
+			mutex_exit(&rrl->rr_lock);
+			return (B_FALSE);
+		}
 		cv_wait(&rrl->rr_cv, &rrl->rr_lock);
+	}
 
 	if (rrl->rr_writer_wanted || rrl->rr_track_all) {
 		/* may or may not be a re-entrant enter */
@@ -181,12 +187,13 @@ rrw_enter_read_impl(rrwlock_t *rrl, boolean_t prio, const void *tag)
 	}
 	ASSERT0P(rrl->rr_writer);
 	mutex_exit(&rrl->rr_lock);
+	return (B_TRUE);
 }
 
 void
 rrw_enter_read(rrwlock_t *rrl, const void *tag)
 {
-	rrw_enter_read_impl(rrl, B_FALSE, tag);
+	(void) rrw_enter_read_impl(rrl, B_FALSE, B_FALSE, tag);
 }
 
 /*
@@ -198,7 +205,7 @@ rrw_enter_read(rrwlock_t *rrl, const void *tag)
 void
 rrw_enter_read_prio(rrwlock_t *rrl, const void *tag)
 {
-	rrw_enter_read_impl(rrl, B_TRUE, tag);
+	(void) rrw_enter_read_impl(rrl, B_TRUE, B_FALSE, tag);
 }
 
 
@@ -353,6 +360,14 @@ void
 rrm_enter_read(rrmlock_t *rrl, const void *tag)
 {
 	rrw_enter_read(&rrl->locks[RRM_TD_LOCK()], tag);
+}
+
+/* Like rrm_enter_read(), but fails instead of waiting for the lock. */
+boolean_t
+rrm_tryenter_read(rrmlock_t *rrl, const void *tag)
+{
+	return (rrw_enter_read_impl(&rrl->locks[RRM_TD_LOCK()], B_FALSE,
+	    B_TRUE, tag));
 }
 
 void
