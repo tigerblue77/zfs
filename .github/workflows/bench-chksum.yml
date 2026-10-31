@@ -1,0 +1,35 @@
+# Builds the kernel modules (release) on GitHub-hosted x86 and ARM runners,
+# loads them, and prints the chksum_bench kstat with the CPU's hash flags.
+name: bench-chksum
+on: push
+permissions:
+  contents: read
+jobs:
+  bench:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04, ubuntu-24.04, ubuntu-24.04-arm, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - name: CPU
+        run: |
+          { grep -m1 -E 'model name|^CPU part' /proc/cpuinfo || true; lscpu | grep -E 'Model name|Vendor ID|Architecture'; grep -m1 -E '^(flags|Features)' /proc/cpuinfo | tr ' ' '\n' | grep -xE 'sha_ni|sha2|sha512|avx2|avx512f|avx512vl|asimd|sve|sve2' | tr '\n' ' '; echo; uname -r; } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential autoconf automake libtool gawk uuid-dev libudev-dev libssl-dev zlib1g-dev libaio-dev libattr1-dev libelf-dev libblkid-dev libtirpc-dev python3 linux-headers-$(uname -r) > /dev/null
+      - name: Build
+        run: |
+          ./autogen.sh > /dev/null
+          ./configure --with-config=kernel > /dev/null
+          make -j$(nproc) -C module > /dev/null
+      - name: Load and benchmark
+        run: |
+          sudo insmod module/spl.ko
+          sudo insmod module/zfs.ko
+          sudo cat /proc/spl/kstat/zfs/chksum_bench > /dev/null
+          sudo cat /proc/spl/kstat/zfs/chksum_bench | tee bench.txt
+          { echo '```'; cat bench.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
