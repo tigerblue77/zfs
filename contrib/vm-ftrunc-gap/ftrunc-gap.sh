@@ -17,7 +17,9 @@
 # Per round: live and replayed size and sha256 of block 1, whether the
 # write returned before the competing op, and the order the frozen log
 # holds the write (W) and the size change (S, TX_SETATTR) or punch
-# (T, TX_TRUNCATE).  Exit 2: setup error, nothing counted.
+# (T, TX_TRUNCATE).  On a build with the fix, setattr logs T for the
+# size change; it is counted as the size record.  Exit 2: setup
+# error, nothing counted.
 
 set -u
 CASE=${1:?case}
@@ -148,6 +150,12 @@ for ((i = 1; i <= ROUNDS; i++)); do
 	zfs unmount "$FS" || die "round $i: unmount"
 	zdb_iii frozen
 	order=$(log_order "$obj")
+	raw=$order
+	# With the fix, setattr logs the size change as TX_TRUNCATE (T) and
+	# its TX_SETATTR has no ATTR_SIZE: count that T as the size record.
+	if [ "$OP" = S ] && [ "${order#*S}" = "$order" ]; then
+		order=$(printf '%s' "$order" | tr T S)
+	fi
 	case $order in
 	"W$OP"|"${OP}W") ;;
 	*) die "round $i: log order '$order', expected W$OP or ${OP}W" ;;
@@ -165,7 +173,7 @@ for ((i = 1; i <= ROUNDS; i++)); do
 	aftersum=$(blk1)
 
 	echo "round $i live $live/$livesum replayed $after/$aftersum" \
-	    "log $order write_returned_first $wfirst"
+	    "log $raw write_returned_first $wfirst"
 	if [ "$live" = "$after" ] && [ "$livesum" = "$aftersum" ]; then
 		same=$((same + 1))
 	elif [ "$order" = "W$OP" ] && [ "$wfirst" = 1 ]; then
