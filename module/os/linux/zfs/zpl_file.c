@@ -633,7 +633,7 @@ zpl_putpage(struct page *pp, struct writeback_control *wbc, void *data)
 	if (args->zpa_nowait)
 		zpl_exit(zfsvfs, FTAG);
 
-	return (ret);
+	return (-ret);
 }
 
 #ifdef HAVE_WRITE_CACHE_PAGES
