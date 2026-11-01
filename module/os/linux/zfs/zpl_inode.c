@@ -40,7 +40,6 @@ zpl_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)
 	pathname_t pn;
 	int zfs_flags = 0;
 	zfsvfs_t *zfsvfs = dentry->d_sb->s_fs_info;
-	dsl_dataset_t *ds = dmu_objset_ds(zfsvfs->z_os);
 	size_t dlen = dlen(dentry);
 
 	/*
@@ -53,11 +52,18 @@ zpl_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)
 	 * longnames. But disallow creation newer longnamed entities.
 	 */
 	if (!zfsvfs->z_longname && (dlen >= ZAP_MAXNAMELEN)) {
+		boolean_t active;
+
+		if ((error = zpl_enter(zfsvfs, FTAG)) != 0)
+			return (ERR_PTR(error));
+		active = dsl_dataset_feature_is_active(
+		    dmu_objset_ds(zfsvfs->z_os), SPA_FEATURE_LONGNAME);
+		zpl_exit(zfsvfs, FTAG);
+
 		/*
 		 * If this is for create or rename fail it.
 		 */
-		if (!dsl_dataset_feature_is_active(ds, SPA_FEATURE_LONGNAME) ||
-		    (flags & (LOOKUP_CREATE | LOOKUP_RENAME_TARGET)))
+		if (!active || (flags & (LOOKUP_CREATE | LOOKUP_RENAME_TARGET)))
 			return (ERR_PTR(-ENAMETOOLONG));
 	}
 	if (dlen >= ZAP_MAXNAMELEN_NEW) {

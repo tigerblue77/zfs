@@ -326,11 +326,14 @@ zpl_snapdir_manage(const struct path *path, bool rcu_walk)
 	}
 
 	zfsvfs_t *zfsvfs = am_path.mnt->mnt_sb->s_fs_info;
-	if (dmu_objset_spa(zfsvfs->z_os) != se->se_spa ||
+	if (!zfsvfs->z_issnap ||
+	    dmu_objset_spa(zfsvfs->z_os) != se->se_spa ||
 	    dmu_objset_id(zfsvfs->z_os) != se->se_objsetid) {
 		/*
 		 * follow_down() ended up in a ZFS filesystem, but not the
-		 * snapshot we expected. Again, nothing more we can do.
+		 * snapshot we expected. Again, nothing more we can do. Check
+		 * z_issnap first, as the z_os of a filesystem can be replaced
+		 * concurrently by a rollback or receive.
 		 */
 		path_put(&am_path);
 		err = -ESTALE;

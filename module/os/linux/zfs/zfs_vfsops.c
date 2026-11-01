@@ -1646,11 +1646,17 @@ int
 zfs_remount(struct super_block *sb, vfs_t *vfsp, int flags)
 {
 	zfsvfs_t *zfsvfs = sb->s_fs_info;
-	boolean_t issnap = dmu_objset_is_snapshot(zfsvfs->z_os);
+	boolean_t issnap = zfsvfs->z_issnap;
+	int error;
+
+	if ((error = zfs_enter(zfsvfs, FTAG)) != 0)
+		return (error);
 
 	if ((issnap || !spa_writeable(dmu_objset_spa(zfsvfs->z_os))) &&
-	    !(flags & SB_RDONLY))
+	    !(flags & SB_RDONLY)) {
+		zfs_exit(zfsvfs, FTAG);
 		return (EROFS);
+	}
 
 	if (!zfs_is_readonly(zfsvfs) && (flags & SB_RDONLY))
 		txg_wait_synced(dmu_objset_pool(zfsvfs->z_os), 0);
@@ -1663,6 +1669,7 @@ zfs_remount(struct super_block *sb, vfs_t *vfsp, int flags)
 	if (!issnap)
 		(void) zfs_register_callbacks(vfsp);
 
+	zfs_exit(zfsvfs, FTAG);
 	return (0);
 }
 

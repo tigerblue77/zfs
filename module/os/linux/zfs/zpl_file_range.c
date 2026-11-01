@@ -59,6 +59,22 @@ zpl_remap_unlock_two(struct inode *src_i, struct inode *dst_i)
 		spl_inode_unlock_shared(src_i);
 }
 
+static int
+zpl_bclone_check(struct inode *ip)
+{
+	zfsvfs_t *zfsvfs = ITOZSB(ip);
+	int error;
+
+	if ((error = zpl_enter(zfsvfs, FTAG)) != 0)
+		return (error);
+	if (!spa_feature_is_enabled(dmu_objset_spa(zfsvfs->z_os),
+	    SPA_FEATURE_BLOCK_CLONING))
+		error = -EOPNOTSUPP;
+	zpl_exit(zfsvfs, FTAG);
+
+	return (error);
+}
+
 /*
  * Clone part of a file via block cloning.
  *
@@ -81,9 +97,8 @@ zpl_clone_file_range_impl(struct file *src_file, loff_t src_off,
 	if (!zfs_bclone_enabled)
 		return (-EOPNOTSUPP);
 
-	if (!spa_feature_is_enabled(
-	    dmu_objset_spa(ITOZSB(dst_i)->z_os), SPA_FEATURE_BLOCK_CLONING))
-		return (-EOPNOTSUPP);
+	if ((err = zpl_bclone_check(dst_i)) != 0)
+		return (err);
 
 	zpl_remap_lock_two(src_i, dst_i);
 
@@ -130,9 +145,8 @@ zpl_dedupe_file_range_impl(struct file *src_file, loff_t src_off,
 	if (!zfs_bclone_enabled)
 		return (-EOPNOTSUPP);
 
-	if (!spa_feature_is_enabled(
-	    dmu_objset_spa(ITOZSB(dst_i)->z_os), SPA_FEATURE_BLOCK_CLONING))
-		return (-EOPNOTSUPP);
+	if ((err = zpl_bclone_check(dst_i)) != 0)
+		return (err);
 
 	zpl_remap_lock_two(src_i, dst_i);
 

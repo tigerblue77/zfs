@@ -663,7 +663,7 @@ zfs_mark_inode_dirty(struct inode *ip)
 {
 	zfsvfs_t *zfsvfs = ITOZSB(ip);
 
-	if (zfs_is_readonly(zfsvfs) || dmu_objset_is_snapshot(zfsvfs->z_os))
+	if (zfs_is_readonly(zfsvfs) || zfsvfs->z_issnap)
 		return;
 
 	mark_inode_dirty(ip);

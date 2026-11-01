@@ -819,12 +819,16 @@ static int
 zfsctl_snapshot_path_objset(zfsvfs_t *zfsvfs, uint64_t objsetid,
     int path_len, char *full_path)
 {
-	objset_t *os = zfsvfs->z_os;
+	objset_t *os;
 	fstrans_cookie_t cookie;
 	char *snapname;
 	boolean_t case_conflict;
 	uint64_t id, pos = 0;
-	int error = 0;
+	int error;
+
+	if ((error = zfs_enter(zfsvfs, FTAG)) != 0)
+		return (error);
+	os = zfsvfs->z_os;
 
 	cookie = spl_fstrans_mark();
 	snapname = kmem_alloc(ZFS_MAX_DATASET_NAME_LEN, KM_SLEEP);
@@ -853,6 +857,7 @@ zfsctl_snapshot_path_objset(zfsvfs_t *zfsvfs, uint64_t objsetid,
 out:
 	kmem_free(snapname, ZFS_MAX_DATASET_NAME_LEN);
 	spl_fstrans_unmark(cookie);
+	zfs_exit(zfsvfs, FTAG);
 
 	return (error);
 }
@@ -1092,7 +1097,10 @@ zfsctl_snapdir_mkdir(struct inode *dip, const char *dirname, vattr_t *vap,
 		goto out;
 	}
 
+	if ((error = zfs_enter(zfsvfs, FTAG)) != 0)
+		goto out;
 	dmu_objset_name(zfsvfs->z_os, dsname);
+	zfs_exit(zfsvfs, FTAG);
 
 	error = zfs_secpolicy_snapshot_perms(dsname, cr);
 	if (error != 0)
@@ -1137,7 +1145,11 @@ static void
 zfsctl_snapshot_sb_atime_cb(struct super_block *sb, void *sbap)
 {
 	zfsvfs_t *zfsvfs = sb->s_fs_info;
-	if (zfsvfs == NULL)
+	/*
+	 * Only a snapshot can match. Skip filesystems before reading z_os,
+	 * which a rollback or receive can replace concurrently.
+	 */
+	if (zfsvfs == NULL || !zfsvfs->z_issnap)
 		return;
 
 	zfsctl_snapshot_sb_atime_cb_args_t *sba = sbap;

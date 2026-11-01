@@ -107,12 +107,11 @@ zfs_fsync(znode_t *zp, int syncflag, cred_t *cr)
 	int error = 0;
 	zfsvfs_t *zfsvfs = ZTOZSB(zp);
 
-	if (zfsvfs->z_os->os_sync != ZFS_SYNC_DISABLED) {
-		if ((error = zfs_enter_verify_zp(zfsvfs, zp, FTAG)) != 0)
-			return (error);
+	if ((error = zfs_enter_verify_zp(zfsvfs, zp, FTAG)) != 0)
+		return (error);
+	if (zfsvfs->z_os->os_sync != ZFS_SYNC_DISABLED)
 		error = zil_commit(zfsvfs->z_log, zp->z_id);
-		zfs_exit(zfsvfs, FTAG);
-	}
+	zfs_exit(zfsvfs, FTAG);
 	return (error);
 }
 
@@ -1361,9 +1360,16 @@ int
 zfs_get_direct_alignment(znode_t *zp, uint64_t *alignp)
 {
 	zfsvfs_t *zfsvfs = ZTOZSB(zp);
+	int error;
 
-	if (!zfs_dio_enabled || zfsvfs->z_os->os_direct == ZFS_DIRECT_DISABLED)
+	if ((error = zfs_enter_verify_zp(zfsvfs, zp, FTAG)) != 0)
+		return (error);
+
+	if (!zfs_dio_enabled ||
+	    zfsvfs->z_os->os_direct == ZFS_DIRECT_DISABLED) {
+		zfs_exit(zfsvfs, FTAG);
 		return (SET_ERROR(EOPNOTSUPP));
+	}
 
 	/*
 	 * If the file has multiple blocks, then its block size is fixed
@@ -1387,6 +1393,7 @@ zfs_get_direct_alignment(znode_t *zp, uint64_t *alignp)
 	else
 		*alignp = MAX(zp->z_blksz, PAGE_SIZE);
 
+	zfs_exit(zfsvfs, FTAG);
 	return (0);
 }
 
