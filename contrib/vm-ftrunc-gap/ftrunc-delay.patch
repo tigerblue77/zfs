@@ -1,0 +1,68 @@
+diff --git a/module/os/linux/zfs/zfs_vnops_os.c b/module/os/linux/zfs/zfs_vnops_os.c
+index 490d170e0c..b80ec918bd 100644
+--- a/module/os/linux/zfs/zfs_vnops_os.c
++++ b/module/os/linux/zfs/zfs_vnops_os.c
+@@ -354,6 +354,9 @@ mappedread(znode_t *zp, int nbytes, zfs_uio_t *uio)
+ }
+ static unsigned long zfs_delete_blocks = DMU_MAX_DELETEBLKCNT;
+ 
++/* Experiment only: widen the ftruncate/write window. */
++static unsigned int zfs_setattr_size_delay_ms = 0;
++
+ /*
+  * Write the bytes to a file.
+  *
+@@ -2152,6 +2155,11 @@ top:
+ 		err = zfs_freesp(zp, vap->va_size, 0, 0, FALSE);
+ 		if (err)
+ 			goto out3;
++		if (zfs_setattr_size_delay_ms != 0) {
++			zfs_dbgmsg("setattr: size set, delaying %u ms",
++			    zfs_setattr_size_delay_ms);
++			delay(MSEC_TO_TICK(zfs_setattr_size_delay_ms));
++		}
+ 	}
+ 
+ 	if (mask & (ATTR_ATIME|ATTR_MTIME) ||
+@@ -4552,3 +4560,7 @@ EXPORT_SYMBOL(zfs_map);
+ 
+ module_param(zfs_delete_blocks, ulong, 0644);
+ MODULE_PARM_DESC(zfs_delete_blocks, "Delete files larger than N blocks async");
++
++module_param(zfs_setattr_size_delay_ms, uint, 0644);
++MODULE_PARM_DESC(zfs_setattr_size_delay_ms,
++	"Experiment only: sleep after a setattr size change");
+diff --git a/module/os/linux/zfs/zfs_znode_os.c b/module/os/linux/zfs/zfs_znode_os.c
+index f430d5d31c..020f720890 100644
+--- a/module/os/linux/zfs/zfs_znode_os.c
++++ b/module/os/linux/zfs/zfs_znode_os.c
+@@ -67,6 +67,9 @@ unsigned int zfs_object_mutex_size = ZFS_OBJ_MTX_SZ;
+  */
+ static int zfs_unlink_suspend_progress = 0;
+ 
++/* Experiment only: widen the zfs_freesp()/write window. */
++static unsigned int zfs_freesp_log_delay_ms = 0;
++
+ /*
+  * This callback is invoked when acquiring a RL_WRITER or RL_APPEND lock on
+  * z_rangelock. It will modify the offset and length of the lock to reflect
+@@ -1886,6 +1889,11 @@ zfs_freesp(znode_t *zp, uint64_t off, uint64_t len, int flag, boolean_t log)
+ 	if (error || !log)
+ 		goto out;
+ log:
++	if (zfs_freesp_log_delay_ms != 0) {
++		zfs_dbgmsg("freesp: range freed, delaying %u ms",
++		    zfs_freesp_log_delay_ms);
++		delay(MSEC_TO_TICK(zfs_freesp_log_delay_ms));
++	}
+ 	tx = dmu_tx_create(zfsvfs->z_os);
+ 	dmu_tx_hold_sa(tx, zp->z_sa_hdl, ZFS_SEQ_MAY_GROW(zp));
+ 	zfs_sa_upgrade_txholds(tx, zp);
+@@ -2090,3 +2098,7 @@ MODULE_PARM_DESC(zfs_object_mutex_size, "Size of znode hold array");
+ module_param(zfs_unlink_suspend_progress, int, 0644);
+ MODULE_PARM_DESC(zfs_unlink_suspend_progress, "Set to prevent async unlinks "
+ "(debug - leaks space into the unlinked set)");
++
++module_param(zfs_freesp_log_delay_ms, uint, 0644);
++MODULE_PARM_DESC(zfs_freesp_log_delay_ms,
++	"Experiment only: sleep before zfs_freesp() logs TX_TRUNCATE");
