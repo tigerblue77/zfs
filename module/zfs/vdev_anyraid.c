@@ -273,6 +273,20 @@ create_tile_entry(vdev_anyraid_t *var, anyraid_map_loc_entry_t *amle,
 }
 
 static void
+anyraid_free_tile_map(vdev_anyraid_t *var)
+{
+	anyraid_tile_t *tile = NULL;
+	void *cookie = NULL;
+	while ((tile = avl_destroy_nodes(&var->vd_tile_map, &cookie))) {
+		anyraid_tile_node_t *atn = NULL;
+		while ((atn = list_remove_head(&tile->at_list)))
+			kmem_free(atn, sizeof (*atn));
+		list_destroy(&tile->at_list);
+		kmem_free(tile, sizeof (*tile));
+	}
+}
+
+static void
 child_read_done(zio_t *zio)
 {
 	zio_t *pio = zio_unique_parent(zio);
@@ -685,6 +699,14 @@ loop:
 		abd_free(map_abds[i]);
 
 	if (error != 0) {
+		/* Drop the tiles this mapping added before trying the next. */
+		anyraid_free_tile_map(var);
+		for (i = 0; i < vd->vdev_children; i++) {
+			vdev_anyraid_node_t *van = var->vd_children[i];
+			avl_remove(&var->vd_children_tree, van);
+			van->van_next_offset = 0;
+			avl_add(&var->vd_children_tree, van);
+		}
 		header = AVL_NEXT(&t, header);
 		kmem_free(*child_capacities, sizeof (**child_capacities) *
 		    count);
@@ -1043,15 +1065,7 @@ vdev_anyraid_close(vdev_t *vd)
 	}
 	if (vd->vdev_reopening)
 		return;
-	anyraid_tile_t *tile = NULL;
-	void *cookie = NULL;
-	while ((tile = avl_destroy_nodes(&var->vd_tile_map, &cookie))) {
-		anyraid_tile_node_t *atn = NULL;
-		while ((atn = list_remove_head(&tile->at_list)))
-			kmem_free(atn, sizeof (*atn));
-		list_destroy(&tile->at_list);
-		kmem_free(tile, sizeof (*tile));
-	}
+	anyraid_free_tile_map(var);
 }
 
 /*
