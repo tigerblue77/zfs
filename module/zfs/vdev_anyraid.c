@@ -2282,12 +2282,13 @@ tasklist_write(spa_t *spa, vdev_anyraid_relocate_t *var, dmu_tx_t *tx)
 		    t = list_next(ls[i], t)) {
 			if (count == SPA_OLD_MAXBLOCKSIZE / sizeof (*buf)) {
 				ASSERT3U(buflen, ==, SPA_OLD_MAXBLOCKSIZE);
-				dmu_write(mos, obj, written *
-				    SPA_OLD_MAXBLOCKSIZE, buflen, buf, tx,
+				dmu_write(mos, obj, written, buflen, buf, tx,
 				    DMU_READ_NO_PREFETCH);
+				written += buflen;
 
-				size_t next_buflen =  MIN(SPA_OLD_MAXBLOCKSIZE,
-				    (total_count - count) * sizeof (*buf));
+				size_t next_buflen = MIN(SPA_OLD_MAXBLOCKSIZE,
+				    (total_count - written / sizeof (*buf)) *
+				    sizeof (*buf));
 				if (next_buflen != buflen) {
 					kmem_free(buf, buflen);
 					buf = kmem_alloc(next_buflen, KM_SLEEP);
@@ -2307,8 +2308,7 @@ tasklist_write(spa_t *spa, vdev_anyraid_relocate_t *var, dmu_tx_t *tx)
 			rtp->rtp_pad2 = 0;
 		}
 	}
-	dmu_write(mos, obj, written * SPA_OLD_MAXBLOCKSIZE, buflen, buf, tx,
-	    DMU_READ_NO_PREFETCH);
+	dmu_write(mos, obj, written, buflen, buf, tx, DMU_READ_NO_PREFETCH);
 	kmem_free(buf, buflen);
 
 	dmu_buf_t *dbp;
