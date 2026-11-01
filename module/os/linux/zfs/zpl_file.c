@@ -584,13 +584,45 @@ static int
 zpl_readpages(struct file *filp, struct address_space *mapping,
     struct list_head *pages, unsigned nr_pages)
 {
-	return (read_cache_pages(mapping, pages, zpl_readpage_filler, NULL));
+	zfsvfs_t *zfsvfs = ITOZSB(mapping->host);
+	fstrans_cookie_t cookie;
+	int error;
+
+	/*
+	 * Callers like khugepaged may hold other pages of the mapping locked,
+	 * so skip the readahead rather than wait for the teardown lock.
+	 */
+	cookie = spl_fstrans_mark();
+	if (zpl_tryenter(zfsvfs, FTAG) != 0) {
+		spl_fstrans_unmark(cookie);
+		return (0);
+	}
+
+	error = read_cache_pages(mapping, pages, zpl_readpage_filler, NULL);
+
+	zpl_exit(zfsvfs, FTAG);
+	spl_fstrans_unmark(cookie);
+
+	return (error);
 }
 #else
 static void
 zpl_readahead(struct readahead_control *ractl)
 {
+	zfsvfs_t *zfsvfs = ITOZSB(ractl->mapping->host);
+	fstrans_cookie_t cookie;
 	struct page *page;
+
+	cookie = spl_fstrans_mark();
+
+	/*
+	 * The pages of the batch are locked, so skip the readahead rather than
+	 * wait for the teardown lock.
+	 */
+	if (zpl_tryenter(zfsvfs, FTAG) != 0) {
+		spl_fstrans_unmark(cookie);
+		return;
+	}
 
 	while ((page = readahead_page(ractl)) != NULL) {
 		int ret;
@@ -600,6 +632,9 @@ zpl_readahead(struct readahead_control *ractl)
 		if (ret)
 			break;
 	}
+
+	zpl_exit(zfsvfs, FTAG);
+	spl_fstrans_unmark(cookie);
 }
 #endif
 

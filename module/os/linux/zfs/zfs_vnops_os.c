@@ -4318,18 +4318,34 @@ zfs_getpage(struct inode *ip, struct page *pp)
 	zfsvfs_t *zfsvfs = ITOZSB(ip);
 	znode_t *zp = ITOZ(ip);
 	int error;
-	loff_t i_size = i_size_read(ip);
+	loff_t i_size;
 	u_offset_t io_off = page_offset(pp);
 	size_t io_len = PAGE_SIZE;
 
-	if ((error = zfs_enter_verify_zp(zfsvfs, zp, FTAG)) != 0)
+	/*
+	 * The teardown lock is taken before page locks (see zfs_putpage()), so
+	 * wait for it with the page unlocked, as for the range lock below.
+	 */
+	if ((error = zfs_tryenter(zfsvfs, FTAG)) == EAGAIN) {
+		get_page(pp);
+		unlock_page(pp);
+		error = zfs_enter(zfsvfs, FTAG);
+		lock_page(pp);
+		put_page(pp);
+	}
+	if (error != 0)
 		return (error);
+	if ((error = zfs_verify_zp(zp)) != 0) {
+		zfs_exit(zfsvfs, FTAG);
+		return (error);
+	}
 
 	/*
 	 * If the page lies entirely at or beyond EOF (e.g. it raced a
 	 * truncate) just lock the page and let zfs_fillpage() re-check
 	 * i_size under the range lock and zero-fill it.
 	 */
+	i_size = i_size_read(ip);
 	if (io_off >= i_size)
 		io_len = PAGE_SIZE;
 	else if (io_off + io_len > i_size)
@@ -4363,11 +4379,17 @@ zfs_getpage(struct inode *ip, struct page *pp)
 		lock_page(pp);
 		put_page(pp);
 	}
-	error = zfs_fillpage(ip, pp);
+	/*
+	 * The page may have been read in and dirtied through a mapping while
+	 * it was unlocked, so fill it only if it is still not up to date.
+	 */
+	if (!PageUptodate(pp)) {
+		error = zfs_fillpage(ip, pp);
+		if (error == 0)
+			dataset_kstats_update_read_kstats(&zfsvfs->z_kstat,
+			    PAGE_SIZE);
+	}
 	zfs_rangelock_exit(lr);
-
-	if (error == 0)
-		dataset_kstats_update_read_kstats(&zfsvfs->z_kstat, PAGE_SIZE);
 
 	zfs_exit(zfsvfs, FTAG);
 
