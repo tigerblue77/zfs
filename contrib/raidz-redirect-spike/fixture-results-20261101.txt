@@ -1,0 +1,569 @@
+Re-run of the 29 October fixture comparison with feature@physical_rewrite enabled before either mover (VM 106, 1 November 2026)
+
+== the one change
+29 October: the inputs had only raidz_parity_epochs enabled; the hybrid run enabled physical_rewrite itself (the adapter's
+sync task, as zpool set feature@physical_rewrite=enabled), the all-redirect run did not, so the two movers started from
+different feature states.  1 November: on every fresh copy of an input, before either mover, physical_rewrite is enabled
+(with extensible_dataset, its dependency), for the all-redirect mover too.  The hybrid adapter then finds it enabled and
+enables nothing (physical_rewrite_enabled_by_adapter=0 in all 48 hybrid runs; physical_rewrite_enabled_before=1 in all 96).
+Everything else is as on 29 October: same trees and binaries, same build flags, same niceness, same 8 cases, both movers,
+3 runs each per tree, the same correctness checks.
+
+== sources and trees (unchanged since 29 October)
+  prototype: tigerblue77/zfs spike/bypass-free 094d2a05f9d568996163718155dad4b47a3e547c; adapter commit 8a9271538de8cee838dc12a31ee2f96cb84676f8
+    on spike/bypass-fixture-adapter (head there: 98dc0fa7f4d6a73c598f8b37b4d59e1b81f5b30d, the 29 October results file only)
+  generator: rdmitry0911/zfs 6319a29f86a9771c62a4c59b029c9c18a839998b, contrib/raidz-parity-fixtures, unchanged
+  tree D: worktree of 094d2a05f9 configured --with-config=user --enable-debug, built 29 October (make -j8); its checkout is now
+    on 98dc0fa7f (094d2a05f9 + the adapter + the 29 October results file); nothing rebuilt
+  tree R: worktree of 094d2a05f9 (detached, 0 changes), configured --with-config=user --disable-debug, built 29 October with
+    make -j8 V=1 LIBZPOOL_CPPFLAGS='-UDEBUG -DNDEBUG -UZFS_DEBUG' then make -k with the same override (zdb does not compile
+    without ZFS_DEBUG; the libraries do); nothing rebuilt
+  effective macros (actual libzpool compile rows): D DEBUG and ZFS_DEBUG defined, NDEBUG not; R NDEBUG defined, DEBUG and
+    ZFS_DEBUG not; the adapters and generator drivers built to match (29 October report)
+  all 11 hashes recorded on 29 October (adapter and hybrid_probe sources, both adapter binaries, both generator binaries, both
+    libzpool.so, the generator's fixture.c, build.py, run.py) were checked again before the runs: unchanged
+  new helper (not committed, source at the end): feature_tool, built with build-tool.sh against D and with BUILD_TOOL_RELEASE=1
+    against R
+    5938fae1c4cba9cd114dd3b1924f1281e6965cdacba4770ff39e034d0344b2e4  bin/feature_tool-D
+    5039015e413ec117b2d14abe1d4acf47247b0d6a6333d0fcff20f2494c57a46b  bin/feature_tool-R
+    1c306f7e3a8ffed80a5ab18febf6ae5a2579aacd9c47f121359c47873ec5a907  feature_tool.c
+    df495672632fa169802edb57dad623b8b8f4c3f5d23ed93d53df76799733ec0d  runner2.py
+  every run under nice -n 10 ionice -c3, R first then D, modes alternated as on 29 October (runs 1 and 3: hybrid then
+  redirect; run 2: redirect then hybrid); userland ARC at its default (arc_c_max 5164007424)
+
+== exact commands (every command, with its rc and time, is in commands.jsonl: 1024 lines)
+Inputs, once per tree (16), each tree with its own generator:
+  LD_LIBRARY_PATH=/var/tmp/joint-col-1029/<T>/.libs /var/tmp/joint-col-1029/gen-<T>/fixture create \
+      /var/tmp/joint-col-1101/inputs/<T>/r<rec>-p<pct> <rec> <pct> 100
+  (sha256 of v0-v4 and objects.txt of each recorded; checked again after the 96 runs: unchanged for all 16)
+Each run <T>-r<rec>-p<pct>-<mover>-<n>, in /var/tmp/joint-col-1101/runs/<run> (LD_LIBRARY_PATH=<T>/.libs):
+  cp --sparse=always inputs/<T>/r<rec>-p<pct>/{v0,v1,v2,v3,v4,objects.txt} runs/<run>/
+  feature_tool-<T> runs/<run> get                          (features as generated)
+  feature_tool-<T> runs/<run> enable physical_rewrite
+  feature_tool-<T> runs/<run> get                          (features before the move)
+  fixture_adapter-<T> runs/<run> move <hybrid|redirect> json=move.json
+  fixture verify runs/<run>
+  fixture_adapter-<T> runs/<run> report json=report1.json
+  fixture drop-retained runs/<run>
+  fixture_adapter-<T> runs/<run> report json=report2.json
+  fixture verify runs/<run>
+  D only: cp --sparse=always of the copy to runs/<run>-fill, fixture_adapter-D runs/<run>-fill fill json=fill.json, then the
+    fill copy removed (about 1.1 GB each)
+"zpool get all feature@" itself cannot run here: zpool needs the kernel module, and this task is userspace only.
+feature_tool get prints every feature of the pool as zpool get does (disabled, enabled or active) from a read-only
+libzpool import (output kept per run: features_pre.out, features.out).
+
+== feature state of the inputs
+As generated, every one of the 16 inputs (so every copy): raidz_parity_epochs enabled; all other 48 features disabled.
+Before the move, every one of the 96 copies: extensible_dataset enabled, physical_rewrite enabled, raidz_parity_epochs
+enabled; all others disabled.  (After a run, read-only: a hybrid copy shows extensible_dataset, physical_rewrite and
+raidz_parity_epochs active; a redirect copy shows extensible_dataset and raidz_parity_epochs active, physical_rewrite
+enabled; checked on D-r128-p30-hybrid-1 and D-r128-p30-redirect-1.)
+
+== correctness checks: all 96 runs passed every one
+  copy, both feature reads and the enable: rc 0 in 96/96
+  pre-flight check: accepted in 96/96 (error 0); refused DVAs 0
+  census after the move: 0 in 96/96
+  scrub before the move: finished, 0 errors, 96/96
+  verify after the move: PASS in 96/96 (C data comparison; sha256 equal to run.py's expected_sha() for the head and @retained)
+  drop-retained: PASS in 96/96; verify after drop-retained: PASS in 96/96
+  cold read-only import (both reports): 0 damaged entries; entries = the count after the move; entries reached from block
+    pointers = the table's count, in 96/96
+  ENOSPC fill on D (48): ENOSPC reached, pool not suspended, charged/available 0.99998-1.00162, 0 gang blocks in 48/48
+  redirect runs: kept bytes = the pre-flight's predicted rmn_redirect_keep in 48/48
+  no run failed, no stop condition, no crash, no core
+
+== what differed from the 29 October run
+  - the feature state before the move (the change above);
+  - inputs: on 29 October each run created its own input with the generator; now each tree's 8 inputs were created once and
+    every run used a fresh sparse copy of one (as asked).  The copies' labels name the original member paths; the adapter,
+    the helper and the generator all import by scanning the copy's directory, which found the copy in every run;
+  - counts: identical in every case, mover and tree for the 3-run value sets of entries, entries after drop-retained,
+    cold-import entries, rewritten blocks, redirected DVAs, census round 1, census rewrite/redirect split, the inventory,
+    txgs and fill gang blocks;
+  - kept bytes: 3 cells whose 3 values moved within the two values both dates show (R 16K 0 % redirect, D 16K 0 % redirect:
+    9928704 in all three, against 9920512 once or twice on 29 October; D 16K 100 % redirect: 10002432 in all three, against
+    9994240 once): 2 sectors of 4 KiB, a placement difference, not a different set of entries;
+  - fill: D 128K 10 % hybrid wrote 4904 new 128K blocks in one of its three fills (4896 in the others and on 29 October);
+  - table KiB on disk (log + block-pointer ZAP, as allocated) moves between runs in steps of 28.5-29 KiB on both dates; the
+    medians differ in some cells by one step (e.g. R 128K 0 % redirect 259.0 against 230.0), within the ranges both dates show;
+  - costs: Nov/Oct ratio of the medians over the 32 tree x case x mover cells: mover s median 1.016 (0.896-1.184), scrub s
+    1.073 (1.009-1.167), census walk s 1.010 (0.847-1.150), written MiB 1.005 (0.992-1.013), peak heap 1.003 (0.867-1.226).
+    Scrubs were about 7 % slower in every cell, both movers; nothing else moved beyond the run-to-run spread.  Peak heap
+    includes libzpool's ARC and dbufs, so it follows what the caches hold, not the table alone.
+
+== what could not be done
+  - zpool get all feature@ (needs the kernel module): replaced by feature_tool get, same states;
+  - git push (no credentials on this VM): the commit is local, its patch is in the reply;
+  - R is still the 29 October release build without zdb (zdb does not compile without ZFS_DEBUG);
+  - as on 29 October, the raw member hashes of each run copy around its read-only verify were not taken (the 16 originals
+    were hashed before and after all runs, unchanged); the fill ran after drop-retained, never with the snapshot held; and
+    the pending cases of the protocol (clones, dedup and BRT sharing, keyless encryption with an ACK-bearing ZIL, gang and
+    multi-DVA, crash cuts, too-full pools, readers held across reuse, offline child / return / resilver / replacement,
+    kernel) are still pending.
+
+== the tables asked for (median [min-max] over the 3 runs), then every column of 29 October
+-- TABLE ROWS: entries, table KiB, kept KiB, entries after drop-retained, tree R: median [min-max] over the runs
+  case       mode      n  entries  table_KiB  kept_KiB  entries_after_drop
+  128K 0%    hybrid    3  0        0.0        0         0                 
+  128K 0%    redirect  3  116      259.0      480       116               
+  128K 10%   hybrid    3  26       115.0      120       0                 
+  128K 10%   redirect  3  132      345.0      560       106               
+  128K 30%   hybrid    3  46       144.0      200       0                 
+  128K 30%   redirect  3  132      316.5      560       86                
+  128K 100%  hybrid    3  130      316.5      552       14                
+  128K 100%  redirect  3  130      316.5      552       14                
+  16K 0%     hybrid    3  0        0.0        0         0                 
+  16K 0%     redirect  3  816      1093.0     9696      816               
+  16K 10%    hybrid    3  96       230.0      1040      0                 
+  16K 10%    redirect  3  832      1093.0     9776      736               
+  16K 30%    hybrid    3  256      460.0      2976      0                 
+  16K 30%    redirect  3  832      1064.0     9776      576               
+  16K 100%   hybrid    3  830      1150.5     9768      14                
+  16K 100%   redirect  3  830      1150.5     9768      14                
+
+-- COSTS: mover s, written MiB, census walk s, scrub s, peak heap MiB during the move (peak heap includes libzpool's ARC and dbufs), tree R: median [min-max] over the runs
+  case       mode      n  mover_s              written_MiB          walk_s                  scrub_s              peak_heap_MiB        peak_heap+mmap_MiB 
+  128K 0%    hybrid    3  0.092 [0.084-0.146]  23.32 [23.25-23.46]  0.0042 [0.0040-0.0043]  0.105 [0.100-0.108]  34.47 [28.20-35.88]  82.87 [76.60-84.28]
+  128K 0%    redirect  3  0.377 [0.347-0.400]  23.38 [23.38-23.42]  0.0041 [0.0040-0.0054]  0.099 [0.099-0.102]  17.20 [17.18-17.21]  65.61 [65.59-65.61]
+  128K 10%   hybrid    3  0.161 [0.155-0.165]  25.40 [25.36-25.50]  0.0065 [0.0062-0.0075]  0.111 [0.107-0.114]  28.88 [22.97-31.68]  77.29 [71.38-80.08]
+  128K 10%   redirect  3  0.393 [0.391-0.433]  25.41 [25.38-25.59]  0.0066 [0.0063-0.0068]  0.104 [0.104-0.105]  16.90 [16.82-16.96]  65.31 [65.22-65.36]
+  128K 30%   hybrid    3  0.220 [0.200-0.221]  25.39 [25.29-25.49]  0.0066 [0.0066-0.0078]  0.109 [0.108-0.110]  21.81 [20.37-22.64]  70.22 [68.78-71.04]
+  128K 30%   redirect  3  0.391 [0.388-0.409]  25.41 [25.34-25.48]  0.0065 [0.0059-0.0090]  0.107 [0.106-0.111]  16.89 [16.73-16.89]  65.29 [65.13-65.30]
+  128K 100%  hybrid    3  0.389 [0.380-0.411]  25.55 [25.45-25.59]  0.0059 [0.0055-0.0059]  0.105 [0.104-0.107]  17.26 [17.26-17.26]  65.66 [65.66-65.67]
+  128K 100%  redirect  3  0.376 [0.375-0.381]  25.24 [25.24-25.31]  0.0065 [0.0060-0.0081]  0.105 [0.103-0.106]  17.11 [17.10-17.13]  65.51 [65.51-65.53]
+  16K 0%     hybrid    3  0.182 [0.172-0.191]  30.43 [30.32-30.43]  0.0045 [0.0041-0.0052]  0.154 [0.132-0.156]  32.08 [31.80-34.48]  80.48 [80.20-82.88]
+  16K 0%     redirect  3  2.396 [2.370-2.449]  44.32 [44.21-44.35]  0.0049 [0.0045-0.0064]  0.146 [0.135-0.147]  7.19 [7.16-7.20]     55.59 [55.56-55.61]
+  16K 10%    hybrid    3  0.405 [0.392-0.422]  32.57 [32.57-32.67]  0.0065 [0.0060-0.0070]  0.147 [0.137-0.151]  32.32 [30.02-38.64]  80.72 [78.42-87.04]
+  16K 10%    redirect  3  2.448 [2.391-2.486]  44.78 [44.74-44.88]  0.0062 [0.0061-0.0062]  0.142 [0.141-0.145]  7.23 [7.13-7.23]     55.63 [55.54-55.64]
+  16K 30%    hybrid    3  0.822 [0.790-0.826]  34.56 [34.47-34.60]  0.0063 [0.0061-0.0068]  0.143 [0.138-0.153]  23.70 [22.18-24.95]  72.10 [70.58-73.35]
+  16K 30%    redirect  3  2.367 [2.331-2.385]  44.91 [44.85-45.02]  0.0070 [0.0067-0.0095]  0.139 [0.138-0.143]  7.26 [7.24-7.27]     55.66 [55.64-55.67]
+  16K 100%   hybrid    3  2.189 [2.186-2.220]  46.64 [46.57-46.64]  0.0061 [0.0060-0.0092]  0.149 [0.147-0.154]  7.25 [7.24-7.26]     55.66 [55.64-55.66]
+  16K 100%   redirect  3  2.230 [2.184-2.257]  44.74 [44.67-44.78]  0.0061 [0.0061-0.0068]  0.145 [0.144-0.150]  7.24 [7.23-7.25]     55.64 [55.64-55.65]
+
+-- TABLE ROWS: entries, table KiB, kept KiB, entries after drop-retained, tree D: median [min-max] over the runs
+  case       mode      n  entries  table_KiB  kept_KiB  entries_after_drop
+  128K 0%    hybrid    3  0        0.0        0         0                 
+  128K 0%    redirect  3  116      259.0      480       116               
+  128K 10%   hybrid    3  26       115.0      120       0                 
+  128K 10%   redirect  3  132      287.5      560       106               
+  128K 30%   hybrid    3  46       144.0      200       0                 
+  128K 30%   redirect  3  132      316.5      560       86                
+  128K 100%  hybrid    3  130      316.5      552       14                
+  128K 100%  redirect  3  130      316.5      552       14                
+  16K 0%     hybrid    3  0        0.0        0         0                 
+  16K 0%     redirect  3  816      1064.0     9696      816               
+  16K 10%    hybrid    3  96       230.0      1040      0                 
+  16K 10%    redirect  3  832      1064.0     9776      736               
+  16K 30%    hybrid    3  256      489.0      2976      0                 
+  16K 30%    redirect  3  832      1093.0     9776      576               
+  16K 100%   hybrid    3  830      1093.0     9768      14                
+  16K 100%   redirect  3  830      1093.0     9768      14                
+
+-- COSTS: mover s, written MiB, census walk s, scrub s, peak heap MiB during the move (peak heap includes libzpool's ARC and dbufs), tree D: median [min-max] over the runs
+  case       mode      n  mover_s              written_MiB          walk_s                  scrub_s              peak_heap_MiB        peak_heap+mmap_MiB 
+  128K 0%    hybrid    3  0.095 [0.090-0.095]  23.19 [23.09-23.33]  0.0045 [0.0043-0.0049]  0.120 [0.107-0.121]  38.01 [36.49-43.90]  86.41 [84.89-92.30]
+  128K 0%    redirect  3  0.389 [0.373-0.410]  23.35 [23.28-23.42]  0.0041 [0.0041-0.0043]  0.110 [0.106-0.111]  17.23 [17.23-17.24]  65.63 [65.63-65.65]
+  128K 10%   hybrid    3  0.161 [0.154-0.170]  25.46 [25.26-25.50]  0.0066 [0.0063-0.0067]  0.113 [0.107-0.116]  32.35 [29.30-36.54]  80.75 [77.71-84.95]
+  128K 10%   redirect  3  0.433 [0.430-0.462]  25.38 [25.27-25.38]  0.0070 [0.0062-0.0077]  0.114 [0.113-0.118]  16.92 [16.90-17.01]  65.32 [65.30-65.41]
+  128K 30%   hybrid    3  0.224 [0.215-0.242]  25.46 [25.29-25.56]  0.0071 [0.0062-0.0072]  0.115 [0.112-0.118]  26.18 [22.95-26.21]  74.58 [71.35-74.62]
+  128K 30%   redirect  3  0.419 [0.414-0.446]  25.41 [25.31-25.41]  0.0066 [0.0063-0.0136]  0.122 [0.115-0.123]  16.89 [16.89-16.91]  65.29 [65.29-65.31]
+  128K 100%  hybrid    3  0.392 [0.391-0.404]  25.70 [25.62-25.73]  0.0064 [0.0058-0.0089]  0.115 [0.110-0.122]  17.45 [17.44-17.45]  65.85 [65.84-65.86]
+  128K 100%  redirect  3  0.403 [0.377-0.410]  25.28 [25.25-25.38]  0.0061 [0.0059-0.0064]  0.111 [0.111-0.136]  17.32 [17.31-17.33]  65.72 [65.71-65.74]
+  16K 0%     hybrid    3  0.156 [0.156-0.173]  30.36 [30.32-30.36]  0.0049 [0.0041-0.0050]  0.155 [0.131-0.157]  30.44 [30.33-30.66]  78.84 [78.73-79.06]
+  16K 0%     redirect  3  2.547 [2.509-2.559]  43.97 [43.97-44.04]  0.0043 [0.0042-0.0044]  0.158 [0.148-0.159]  7.22 [7.22-7.23]     55.63 [55.63-55.63]
+  16K 10%    hybrid    3  0.391 [0.387-0.403]  32.60 [32.57-32.74]  0.0063 [0.0059-0.0070]  0.150 [0.139-0.154]  30.75 [28.83-32.34]  79.16 [77.24-80.75]
+  16K 10%    redirect  3  2.543 [2.474-2.626]  44.82 [44.78-44.85]  0.0063 [0.0061-0.0065]  0.156 [0.151-0.165]  7.27 [7.26-7.27]     55.67 [55.67-55.67]
+  16K 30%    hybrid    3  0.838 [0.806-0.883]  34.46 [34.42-34.49]  0.0068 [0.0067-0.0081]  0.154 [0.145-0.164]  24.58 [23.49-25.63]  72.98 [71.90-74.03]
+  16K 30%    redirect  3  2.562 [2.536-2.598]  44.92 [44.90-45.02]  0.0066 [0.0061-0.0070]  0.160 [0.154-0.165]  7.47 [7.30-7.66]     55.87 [55.70-56.06]
+  16K 100%   hybrid    3  2.395 [2.335-2.404]  46.55 [46.47-46.64]  0.0065 [0.0062-0.0066]  0.162 [0.159-0.164]  7.45 [7.44-7.82]     55.86 [55.84-56.22]
+  16K 100%   redirect  3  2.305 [2.259-2.410]  44.63 [44.57-44.64]  0.0062 [0.0059-0.0083]  0.148 [0.144-0.164]  7.66 [7.44-7.90]     56.07 [55.84-56.30]
+
+== every column of 29 October, same layout
+== tree R
+-- inventory of old-epoch DVAs before the move, tree R: median [min-max] over the runs
+  case       mode      n  head_data  head_data_KiB  snap_data  snap_data_KiB  head_meta  head_meta_KiB  other_meta  other_meta_KiB  mos  mos_KiB  gang
+  128K 0%    hybrid    3  100        16000          0          0              16         224            0           0               168  1368     0   
+  128K 0%    redirect  3  100        16000          0          0              16         224            0           0               168  1368     0   
+  128K 10%   hybrid    3  90         14400          10         1600           16         224            16          224             174  1440     0   
+  128K 10%   redirect  3  90         14400          10         1600           16         224            16          224             174  1440     0   
+  128K 30%   hybrid    3  70         11200          30         4800           16         224            16          224             174  1440     0   
+  128K 30%   redirect  3  70         11200          30         4800           16         224            16          224             174  1440     0   
+  128K 100%  hybrid    3  0          0              100        16000          14         192            16          224             174  1440     0   
+  128K 100%  redirect  3  0          0              100        16000          14         192            16          224             174  1440     0   
+  16K 0%     hybrid    3  800        19200          0          0              16         288            0           0               168  1368     0   
+  16K 0%     redirect  3  800        19200          0          0              16         288            0           0               168  1368     0   
+  16K 10%    hybrid    3  720        17280          80         1920           16         288            16          224             174  1440     0   
+  16K 10%    redirect  3  720        17280          80         1920           16         288            16          224             174  1440     0   
+  16K 30%    hybrid    3  560        13440          240        5760           16         272            16          240             174  1440     0   
+  16K 30%    redirect  3  560        13440          240        5760           16         272            16          240             174  1440     0   
+  16K 100%   hybrid    3  0          0              800        19200          14         192            16          288             174  1440     0   
+  16K 100%   redirect  3  0          0              800        19200          14         192            16          288             174  1440     0   
+
+-- mover time, I/O and walks, tree R: median [min-max] over the runs
+  case       mode      n  mover_s              redirect_s           rewrite_s            read_MiB             write_MiB            txgs  census_walk_s           scrub_s            
+  128K 0%    hybrid    3  0.092 [0.084-0.146]  0.000 [0.000-0.000]  0.074 [0.071-0.127]  12.50                23.32 [23.25-23.46]  6     0.0042 [0.0040-0.0043]  0.105 [0.100-0.108]
+  128K 0%    redirect  3  0.377 [0.347-0.400]  0.362 [0.334-0.384]  0.000                12.62                23.38 [23.38-23.42]  4     0.0041 [0.0040-0.0054]  0.099 [0.099-0.102]
+  128K 10%   hybrid    3  0.161 [0.155-0.165]  0.063 [0.062-0.064]  0.079 [0.073-0.079]  12.61                25.40 [25.36-25.50]  7     0.0065 [0.0062-0.0075]  0.111 [0.107-0.114]
+  128K 10%   redirect  3  0.393 [0.391-0.433]  0.374 [0.372-0.411]  0.000                12.72                25.41 [25.38-25.59]  5     0.0066 [0.0063-0.0068]  0.104 [0.104-0.105]
+  128K 30%   hybrid    3  0.220 [0.200-0.221]  0.134 [0.116-0.137]  0.065 [0.065-0.066]  12.61                25.39 [25.29-25.49]  7     0.0066 [0.0066-0.0078]  0.109 [0.108-0.110]
+  128K 30%   redirect  3  0.391 [0.388-0.409]  0.372 [0.367-0.389]  0.000                12.72                25.41 [25.34-25.48]  5     0.0065 [0.0059-0.0090]  0.107 [0.106-0.111]
+  128K 100%  hybrid    3  0.389 [0.380-0.411]  0.324 [0.319-0.351]  0.003 [0.003-0.004]  12.71                25.55 [25.45-25.59]  8     0.0059 [0.0055-0.0059]  0.105 [0.104-0.107]
+  128K 100%  redirect  3  0.376 [0.375-0.381]  0.358 [0.357-0.362]  0.000                12.71                25.24 [25.24-25.31]  5     0.0065 [0.0060-0.0081]  0.105 [0.103-0.106]
+  16K 0%     hybrid    3  0.182 [0.172-0.191]  0.000 [0.000-0.000]  0.169 [0.159-0.175]  12.50 [12.50-12.62]  30.43 [30.32-30.43]  6     0.0045 [0.0041-0.0052]  0.154 [0.132-0.156]
+  16K 0%     redirect  3  2.396 [2.370-2.449]  2.382 [2.357-2.435]  0.000                12.66                44.32 [44.21-44.35]  10    0.0049 [0.0045-0.0064]  0.146 [0.135-0.147]
+  16K 10%    hybrid    3  0.405 [0.392-0.422]  0.244 [0.234-0.247]  0.143 [0.139-0.153]  12.61                32.57 [32.57-32.67]  7     0.0065 [0.0060-0.0070]  0.147 [0.137-0.151]
+  16K 10%    redirect  3  2.448 [2.391-2.486]  2.428 [2.372-2.463]  0.000                12.77                44.78 [44.74-44.88]  10    0.0062 [0.0061-0.0062]  0.142 [0.141-0.145]
+  16K 30%    hybrid    3  0.822 [0.790-0.826]  0.679 [0.651-0.688]  0.119 [0.114-0.127]  12.62                34.56 [34.47-34.60]  8     0.0063 [0.0061-0.0068]  0.143 [0.138-0.153]
+  16K 30%    redirect  3  2.367 [2.331-2.385]  2.345 [2.309-2.363]  0.000                12.77                44.91 [44.85-45.02]  10    0.0070 [0.0067-0.0095]  0.139 [0.138-0.143]
+  16K 100%   hybrid    3  2.189 [2.186-2.220]  2.129 [2.128-2.161]  0.003 [0.003-0.004]  12.76                46.64 [46.57-46.64]  14    0.0061 [0.0060-0.0092]  0.149 [0.147-0.154]
+  16K 100%   redirect  3  2.230 [2.184-2.257]  2.210 [2.162-2.236]  0.000                12.76                44.74 [44.67-44.78]  10    0.0061 [0.0061-0.0068]  0.145 [0.144-0.150]
+
+-- what the mover did, the table, kept sectors, tree R: median [min-max] over the runs
+  case       mode      n  redirected  rewritten  round1  entries  table_KiB  kept_sectors  kept_KiB  extra_KiB  census_left
+  128K 0%    hybrid    3  0           100        -       0        0.0        0             0         0          0          
+  128K 0%    redirect  3  116         0          -       116      259.0      120           480       6192       0          
+  128K 10%   hybrid    3  26          90         -       26       115.0      30            120       792        0          
+  128K 10%   redirect  3  132         0          -       132      345.0      140           560       6384       0          
+  128K 30%   hybrid    3  46          70         -       46       144.0      50            200       1992       0          
+  128K 30%   redirect  3  132         0          -       132      316.5      140           560       6384       0          
+  128K 100%  hybrid    3  130         0          14      130      316.5      138           552       6360       0          
+  128K 100%  redirect  3  130         0          -       130      316.5      138           552       6360       0          
+  16K 0%     hybrid    3  0           800        -       0        0.0        0             0         0          0          
+  16K 0%     redirect  3  816         0          -       816      1093.0     2424          9696      19416      0          
+  16K 10%    hybrid    3  96          720        -       96       230.0      260           1040      2112       0          
+  16K 10%    redirect  3  832         0          -       832      1093.0     2444          9776      19608      0          
+  16K 30%    hybrid    3  256         560        -       256      460.0      744           2976      5976       0          
+  16K 30%    redirect  3  832         0          -       832      1064.0     2444          9776      19632      0          
+  16K 100%   hybrid    3  830         0          14      830      1150.5     2442          9768      19584      0          
+  16K 100%   redirect  3  830         0          -       830      1150.5     2442          9768      19584      0          
+
+-- heap (mallinfo2 uordblks; peak+mmap adds hblkhd) and maxrss, tree R: median [min-max] over the runs
+  case       mode      n  idle_MiB          peak_move_MiB        end_MiB              peak+mmap_MiB        maxrss_MiB         
+  128K 0%    hybrid    3  3.08 [3.08-3.08]  34.47 [28.20-35.88]  16.22 [16.22-16.23]  82.87 [76.60-84.28]  120.7 [118.5-121.2]
+  128K 0%    redirect  3  3.08 [3.08-3.08]  17.20 [17.18-17.21]  3.81 [3.80-3.82]     65.61 [65.59-65.61]  68.4 [68.1-68.5]   
+  128K 10%   hybrid    3  3.09 [3.09-3.09]  28.88 [22.97-31.68]  15.21 [15.21-15.21]  77.29 [71.38-80.08]  115.4 [114.1-116.2]
+  128K 10%   redirect  3  3.09 [3.09-3.13]  16.90 [16.82-16.96]  3.94 [3.94-3.94]     65.31 [65.22-65.36]  67.8 [66.7-68.1]   
+  128K 30%   hybrid    3  3.09 [3.09-3.09]  21.81 [20.37-22.64]  12.69 [12.69-12.70]  70.22 [68.78-71.04]  99.1 [97.8-101.4]  
+  128K 30%   redirect  3  3.09 [3.08-3.09]  16.89 [16.73-16.89]  3.93 [3.92-3.93]     65.29 [65.13-65.30]  67.6 [67.4-68.2]   
+  128K 100%  hybrid    3  3.09 [3.09-3.09]  17.26 [17.26-17.26]  3.92 [3.92-3.92]     65.66 [65.66-65.67]  68.1 [67.8-69.0]   
+  128K 100%  redirect  3  3.09 [3.08-3.09]  17.11 [17.10-17.13]  3.92 [3.92-3.92]     65.51 [65.51-65.53]  67.7 [67.1-67.9]   
+  16K 0%     hybrid    3  3.08 [3.08-3.09]  32.08 [31.80-34.48]  16.49 [16.48-16.51]  80.48 [80.20-82.88]  125.4 [123.3-126.0]
+  16K 0%     redirect  3  3.08 [3.08-3.12]  7.19 [7.16-7.20]     4.26 [4.26-4.26]     55.59 [55.56-55.61]  56.6 [56.0-58.3]   
+  16K 10%    hybrid    3  3.09 [3.08-3.09]  32.32 [30.02-38.64]  15.51 [15.50-15.52]  80.72 [78.42-87.04]  122.9 [117.0-124.9]
+  16K 10%    redirect  3  3.09 [3.09-3.09]  7.23 [7.13-7.23]     4.34 [4.34-4.34]     55.63 [55.54-55.64]  57.2 [56.8-57.4]   
+  16K 30%    hybrid    3  3.09 [3.09-3.14]  23.70 [22.18-24.95]  13.05 [13.04-13.06]  72.10 [70.58-73.35]  104.3 [104.0-105.2]
+  16K 30%    redirect  3  3.12 [3.09-3.13]  7.26 [7.24-7.27]     4.33 [4.32-4.33]     55.66 [55.64-55.67]  58.9 [57.2-59.2]   
+  16K 100%   hybrid    3  3.09 [3.09-3.12]  7.25 [7.24-7.26]     4.36 [4.36-4.36]     55.66 [55.64-55.66]  57.0 [56.9-58.0]   
+  16K 100%   redirect  3  3.09 [3.08-3.09]  7.24 [7.23-7.25]     4.35 [4.35-4.36]     55.64 [55.64-55.65]  57.3 [56.6-58.8]   
+
+-- cold read-only import, then after drop-retained, tree R: median [min-max] over the runs
+  case       mode      n  cold_entries  cold_table_KiB  cold_kept  cold_heap_MiB     cold_rss_MiB      drop_entries  drop_tombs  drop_table_KiB  drop_heap_MiB   
+  128K 0%    hybrid    3  0             0.0             0          2.18 [2.17-2.18]  48.2 [48.2-48.4]  0             0           0.0             2.18 [2.18-2.18]
+  128K 0%    redirect  3  116           259.0           120        2.32 [2.32-2.32]  48.5 [48.5-48.7]  116           0           259.0           2.32 [2.32-2.32]
+  128K 10%   hybrid    3  26            115.0           30         2.32 [2.32-2.32]  48.9 [48.3-49.2]  0             0           115.0           2.50 [2.50-2.50]
+  128K 10%   redirect  3  132           345.0           140        2.32 [2.32-2.32]  48.8 [48.5-49.2]  106           0           345.0           2.51 [2.50-2.51]
+  128K 30%   hybrid    3  46            144.0           50         2.32 [2.32-2.32]  48.9 [48.8-49.0]  0             0           115.0           2.50 [2.49-2.50]
+  128K 30%   redirect  3  132           316.5           140        2.32 [2.32-2.32]  48.8 [48.1-48.8]  86            0           316.5           2.50 [2.50-2.50]
+  128K 100%  hybrid    3  130           316.5           138        2.32 [2.32-2.32]  48.3 [48.3-48.7]  14            0           316.5           2.50 [2.50-2.50]
+  128K 100%  redirect  3  130           316.5           138        2.32 [2.32-2.32]  48.7 [48.4-48.9]  14            0           316.5           2.50 [2.50-2.51]
+  16K 0%     hybrid    3  0             0.0             0          2.18 [2.18-2.18]  48.5 [48.2-48.5]  0             0           0.0             2.18 [2.18-2.18]
+  16K 0%     redirect  3  816           1093.0          2424       2.35 [2.35-2.35]  48.4 [48.1-48.6]  816           0           1093.0          2.36 [2.36-2.36]
+  16K 10%    hybrid    3  96            230.0           260        2.32 [2.32-2.32]  48.6 [48.3-48.6]  0             0           144.0           2.50 [2.49-2.50]
+  16K 10%    redirect  3  832           1093.0          2444       2.36 [2.36-2.36]  48.9 [48.8-49.1]  736           0           1093.0          2.54 [2.54-2.54]
+  16K 30%    hybrid    3  256           460.0           744        2.33 [2.33-2.33]  48.6 [48.5-48.8]  0             0           144.0           2.50 [2.50-2.50]
+  16K 30%    redirect  3  832           1064.0          2444       2.36 [2.36-2.36]  48.9 [48.9-49.1]  576           0           1064.0          2.53 [2.53-2.53]
+  16K 100%   hybrid    3  830           1150.5          2442       2.36 [2.36-2.36]  49.1 [48.7-49.2]  14            0           834.0           2.51 [2.50-2.51]
+  16K 100%   redirect  3  830           1150.5          2442       2.36 [2.36-2.36]  48.8 [48.3-48.9]  14            0           834.0           2.51 [2.50-2.51]
+
+== tree D
+-- inventory of old-epoch DVAs before the move, tree D: median [min-max] over the runs
+  case       mode      n  head_data  head_data_KiB  snap_data  snap_data_KiB  head_meta  head_meta_KiB  other_meta  other_meta_KiB  mos  mos_KiB  gang
+  128K 0%    hybrid    3  100        16000          0          0              16         224            0           0               168  1368     0   
+  128K 0%    redirect  3  100        16000          0          0              16         224            0           0               168  1368     0   
+  128K 10%   hybrid    3  90         14400          10         1600           16         224            16          224             174  1440     0   
+  128K 10%   redirect  3  90         14400          10         1600           16         224            16          224             174  1440     0   
+  128K 30%   hybrid    3  70         11200          30         4800           16         224            16          224             174  1440     0   
+  128K 30%   redirect  3  70         11200          30         4800           16         224            16          224             174  1440     0   
+  128K 100%  hybrid    3  0          0              100        16000          14         192            16          224             174  1440     0   
+  128K 100%  redirect  3  0          0              100        16000          14         192            16          224             174  1440     0   
+  16K 0%     hybrid    3  800        19200          0          0              16         288            0           0               168  1368     0   
+  16K 0%     redirect  3  800        19200          0          0              16         288            0           0               168  1368     0   
+  16K 10%    hybrid    3  720        17280          80         1920           16         288            16          224             174  1440     0   
+  16K 10%    redirect  3  720        17280          80         1920           16         288            16          224             174  1440     0   
+  16K 30%    hybrid    3  560        13440          240        5760           16         272            16          240             174  1440     0   
+  16K 30%    redirect  3  560        13440          240        5760           16         272            16          240             174  1440     0   
+  16K 100%   hybrid    3  0          0              800        19200          14         192            16          288             174  1440     0   
+  16K 100%   redirect  3  0          0              800        19200          14         192            16          288             174  1440     0   
+
+-- mover time, I/O and walks, tree D: median [min-max] over the runs
+  case       mode      n  mover_s              redirect_s           rewrite_s            read_MiB  write_MiB            txgs  census_walk_s           scrub_s            
+  128K 0%    hybrid    3  0.095 [0.090-0.095]  0.000                0.080 [0.076-0.081]  12.50     23.19 [23.09-23.33]  6     0.0045 [0.0043-0.0049]  0.120 [0.107-0.121]
+  128K 0%    redirect  3  0.389 [0.373-0.410]  0.374 [0.360-0.396]  0.000                12.62     23.35 [23.28-23.42]  4     0.0041 [0.0041-0.0043]  0.110 [0.106-0.111]
+  128K 10%   hybrid    3  0.161 [0.154-0.170]  0.067 [0.065-0.069]  0.072 [0.069-0.078]  12.61     25.46 [25.26-25.50]  7     0.0066 [0.0063-0.0067]  0.113 [0.107-0.116]
+  128K 10%   redirect  3  0.433 [0.430-0.462]  0.410 [0.410-0.441]  0.000                12.72     25.38 [25.27-25.38]  5     0.0070 [0.0062-0.0077]  0.114 [0.113-0.118]
+  128K 30%   hybrid    3  0.224 [0.215-0.242]  0.132 [0.130-0.132]  0.069 [0.065-0.086]  12.61     25.46 [25.29-25.56]  7     0.0071 [0.0062-0.0072]  0.115 [0.112-0.118]
+  128K 30%   redirect  3  0.419 [0.414-0.446]  0.395 [0.391-0.421]  0.000                12.72     25.41 [25.31-25.41]  5     0.0066 [0.0063-0.0136]  0.122 [0.115-0.123]
+  128K 100%  hybrid    3  0.392 [0.391-0.404]  0.326 [0.323-0.337]  0.004 [0.003-0.004]  12.71     25.70 [25.62-25.73]  8     0.0064 [0.0058-0.0089]  0.115 [0.110-0.122]
+  128K 100%  redirect  3  0.403 [0.377-0.410]  0.382 [0.358-0.385]  0.000                12.71     25.28 [25.25-25.38]  5     0.0061 [0.0059-0.0064]  0.111 [0.111-0.136]
+  16K 0%     hybrid    3  0.156 [0.156-0.173]  0.000 [0.000-0.000]  0.143 [0.142-0.160]  12.50     30.36 [30.32-30.36]  6     0.0049 [0.0041-0.0050]  0.155 [0.131-0.157]
+  16K 0%     redirect  3  2.547 [2.509-2.559]  2.533 [2.494-2.546]  0.000                12.66     43.97 [43.97-44.04]  10    0.0043 [0.0042-0.0044]  0.158 [0.148-0.159]
+  16K 10%    hybrid    3  0.391 [0.387-0.403]  0.241 [0.239-0.256]  0.127 [0.123-0.128]  12.61     32.60 [32.57-32.74]  7     0.0063 [0.0059-0.0070]  0.150 [0.139-0.154]
+  16K 10%    redirect  3  2.543 [2.474-2.626]  2.523 [2.454-2.602]  0.000                12.77     44.82 [44.78-44.85]  10    0.0063 [0.0061-0.0065]  0.156 [0.151-0.165]
+  16K 30%    hybrid    3  0.838 [0.806-0.883]  0.709 [0.684-0.736]  0.108 [0.100-0.126]  12.62     34.46 [34.42-34.49]  8     0.0068 [0.0067-0.0081]  0.154 [0.145-0.164]
+  16K 30%    redirect  3  2.562 [2.536-2.598]  2.541 [2.512-2.577]  0.000                12.77     44.92 [44.90-45.02]  10    0.0066 [0.0061-0.0070]  0.160 [0.154-0.165]
+  16K 100%   hybrid    3  2.395 [2.335-2.404]  2.324 [2.270-2.331]  0.004 [0.003-0.004]  12.76     46.55 [46.47-46.64]  14    0.0065 [0.0062-0.0066]  0.162 [0.159-0.164]
+  16K 100%   redirect  3  2.305 [2.259-2.410]  2.284 [2.239-2.390]  0.000                12.76     44.63 [44.57-44.64]  10    0.0062 [0.0059-0.0083]  0.148 [0.144-0.164]
+
+-- what the mover did, the table, kept sectors, tree D: median [min-max] over the runs
+  case       mode      n  redirected  rewritten  round1  entries  table_KiB  kept_sectors  kept_KiB  extra_KiB  census_left
+  128K 0%    hybrid    3  0           100        -       0        0.0        0             0         0          0          
+  128K 0%    redirect  3  116         0          -       116      259.0      120           480       6192       0          
+  128K 10%   hybrid    3  26          90         -       26       115.0      30            120       792        0          
+  128K 10%   redirect  3  132         0          -       132      287.5      140           560       6384       0          
+  128K 30%   hybrid    3  46          70         -       46       144.0      50            200       1992       0          
+  128K 30%   redirect  3  132         0          -       132      316.5      140           560       6384       0          
+  128K 100%  hybrid    3  130         0          14      130      316.5      138           552       6360       0          
+  128K 100%  redirect  3  130         0          -       130      316.5      138           552       6360       0          
+  16K 0%     hybrid    3  0           800        -       0        0.0        0             0         0          0          
+  16K 0%     redirect  3  816         0          -       816      1064.0     2424          9696      19416      0          
+  16K 10%    hybrid    3  96          720        -       96       230.0      260           1040      2112       0          
+  16K 10%    redirect  3  832         0          -       832      1064.0     2444          9776      19608      0          
+  16K 30%    hybrid    3  256         560        -       256      489.0      744           2976      5976       0          
+  16K 30%    redirect  3  832         0          -       832      1093.0     2444          9776      19632      0          
+  16K 100%   hybrid    3  830         0          14      830      1093.0     2442          9768      19584      0          
+  16K 100%   redirect  3  830         0          -       830      1093.0     2442          9768      19584      0          
+
+-- heap (mallinfo2 uordblks; peak+mmap adds hblkhd) and maxrss, tree D: median [min-max] over the runs
+  case       mode      n  idle_MiB          peak_move_MiB        end_MiB              peak+mmap_MiB        maxrss_MiB         
+  128K 0%    hybrid    3  3.19 [3.19-3.23]  38.01 [36.49-43.90]  16.29 [16.29-16.31]  86.41 [84.89-92.30]  122.8 [122.8-123.3]
+  128K 0%    redirect  3  3.19 [3.19-3.20]  17.23 [17.23-17.24]  3.85 [3.85-3.86]     65.63 [65.63-65.65]  68.3 [68.1-68.6]   
+  128K 10%   hybrid    3  3.20 [3.20-3.20]  32.35 [29.30-36.54]  15.28 [15.27-15.28]  80.75 [77.71-84.95]  118.3 [115.6-118.5]
+  128K 10%   redirect  3  3.20 [3.20-3.20]  16.92 [16.90-17.01]  3.94 [3.94-3.94]     65.32 [65.30-65.41]  68.5 [68.2-68.7]   
+  128K 30%   hybrid    3  3.20 [3.19-3.20]  26.18 [22.95-26.21]  12.76 [12.76-12.77]  74.58 [71.35-74.62]  102.2 [98.3-102.5] 
+  128K 30%   redirect  3  3.20 [3.20-3.20]  16.89 [16.89-16.91]  3.96 [3.95-3.96]     65.29 [65.29-65.31]  70.0 [68.7-70.8]   
+  128K 100%  hybrid    3  3.20 [3.19-3.20]  17.45 [17.44-17.45]  4.11 [4.11-4.11]     65.85 [65.84-65.86]  69.1 [68.2-70.3]   
+  128K 100%  redirect  3  3.20 [3.20-3.21]  17.32 [17.31-17.33]  4.11 [4.10-4.11]     65.72 [65.71-65.74]  68.8 [68.5-69.5]   
+  16K 0%     hybrid    3  3.19 [3.19-3.20]  30.44 [30.33-30.66]  16.74 [16.73-16.74]  78.84 [78.73-79.06]  123.1 [122.5-125.6]
+  16K 0%     redirect  3  3.19 [3.19-3.19]  7.22 [7.22-7.23]     4.28 [4.27-4.28]     55.63 [55.63-55.63]  57.5 [57.1-58.7]   
+  16K 10%    hybrid    3  3.20 [3.19-3.20]  30.75 [28.83-32.34]  15.73 [15.73-15.74]  79.16 [77.24-80.75]  117.8 [116.8-120.1]
+  16K 10%    redirect  3  3.20 [3.20-3.20]  7.27 [7.26-7.27]     4.34 [4.33-4.34]     55.67 [55.67-55.67]  57.5 [57.5-57.7]   
+  16K 30%    hybrid    3  3.20 [3.20-3.20]  24.58 [23.49-25.63]  13.24 [13.23-13.24]  72.98 [71.90-74.03]  103.3 [102.5-103.9]
+  16K 30%    redirect  3  3.20 [3.19-3.23]  7.47 [7.30-7.66]     4.36 [4.36-4.36]     55.87 [55.70-56.06]  58.8 [57.9-59.9]   
+  16K 100%   hybrid    3  3.20 [3.20-3.20]  7.45 [7.44-7.82]     4.51 [4.50-4.52]     55.86 [55.84-56.22]  58.6 [58.5-59.3]   
+  16K 100%   redirect  3  3.20 [3.20-3.20]  7.66 [7.44-7.90]     4.50 [4.50-4.50]     56.07 [55.84-56.30]  58.1 [58.0-58.2]   
+
+-- cold read-only import, then after drop-retained, tree D: median [min-max] over the runs
+  case       mode      n  cold_entries  cold_table_KiB  cold_kept  cold_heap_MiB     cold_rss_MiB      drop_entries  drop_tombs  drop_table_KiB  drop_heap_MiB   
+  128K 0%    hybrid    3  0             0.0             0          2.25 [2.25-2.25]  49.0 [48.6-49.1]  0             0           0.0             2.25 [2.24-2.25]
+  128K 0%    redirect  3  116           259.0           120        2.39 [2.39-2.40]  49.4 [49.3-49.5]  116           0           259.0           2.40 [2.40-2.40]
+  128K 10%   hybrid    3  26            115.0           30         2.40 [2.40-2.41]  49.4 [49.4-49.4]  0             0           115.0           2.58 [2.57-2.58]
+  128K 10%   redirect  3  132           287.5           140        2.40 [2.40-2.40]  49.6 [49.4-49.6]  106           0           287.5           2.58 [2.58-2.58]
+  128K 30%   hybrid    3  46            144.0           50         2.40 [2.40-2.40]  49.3 [49.2-49.9]  0             0           115.0           2.58 [2.57-2.58]
+  128K 30%   redirect  3  132           316.5           140        2.40 [2.40-2.40]  48.9 [48.9-49.2]  86            0           316.5           2.58 [2.58-2.59]
+  128K 100%  hybrid    3  130           316.5           138        2.55 [2.55-2.56]  49.4 [49.3-49.5]  14            0           316.5           2.74 [2.73-2.74]
+  128K 100%  redirect  3  130           316.5           138        2.55 [2.55-2.55]  49.6 [49.5-50.1]  14            0           316.5           2.74 [2.73-2.74]
+  16K 0%     hybrid    3  0             0.0             0          2.25 [2.25-2.26]  49.3 [49.2-49.4]  0             0           0.0             2.25 [2.25-2.26]
+  16K 0%     redirect  3  816           1064.0          2424       2.43 [2.43-2.43]  49.4 [48.6-49.6]  816           0           1064.0          2.43 [2.43-2.44]
+  16K 10%    hybrid    3  96            230.0           260        2.40 [2.40-2.41]  49.2 [48.8-49.5]  0             0           144.0           2.58 [2.58-2.58]
+  16K 10%    redirect  3  832           1064.0          2444       2.44 [2.44-2.44]  49.8 [49.4-49.9]  736           0           1064.0          2.62 [2.61-2.62]
+  16K 30%    hybrid    3  256           489.0           744        2.41 [2.41-2.41]  49.7 [49.4-50.0]  0             0           144.0           2.58 [2.58-2.58]
+  16K 30%    redirect  3  832           1093.0          2444       2.44 [2.43-2.44]  49.6 [49.4-49.9]  576           0           1093.0          2.61 [2.61-2.61]
+  16K 100%   hybrid    3  830           1093.0          2442       2.59 [2.59-2.60]  49.7 [49.4-49.7]  14            0           920.0           2.74 [2.74-2.75]
+  16K 100%   redirect  3  830           1093.0          2442       2.59 [2.59-2.60]  49.7 [49.6-49.9]  14            0           920.0           2.74 [2.74-2.75]
+
+-- post-move fill on a copy (after drop-retained), tree D: median [min-max] over the runs
+  case       mode      n  fill_entries  charged/avail           enospc  new_128K          gang  gang_pct  fill_s          
+  128K 0%    hybrid    3  0             1.0000 [1.0000-1.0001]  4       4888              0     0.00      2.76 [2.72-2.92]
+  128K 0%    redirect  3  116           1.0009 [1.0008-1.0009]  4       4888              0     0.00      2.86 [2.82-2.86]
+  128K 10%   hybrid    3  0             1.0003 [1.0000-1.0016]  4       4896 [4896-4904]  0     0.00      2.91 [2.81-3.02]
+  128K 10%   redirect  3  106           1.0006 [1.0006-1.0006]  4       4896              0     0.00      2.76 [2.71-3.01]
+  128K 30%   hybrid    3  0             1.0008 [1.0008-1.0008]  4       4920              0     0.00      2.81 [2.77-2.82]
+  128K 30%   redirect  3  86            1.0014 [1.0014-1.0015]  4       4920              0     0.00      2.92 [2.81-3.27]
+  128K 100%  hybrid    3  14            1.0014 [1.0013-1.0014]  4       4992              0     0.00      2.77 [2.76-3.12]
+  128K 100%  redirect  3  14            1.0013 [1.0013-1.0015]  4       4992              0     0.00      3.01 [2.97-3.32]
+  16K 0%     hybrid    3  0             1.0004                  4       4856              0     0.00      2.81 [2.81-2.82]
+  16K 0%     redirect  3  816           1.0011 [1.0011-1.0012]  4       4808              0     0.00      2.71 [2.66-2.76]
+  16K 10%    hybrid    3  0             1.0013 [1.0013-1.0016]  4       4872              0     0.00      2.82 [2.76-3.23]
+  16K 10%    redirect  3  736           1.0009                  4       4824              0     0.00      2.81 [2.66-3.02]
+  16K 30%    hybrid    3  0             1.0008 [1.0008-1.0010]  4       4896              0     0.00      2.86 [2.72-3.26]
+  16K 30%    redirect  3  576           1.0005 [1.0002-1.0006]  4       4856              0     0.00      2.96 [2.87-3.02]
+  16K 100%   hybrid    3  14            1.0014 [1.0014-1.0015]  4       4992              0     0.00      2.96 [2.86-3.52]
+  16K 100%   redirect  3  14            1.0014 [1.0014-1.0014]  4       4992              0     0.00      2.86 [2.76-2.91]
+
+Column notes as on 29 October: kept = the sum of each live entry's rde_old_reserved (4 KiB sectors); table KiB = log +
+block-pointer ZAP as allocated; peak heap = mallinfo2 uordblks peak during the move, peak+mmap adds hblkhd (the census's
+own 39 MiB arrays are mmapped); both include libzpool's ARC and dbufs.
+
+-- 1 November against 29 October: median Nov/Oct per tree, case and mover (value-set differences: "what differed" above)
+  R 128K 0% hybrid: entries 0/0; table_KiB 0.0/0.0; kept_KiB 0/0; entries_after_drop 0/0; mover_s 0.092/0.082; written_MiB 23.32/23.40; walk_s 0.0042/0.0043; scrub_s 0.105/0.101; peak_heap_MiB 34.47/28.17; peak_heap+mmap_MiB 82.87/76.57; rewritten 100/100; redirected 0/0; kept_sectors 0/0; cold_entries 0/0; round1 -/-; txgs 6/6; read_MiB 12.50/12.50; gang_pct -/-
+  R 128K 0% redirect: entries 116/116; table_KiB 259.0/230.0; kept_KiB 480/480; entries_after_drop 116/116; mover_s 0.377/0.344; written_MiB 23.38/23.42; walk_s 0.0041/0.0043; scrub_s 0.099/0.097; peak_heap_MiB 17.20/17.22; peak_heap+mmap_MiB 65.61/65.63; rewritten 0/0; redirected 116/116; kept_sectors 120/120; cold_entries 116/116; round1 -/-; txgs 4/4; read_MiB 12.62/12.62; gang_pct -/-
+  R 128K 10% hybrid: entries 26/26; table_KiB 115.0/115.0; kept_KiB 120/120; entries_after_drop 0/0; mover_s 0.161/0.144; written_MiB 25.40/25.18; walk_s 0.0065/0.0064; scrub_s 0.111/0.106; peak_heap_MiB 28.88/25.52; peak_heap+mmap_MiB 77.29/73.92; rewritten 90/90; redirected 26/26; kept_sectors 30/30; cold_entries 26/26; round1 -/-; txgs 7/7; read_MiB 12.61/12.61; gang_pct -/-
+  R 128K 10% redirect: entries 132/132; table_KiB 345.0/316.5; kept_KiB 560/560; entries_after_drop 106/106; mover_s 0.393/0.389; written_MiB 25.41/25.31; walk_s 0.0066/0.0065; scrub_s 0.104/0.102; peak_heap_MiB 16.90/16.90; peak_heap+mmap_MiB 65.31/65.30; rewritten 0/0; redirected 132/132; kept_sectors 140/140; cold_entries 132/132; round1 -/-; txgs 5/5; read_MiB 12.72/12.72; gang_pct -/-
+  R 128K 30% hybrid: entries 46/46; table_KiB 144.0/144.0; kept_KiB 200/200; entries_after_drop 0/0; mover_s 0.220/0.186; written_MiB 25.39/25.29; walk_s 0.0066/0.0059; scrub_s 0.109/0.100; peak_heap_MiB 21.81/22.83; peak_heap+mmap_MiB 70.22/71.23; rewritten 70/70; redirected 46/46; kept_sectors 50/50; cold_entries 46/46; round1 -/-; txgs 7/7; read_MiB 12.61/12.61; gang_pct -/-
+  R 128K 30% redirect: entries 132/132; table_KiB 316.5/316.5; kept_KiB 560/560; entries_after_drop 86/86; mover_s 0.391/0.395; written_MiB 25.41/25.24; walk_s 0.0065/0.0070; scrub_s 0.107/0.106; peak_heap_MiB 16.89/16.87; peak_heap+mmap_MiB 65.29/65.27; rewritten 0/0; redirected 132/132; kept_sectors 140/140; cold_entries 132/132; round1 -/-; txgs 5/5; read_MiB 12.72/12.72; gang_pct -/-
+  R 128K 100% hybrid: entries 130/130; table_KiB 316.5/316.5; kept_KiB 552/552; entries_after_drop 14/14; mover_s 0.389/0.371; written_MiB 25.55/25.45; walk_s 0.0059/0.0056; scrub_s 0.105/0.099; peak_heap_MiB 17.26/17.34; peak_heap+mmap_MiB 65.66/65.74; rewritten 0/0; redirected 130/130; kept_sectors 138/138; cold_entries 130/130; round1 14/14; txgs 8/8; read_MiB 12.71/12.71; gang_pct -/-
+  R 128K 100% redirect: entries 130/130; table_KiB 316.5/287.5; kept_KiB 552/552; entries_after_drop 14/14; mover_s 0.376/0.370; written_MiB 25.24/25.17; walk_s 0.0065/0.0058; scrub_s 0.105/0.098; peak_heap_MiB 17.11/17.24; peak_heap+mmap_MiB 65.51/65.64; rewritten 0/0; redirected 130/130; kept_sectors 138/138; cold_entries 130/130; round1 -/-; txgs 5/5; read_MiB 12.71/12.71; gang_pct -/-
+  R 16K 0% hybrid: entries 0/0; table_KiB 0.0/0.0; kept_KiB 0/0; entries_after_drop 0/0; mover_s 0.182/0.167; written_MiB 30.43/30.40; walk_s 0.0045/0.0042; scrub_s 0.154/0.132; peak_heap_MiB 32.08/37.00; peak_heap+mmap_MiB 80.48/85.40; rewritten 800/800; redirected 0/0; kept_sectors 0/0; cold_entries 0/0; round1 -/-; txgs 6/6; read_MiB 12.50/12.50; gang_pct -/-
+  R 16K 0% redirect: entries 816/816; table_KiB 1093.0/1121.5; kept_KiB 9696/9688; entries_after_drop 816/816; mover_s 2.396/2.364; written_MiB 44.32/43.89; walk_s 0.0049/0.0042; scrub_s 0.146/0.129; peak_heap_MiB 7.19/7.16; peak_heap+mmap_MiB 55.59/55.56; rewritten 0/0; redirected 816/816; kept_sectors 2424/2422; cold_entries 816/816; round1 -/-; txgs 10/10; read_MiB 12.66/12.67; gang_pct -/-
+  R 16K 10% hybrid: entries 96/96; table_KiB 230.0/230.0; kept_KiB 1040/1040; entries_after_drop 0/0; mover_s 0.405/0.416; written_MiB 32.57/32.46; walk_s 0.0065/0.0065; scrub_s 0.147/0.137; peak_heap_MiB 32.32/28.26; peak_heap+mmap_MiB 80.72/76.67; rewritten 720/720; redirected 96/96; kept_sectors 260/260; cold_entries 96/96; round1 -/-; txgs 7/7; read_MiB 12.61/12.61; gang_pct -/-
+  R 16K 10% redirect: entries 832/832; table_KiB 1093.0/1064.0; kept_KiB 9776/9776; entries_after_drop 736/736; mover_s 2.448/2.403; written_MiB 44.78/44.44; walk_s 0.0062/0.0065; scrub_s 0.142/0.136; peak_heap_MiB 7.23/7.35; peak_heap+mmap_MiB 55.63/55.75; rewritten 0/0; redirected 832/832; kept_sectors 2444/2444; cold_entries 832/832; round1 -/-; txgs 10/10; read_MiB 12.77/12.77; gang_pct -/-
+  R 16K 30% hybrid: entries 256/256; table_KiB 460.0/460.0; kept_KiB 2976/2976; entries_after_drop 0/0; mover_s 0.822/0.796; written_MiB 34.56/34.36; walk_s 0.0063/0.0063; scrub_s 0.143/0.135; peak_heap_MiB 23.70/22.60; peak_heap+mmap_MiB 72.10/71.00; rewritten 560/560; redirected 256/256; kept_sectors 744/744; cold_entries 256/256; round1 -/-; txgs 8/8; read_MiB 12.62/12.62; gang_pct -/-
+  R 16K 30% redirect: entries 832/832; table_KiB 1064.0/1064.0; kept_KiB 9776/9776; entries_after_drop 576/576; mover_s 2.367/2.396; written_MiB 44.91/44.39; walk_s 0.0070/0.0066; scrub_s 0.139/0.137; peak_heap_MiB 7.26/7.23; peak_heap+mmap_MiB 55.66/55.64; rewritten 0/0; redirected 832/832; kept_sectors 2444/2444; cold_entries 832/832; round1 -/-; txgs 10/10; read_MiB 12.77/12.77; gang_pct -/-
+  R 16K 100% hybrid: entries 830/830; table_KiB 1150.5/1121.5; kept_KiB 9768/9768; entries_after_drop 14/14; mover_s 2.189/2.224; written_MiB 46.64/46.02; walk_s 0.0061/0.0060; scrub_s 0.149/0.135; peak_heap_MiB 7.25/7.29; peak_heap+mmap_MiB 55.66/55.69; rewritten 0/0; redirected 830/830; kept_sectors 2442/2442; cold_entries 830/830; round1 14/14; txgs 14/14; read_MiB 12.76/12.76; gang_pct -/-
+  R 16K 100% redirect: entries 830/830; table_KiB 1150.5/1121.5; kept_KiB 9768/9768; entries_after_drop 14/14; mover_s 2.230/2.190; written_MiB 44.74/44.18; walk_s 0.0061/0.0061; scrub_s 0.145/0.140; peak_heap_MiB 7.24/7.22; peak_heap+mmap_MiB 55.64/55.62; rewritten 0/0; redirected 830/830; kept_sectors 2442/2442; cold_entries 830/830; round1 -/-; txgs 10/10; read_MiB 12.76/12.76; gang_pct -/-
+  D 128K 0% hybrid: entries 0/0; table_KiB 0.0/0.0; kept_KiB 0/0; entries_after_drop 0/0; mover_s 0.095/0.097; written_MiB 23.19/23.36; walk_s 0.0045/0.0044; scrub_s 0.120/0.109; peak_heap_MiB 38.01/35.89; peak_heap+mmap_MiB 86.41/84.29; rewritten 100/100; redirected 0/0; kept_sectors 0/0; cold_entries 0/0; round1 -/-; txgs 6/6; read_MiB 12.50/12.50; gang_pct 0.00/0.00
+  D 128K 0% redirect: entries 116/116; table_KiB 259.0/230.0; kept_KiB 480/480; entries_after_drop 116/116; mover_s 0.389/0.388; written_MiB 23.35/23.38; walk_s 0.0041/0.0046; scrub_s 0.110/0.107; peak_heap_MiB 17.23/17.22; peak_heap+mmap_MiB 65.63/65.62; rewritten 0/0; redirected 116/116; kept_sectors 120/120; cold_entries 116/116; round1 -/-; txgs 4/4; read_MiB 12.62/12.62; gang_pct 0.00/0.00
+  D 128K 10% hybrid: entries 26/26; table_KiB 115.0/115.0; kept_KiB 120/120; entries_after_drop 0/0; mover_s 0.161/0.162; written_MiB 25.46/25.18; walk_s 0.0066/0.0071; scrub_s 0.113/0.111; peak_heap_MiB 32.35/30.97; peak_heap+mmap_MiB 80.75/79.37; rewritten 90/90; redirected 26/26; kept_sectors 30/30; cold_entries 26/26; round1 -/-; txgs 7/7; read_MiB 12.61/12.61; gang_pct 0.00/0.00
+  D 128K 10% redirect: entries 132/132; table_KiB 287.5/316.5; kept_KiB 560/560; entries_after_drop 106/106; mover_s 0.433/0.421; written_MiB 25.38/25.23; walk_s 0.0070/0.0067; scrub_s 0.114/0.109; peak_heap_MiB 16.92/16.89; peak_heap+mmap_MiB 65.32/65.30; rewritten 0/0; redirected 132/132; kept_sectors 140/140; cold_entries 132/132; round1 -/-; txgs 5/5; read_MiB 12.72/12.72; gang_pct 0.00/0.00
+  D 128K 30% hybrid: entries 46/46; table_KiB 144.0/144.0; kept_KiB 200/200; entries_after_drop 0/0; mover_s 0.224/0.213; written_MiB 25.46/25.21; walk_s 0.0071/0.0075; scrub_s 0.115/0.104; peak_heap_MiB 26.18/21.36; peak_heap+mmap_MiB 74.58/69.76; rewritten 70/70; redirected 46/46; kept_sectors 50/50; cold_entries 46/46; round1 -/-; txgs 7/7; read_MiB 12.61/12.61; gang_pct 0.00/0.00
+  D 128K 30% redirect: entries 132/132; table_KiB 316.5/316.5; kept_KiB 560/560; entries_after_drop 86/86; mover_s 0.419/0.412; written_MiB 25.41/25.20; walk_s 0.0066/0.0069; scrub_s 0.122/0.106; peak_heap_MiB 16.89/16.91; peak_heap+mmap_MiB 65.29/65.31; rewritten 0/0; redirected 132/132; kept_sectors 140/140; cold_entries 132/132; round1 -/-; txgs 5/5; read_MiB 12.72/12.72; gang_pct 0.00/0.00
+  D 128K 100% hybrid: entries 130/130; table_KiB 316.5/287.5; kept_KiB 552/552; entries_after_drop 14/14; mover_s 0.392/0.392; written_MiB 25.70/25.52; walk_s 0.0064/0.0060; scrub_s 0.115/0.105; peak_heap_MiB 17.45/17.39; peak_heap+mmap_MiB 65.85/65.80; rewritten 0/0; redirected 130/130; kept_sectors 138/138; cold_entries 130/130; round1 14/14; txgs 8/8; read_MiB 12.71/12.71; gang_pct 0.00/0.00
+  D 128K 100% redirect: entries 130/130; table_KiB 316.5/316.5; kept_KiB 552/552; entries_after_drop 14/14; mover_s 0.403/0.386; written_MiB 25.28/25.24; walk_s 0.0061/0.0060; scrub_s 0.111/0.104; peak_heap_MiB 17.32/17.14; peak_heap+mmap_MiB 65.72/65.54; rewritten 0/0; redirected 130/130; kept_sectors 138/138; cold_entries 130/130; round1 -/-; txgs 5/5; read_MiB 12.71/12.71; gang_pct 0.00/0.00
+  D 16K 0% hybrid: entries 0/0; table_KiB 0.0/0.0; kept_KiB 0/0; entries_after_drop 0/0; mover_s 0.156/0.164; written_MiB 30.36/30.39; walk_s 0.0049/0.0043; scrub_s 0.155/0.143; peak_heap_MiB 30.44/33.67; peak_heap+mmap_MiB 78.84/82.08; rewritten 800/800; redirected 0/0; kept_sectors 0/0; cold_entries 0/0; round1 -/-; txgs 6/6; read_MiB 12.50/12.50; gang_pct 0.00/0.00
+  D 16K 0% redirect: entries 816/816; table_KiB 1064.0/1121.5; kept_KiB 9696/9696; entries_after_drop 816/816; mover_s 2.547/2.507; written_MiB 43.97/43.90; walk_s 0.0043/0.0048; scrub_s 0.158/0.145; peak_heap_MiB 7.22/7.21; peak_heap+mmap_MiB 55.63/55.62; rewritten 0/0; redirected 816/816; kept_sectors 2424/2424; cold_entries 816/816; round1 -/-; txgs 10/10; read_MiB 12.66/12.66; gang_pct 0.00/0.00
+  D 16K 10% hybrid: entries 96/96; table_KiB 230.0/230.0; kept_KiB 1040/1040; entries_after_drop 0/0; mover_s 0.391/0.436; written_MiB 32.60/32.46; walk_s 0.0063/0.0067; scrub_s 0.150/0.139; peak_heap_MiB 30.75/28.79; peak_heap+mmap_MiB 79.16/77.20; rewritten 720/720; redirected 96/96; kept_sectors 260/260; cold_entries 96/96; round1 -/-; txgs 7/7; read_MiB 12.61/12.61; gang_pct 0.00/0.00
+  D 16K 10% redirect: entries 832/832; table_KiB 1064.0/1121.5; kept_KiB 9776/9776; entries_after_drop 736/736; mover_s 2.543/2.479; written_MiB 44.82/44.57; walk_s 0.0063/0.0074; scrub_s 0.156/0.140; peak_heap_MiB 7.27/7.27; peak_heap+mmap_MiB 55.67/55.67; rewritten 0/0; redirected 832/832; kept_sectors 2444/2444; cold_entries 832/832; round1 -/-; txgs 10/10; read_MiB 12.77/12.77; gang_pct 0.00/0.00
+  D 16K 30% hybrid: entries 256/256; table_KiB 489.0/489.0; kept_KiB 2976/2976; entries_after_drop 0/0; mover_s 0.838/0.871; written_MiB 34.46/34.46; walk_s 0.0068/0.0064; scrub_s 0.154/0.142; peak_heap_MiB 24.58/23.24; peak_heap+mmap_MiB 72.98/71.64; rewritten 560/560; redirected 256/256; kept_sectors 744/744; cold_entries 256/256; round1 -/-; txgs 8/8; read_MiB 12.62/12.62; gang_pct 0.00/0.00
+  D 16K 30% redirect: entries 832/832; table_KiB 1093.0/1064.0; kept_KiB 9776/9776; entries_after_drop 576/576; mover_s 2.562/2.449; written_MiB 44.92/44.45; walk_s 0.0066/0.0067; scrub_s 0.160/0.152; peak_heap_MiB 7.47/7.29; peak_heap+mmap_MiB 55.87/55.70; rewritten 0/0; redirected 832/832; kept_sectors 2444/2444; cold_entries 832/832; round1 -/-; txgs 10/10; read_MiB 12.77/12.77; gang_pct 0.00/0.00
+  D 16K 100% hybrid: entries 830/830; table_KiB 1093.0/1064.0; kept_KiB 9768/9768; entries_after_drop 14/14; mover_s 2.395/2.406; written_MiB 46.55/46.12; walk_s 0.0065/0.0066; scrub_s 0.162/0.140; peak_heap_MiB 7.45/7.33; peak_heap+mmap_MiB 55.86/55.73; rewritten 0/0; redirected 830/830; kept_sectors 2442/2442; cold_entries 830/830; round1 14/14; txgs 14/14; read_MiB 12.76/12.76; gang_pct 0.00/0.00
+  D 16K 100% redirect: entries 830/830; table_KiB 1093.0/1121.5; kept_KiB 9768/9768; entries_after_drop 14/14; mover_s 2.305/2.346; written_MiB 44.63/44.46; walk_s 0.0062/0.0068; scrub_s 0.148/0.147; peak_heap_MiB 7.66/7.27; peak_heap+mmap_MiB 56.07/55.68; rewritten 0/0; redirected 830/830; kept_sectors 2442/2442; cold_entries 830/830; round1 -/-; txgs 10/10; read_MiB 12.76/12.76; gang_pct 0.00/0.00
+
+
+== feature_tool.c (the helper, not committed)
+// SPDX-License-Identifier: CDDL-1.0
+/*
+ * Helper of the 1 November fixture re-run (not committed): the pool
+ * features of a generator input, in userspace, where "zpool get" (which
+ * needs the kernel module) cannot run.
+ *
+ *   feature_tool <dir> get              read-only import: one line per
+ *                                       feature, as "zpool get all
+ *                                       feature@" prints its state
+ *   feature_tool <dir> enable <name>    writable import: enable it (and
+ *                                       its dependencies), then export
+ *
+ * The pool "jointfixture" is found by scanning <dir>; no cache file is
+ * written outside <dir>.
+ */
+#include <stdio.h>
+#include <string.h>
+#include <sys/zfs_context.h>
+#include <sys/spa.h>
+#include <sys/spa_impl.h>
+#include <sys/dmu_tx.h>
+#include <sys/dsl_synctask.h>
+#include <sys/zfeature.h>
+#include <sys/fs/zfs.h>
+#include <zfeature_common.h>
+#include <libzutil.h>
+#include <libzpool.h>
+
+#define	POOL	"jointfixture"
+
+static const char *dir;
+
+static spa_t *
+import(boolean_t readonly)
+{
+	importargs_t ia;
+	char *paths[1];
+	nvlist_t *config = NULL, *props = NULL;
+	spa_t *spa;
+	libpc_handle_t lpch = {
+		.lpc_lib_handle = NULL,
+		.lpc_ops = &libzpool_config_ops,
+		.lpc_printerr = B_TRUE
+	};
+
+	memset(&ia, 0, sizeof (ia));
+	paths[0] = (char *)dir;
+	ia.path = paths;
+	ia.paths = 1;
+	ia.can_be_active = B_TRUE;
+	VERIFY0(zpool_find_config(&lpch, POOL, &config, &ia));
+	if (!readonly) {
+		props = fnvlist_alloc();
+		fnvlist_add_string(props, "cachefile", "none");
+	}
+	VERIFY0(spa_import((char *)POOL, config, props, readonly ?
+	    ZFS_IMPORT_SKIP_MMP : ZFS_IMPORT_NORMAL));
+	fnvlist_free(config);
+	if (props != NULL)
+		fnvlist_free(props);
+	VERIFY0(spa_open(POOL, &spa, FTAG));
+	return (spa);
+}
+
+static int
+enable_check(void *arg, dmu_tx_t *tx)
+{
+	spa_feature_t *fid = arg;
+
+	if (spa_feature_is_enabled(dmu_tx_pool(tx)->dp_spa, *fid))
+		return (SET_ERROR(EEXIST));
+	return (0);
+}
+
+static void
+enable_sync(void *arg, dmu_tx_t *tx)
+{
+	spa_feature_t *fid = arg;
+
+	spa_feature_enable(dmu_tx_pool(tx)->dp_spa, *fid, tx);
+}
+
+int
+main(int argc, char **argv)
+{
+	char cache[4096];
+	spa_t *spa;
+	int err;
+
+	if (argc < 3 || argv[1][0] != '/' || (strcmp(argv[2], "get") != 0 &&
+	    (strcmp(argv[2], "enable") != 0 || argc != 4))) {
+		(void) fprintf(stderr, "usage: feature_tool <dir> get | "
+		    "feature_tool <dir> enable <name>\n");
+		return (2);
+	}
+	dir = argv[1];
+	(void) snprintf(cache, sizeof (cache), "%s/zpool.cache", dir);
+	spa_config_path = cache;
+	if (strcmp(argv[2], "get") == 0) {
+		kernel_init(SPA_MODE_READ);
+		spa = import(B_TRUE);
+		for (int i = 0; i < SPA_FEATURES; i++) {
+			const char *state = "disabled";
+
+			if (spa_feature_is_active(spa, i))
+				state = "active";
+			else if (spa_feature_is_enabled(spa, i))
+				state = "enabled";
+			(void) printf("%s feature@%s %s\n", POOL,
+			    spa_feature_table[i].fi_uname, state);
+		}
+		spa_close(spa, FTAG);
+		kernel_fini();
+		return (0);
+	} else {
+		spa_feature_t fid;
+
+		/* kernel_init() fills the feature table. */
+		kernel_init(SPA_MODE_READ | SPA_MODE_WRITE);
+		if (zfeature_lookup_name(argv[3], &fid) != 0) {
+			(void) fprintf(stderr, "unknown feature %s\n", argv[3]);
+			kernel_fini();
+			return (2);
+		}
+		spa = import(B_FALSE);
+		err = dsl_sync_task(POOL, enable_check, enable_sync, &fid, 0,
+		    ZFS_SPACE_CHECK_NONE);
+		(void) printf("enable feature@%s: %s\n", argv[3], err == 0 ?
+		    "enabled now" : err == EEXIST ? "already enabled" :
+		    strerror(err));
+		spa_close(spa, FTAG);
+		VERIFY0(spa_export(POOL, NULL, B_FALSE, B_FALSE));
+		kernel_fini();
+		return (err == 0 || err == EEXIST ? 0 : 1);
+	}
+}
