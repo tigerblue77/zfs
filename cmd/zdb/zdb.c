@@ -10514,19 +10514,19 @@ zdb_print_anyraid_ondisk_maps(vdev_t *vd, int verbosity)
 		spa_config_enter(spa, SCL_ZIO, FTAG, RW_READER);
 		int error = vdev_anyraid_open_mappings(
 		    vd->vdev_child[child], &t);
+		anyraid_header_t *header = avl_first(&t);
 		if (error != 0) {
 			(void) printf("Could not print mapping: %s\n",
 			    strerror(error));
-			spa_config_exit(spa, SCL_ZIO, FTAG);
-			return;
+		} else {
+			(void) printf("anyraid map %d:\n", header->ah_mapping);
+			print_anyraid_mapping(vd, child, header);
 		}
-		anyraid_header_t *header = avl_first(&t);
-		(void) printf("anyraid map %d:\n", header->ah_mapping);
-		print_anyraid_mapping(vd, child, header);
 
 		void *cookie = NULL;
 		while ((header = avl_destroy_nodes(&t, &cookie)) != NULL) {
 			free_header(header, header_size);
+			kmem_free(header, sizeof (*header));
 		}
 		avl_destroy(&t);
 	} else if (verbosity == 3) {

@@ -722,6 +722,7 @@ out:
 		void *cookie = NULL;
 		while ((header = avl_destroy_nodes(&t, &cookie)) != NULL) {
 			free_header(header, header_size);
+			kmem_free(header, sizeof (*header));
 		}
 	}
 	avl_destroy(&t);
