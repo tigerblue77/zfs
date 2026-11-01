@@ -1947,6 +1947,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/mmap/mmap_cached_rollback.ksh \
 	functional/mmap/mmap_cached_receive.ksh \
 	functional/mmap/mmap_rollback_deadlock.ksh \
+	functional/mmap/mmap_failed_rollback.ksh \
 	functional/mmap/setup.ksh \
 	functional/mmp/cleanup.ksh \
 	functional/mmp/mmp_active_import.ksh \

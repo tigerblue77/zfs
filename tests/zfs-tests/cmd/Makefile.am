@@ -85,6 +85,11 @@ scripts_zfs_tests_bin_PROGRAMS += \
 	%D%/mmap_read_truncate %D%/mmap_eof_extend %D%/mmap_stale_check \
 	%D%/mmap_fault_loop
 
+scripts_zfs_tests_bin_PROGRAMS += %D%/mmap_failed_rollback
+%C%_mmap_failed_rollback_LDADD = \
+	libzfs_core.la \
+	libnvpair.la
+
 if WANT_MMAP_LIBAIO
 scripts_zfs_tests_bin_PROGRAMS += %D%/mmap_libaio
 %C%_mmap_libaio_CFLAGS = $(AM_CFLAGS) $(LIBAIO_CFLAGS)

@@ -31,6 +31,7 @@
 /mktree
 /mmap_eof_extend
 /mmap_exec
+/mmap_failed_rollback
 /mmap_fault_loop
 /mmap_ftruncate
 /mmap_libaio
