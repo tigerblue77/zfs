@@ -10506,12 +10506,12 @@ zdb_print_anyraid_ondisk_maps(vdev_t *vd, int verbosity)
 
 	uint64_t ashift = vd->vdev_ashift;
 	uint64_t header_size = VDEV_ANYRAID_MAP_HEADER_SIZE(ashift);
+	spa_config_enter(spa, SCL_ZIO, FTAG, RW_READER);
 	if (verbosity == 2) {
 		avl_tree_t t;
 		avl_create(&t, vdev_anyraid_header_compar,
 		    sizeof (anyraid_header_t),
 		    offsetof(anyraid_header_t, ah_node));
-		spa_config_enter(spa, SCL_ZIO, FTAG, RW_READER);
 		int error = vdev_anyraid_open_mappings(
 		    vd->vdev_child[child], &t);
 		anyraid_header_t *header = avl_first(&t);
