@@ -159,6 +159,16 @@ zpl_iterate(struct file *filp, struct dir_context *ctx)
 	return (error);
 }
 
+/*
+ * Passed through zpl_write_cache_pages() to zpl_putpage(). zpa_for_sync keeps
+ * the pages in writeback until they are on disk, and zpa_nowait is set for
+ * callers that may hold page locks and so must not wait for the teardown lock.
+ */
+typedef struct zpl_putpage_args {
+	boolean_t	zpa_for_sync;
+	boolean_t	zpa_nowait;
+} zpl_putpage_args_t;
+
 static inline int
 zpl_write_cache_pages(struct address_space *mapping,
     struct writeback_control *wbc, void *data);
@@ -183,7 +193,7 @@ zpl_fsync(struct file *filp, loff_t start, loff_t end, int datasync)
 	 * they're on disk, and so that we get an error if the DMU write fails.
 	 */
 	if (filemap_range_has_page(inode->i_mapping, start, end)) {
-		int for_sync = 1;
+		zpl_putpage_args_t args = { .zpa_for_sync = B_TRUE };
 		struct writeback_control wbc = {
 			.sync_mode = WB_SYNC_NONE,
 			.nr_to_write = LONG_MAX,
@@ -191,7 +201,7 @@ zpl_fsync(struct file *filp, loff_t start, loff_t end, int datasync)
 			.range_end = end,
 		};
 		error =
-		    zpl_write_cache_pages(inode->i_mapping, &wbc, &for_sync);
+		    zpl_write_cache_pages(inode->i_mapping, &wbc, &args);
 		if (error != 0) {
 			/*
 			 * Unclear what state things are in. zfs_putpage() will
@@ -596,16 +606,32 @@ zpl_readahead(struct readahead_control *ractl)
 static int
 zpl_putpage(struct page *pp, struct writeback_control *wbc, void *data)
 {
-	boolean_t *for_sync = data;
+	zpl_putpage_args_t *args = data;
+	zfsvfs_t *zfsvfs = ITOZSB(pp->mapping->host);
 	fstrans_cookie_t cookie;
 	int ret;
 
 	ASSERT(PageLocked(pp));
 	ASSERT(!PageWriteback(pp));
 
+	/*
+	 * Callers that must not wait for the teardown lock only try to take
+	 * it, for each page, so that a rollback or receive waits for at most
+	 * one page. Holding it keeps zfs_putpage() from waiting for it either.
+	 * If it isn't available, leave the page dirty.
+	 */
+	if (args->zpa_nowait && (ret = zpl_tryenter(zfsvfs, FTAG)) != 0) {
+		redirty_page_for_writepage(wbc, pp);
+		unlock_page(pp);
+		return (ret);
+	}
+
 	cookie = spl_fstrans_mark();
-	ret = zfs_putpage(pp->mapping->host, pp, wbc, *for_sync);
+	ret = zfs_putpage(pp->mapping->host, pp, wbc, args->zpa_for_sync);
 	spl_fstrans_unmark(cookie);
+
+	if (args->zpa_nowait)
+		zpl_exit(zfsvfs, FTAG);
 
 	return (ret);
 }
@@ -710,11 +736,28 @@ zpl_writepages(struct address_space *mapping, struct writeback_control *wbc)
 {
 	znode_t		*zp = ITOZ(mapping->host);
 	zfsvfs_t	*zfsvfs = ITOZSB(mapping->host);
+	zpl_putpage_args_t args = { .zpa_nowait = !wbc->for_sync };
 	enum writeback_sync_modes sync_mode;
 	int result;
 
-	if ((result = zpl_enter(zfsvfs, FTAG)) != 0)
+	/*
+	 * Callers other than sync(), such as khugepaged, may hold pages of the
+	 * mapping locked, so only try to take the teardown lock for them, here
+	 * and in zpl_putpage().
+	 */
+	result = args.zpa_nowait ? zpl_tryenter(zfsvfs, FTAG) :
+	    zpl_enter(zfsvfs, FTAG);
+	if (result != 0) {
+		/*
+		 * Some callers get here also for mappings without dirty
+		 * pages, like filemap_fdatawrite() before Linux 5.4. There
+		 * is nothing to write back for them, so don't fail them.
+		 */
+		if (args.zpa_nowait &&
+		    !mapping_tagged(mapping, PAGECACHE_TAG_DIRTY))
+			return (0);
 		return (result);
+	}
 	if (zfsvfs->z_os->os_sync == ZFS_SYNC_ALWAYS)
 		wbc->sync_mode = WB_SYNC_ALL;
 	zpl_exit(zfsvfs, FTAG);
@@ -727,12 +770,18 @@ zpl_writepages(struct address_space *mapping, struct writeback_control *wbc)
 	 * we run it once in non-SYNC mode so that the ZIL gets all the data,
 	 * and then we commit it all in one go.
 	 */
-	boolean_t for_sync = (sync_mode == WB_SYNC_ALL);
+	args.zpa_for_sync = (sync_mode == WB_SYNC_ALL);
 	wbc->sync_mode = WB_SYNC_NONE;
-	result = zpl_write_cache_pages(mapping, wbc, &for_sync);
+	result = zpl_write_cache_pages(mapping, wbc, &args);
 	if (sync_mode != wbc->sync_mode) {
-		if ((result = zpl_enter_verify_zp(zfsvfs, zp, FTAG)) != 0)
+		result = args.zpa_nowait ? zpl_tryenter(zfsvfs, FTAG) :
+		    zpl_enter(zfsvfs, FTAG);
+		if (result != 0)
 			return (result);
+		if ((result = zpl_verify_zp(zp)) != 0) {
+			zpl_exit(zfsvfs, FTAG);
+			return (result);
+		}
 
 		if (zfsvfs->z_log != NULL) {
 			/*
@@ -764,7 +813,7 @@ zpl_writepages(struct address_space *mapping, struct writeback_control *wbc)
 		 * details). That being said, this is a no-op in most cases.
 		 */
 		wbc->sync_mode = sync_mode;
-		result = zpl_write_cache_pages(mapping, wbc, &for_sync);
+		result = zpl_write_cache_pages(mapping, wbc, &args);
 	}
 	return (result);
 }
@@ -780,7 +829,7 @@ static int
 zpl_writepage(struct page *pp, struct writeback_control *wbc)
 {
 	zfsvfs_t *zfsvfs = ITOZSB(pp->mapping->host);
-	boolean_t for_sync;
+	zpl_putpage_args_t args = { 0 };
 	int error;
 
 	/*
@@ -797,8 +846,8 @@ zpl_writepage(struct page *pp, struct writeback_control *wbc)
 	if (zfsvfs->z_os->os_sync == ZFS_SYNC_ALWAYS)
 		wbc->sync_mode = WB_SYNC_ALL;
 
-	for_sync = (wbc->sync_mode == WB_SYNC_ALL);
-	error = zpl_putpage(pp, wbc, &for_sync);
+	args.zpa_for_sync = (wbc->sync_mode == WB_SYNC_ALL);
+	error = zpl_putpage(pp, wbc, &args);
 	zpl_exit(zfsvfs, FTAG);
 
 	return (error);
