@@ -1,0 +1,16 @@
+fix-read-1       spa_ubsync advanced to offset 28635136 with the  | 0 errors, 28672 bytes repaired, 0 errlog; cksum: 0 0 7 0 0 | RESULT: DAMAGED 
+fix-write-1      spa_ubsync stays at txg 53 while the write is in | 0 errors, 0 bytes repaired, 0 errlog; cksum: 0 0 0 0 0 | RESULT: CLEAN 
+fix-write-2      spa_ubsync stays at txg 53 while the write is in | 0 errors, 0 bytes repaired, 0 errlog; cksum: 0 0 0 0 0 | RESULT: CLEAN 
+fix-write-3      spa_ubsync stays at txg 53 while the write is in | 0 errors, 0 bytes repaired, 0 errlog; cksum: 0 0 0 0 0 | RESULT: CLEAN 
+master-read-1    spa_ubsync advanced to offset 28635136 with the  | 0 errors, 4096 bytes repaired, 0 errlog; cksum: 0 0 1 0 0 | RESULT: DAMAGED 
+master-write-1   spa_ubsync advanced to offset 28635136 with the  | 1 errors, 0 bytes repaired, 1 errlog; cksum: 18 18 18 18 16 | RESULT: DAMAGED 
+master-write-2   spa_ubsync advanced to offset 28635136 with the  | 1 errors, 0 bytes repaired, 1 errlog; cksum: 18 16 18 18 18 | bad block: object 1 offset 20971520 (EIO), DVA offset 29745152, sectors 7262-7305 RESULT: DAMAGED 
+master-write-3   spa_ubsync advanced to offset 28635136 with the  | 1 errors, 0 bytes repaired, 1 errlog; cksum: 18 18 18 18 16 | bad block: object 1 offset 21102592 (EIO), DVA offset 29736960, sectors 7260-7303 RESULT: DAMAGED 
+pr-read-1        spa_ubsync advanced to offset 28635136 with the  | 0 errors, 24576 bytes repaired, 0 errlog; cksum: 0 0 6 0 0 | RESULT: DAMAGED 
+pr-read-2        spa_ubsync advanced to offset 28635136 with the  | 0 errors, 4096 bytes repaired, 0 errlog; cksum: 0 0 1 0 0 | RESULT: DAMAGED 
+pr-read-3        spa_ubsync advanced to offset 28635136 with the  | 0 errors, 28672 bytes repaired, 0 errlog; cksum: 0 0 7 0 0 | RESULT: DAMAGED 
+pr-write-1       spa_ubsync advanced to offset 28635136 with the  | 1 errors, 0 bytes repaired, 1 errlog; cksum: 18 16 18 18 18 | bad block: object 1 offset 20971520 (EIO), DVA offset 29745152, sectors 7262-7305 RESULT: DAMAGED 
+prfix-read-1     spa_ubsync stays at txg 53 while the write is in | 0 errors, 0 bytes repaired, 0 errlog; cksum: 0 0 0 0 0 | RESULT: CLEAN 
+prfix-read-2     spa_ubsync stays at txg 53 while the write is in | 0 errors, 0 bytes repaired, 0 errlog; cksum: 0 0 0 0 0 | RESULT: CLEAN 
+prfix-read-3     spa_ubsync stays at txg 53 while the write is in | 0 errors, 0 bytes repaired, 0 errlog; cksum: 0 0 0 0 0 | RESULT: CLEAN 
+prfix-write-1    spa_ubsync stays at txg 53 while the write is in | 0 errors, 0 bytes repaired, 0 errlog; cksum: 0 0 0 0 0 | RESULT: CLEAN 

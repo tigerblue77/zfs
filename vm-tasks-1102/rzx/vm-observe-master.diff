@@ -1,0 +1,28 @@
+diff --git a/module/zfs/spa.c b/module/zfs/spa.c
+index 564cd73a59..f080a8ad42 100644
+--- a/module/zfs/spa.c
++++ b/module/zfs/spa.c
+@@ -11486,7 +11486,23 @@ spa_sync(spa_t *spa, uint64_t txg)
+ 	 * will be guaranteed that all the processing associated with
+ 	 * that txg has been completed.
+ 	 */
++	vdev_raidz_expand_t *vre = spa->spa_raidz_expand;
++	uint64_t synced_offset = RRSS_GET_OFFSET(&spa->spa_ubsync);
++	uint64_t reflow_offset = RRSS_GET_OFFSET(&spa->spa_uberblock);
++	zfs_locked_range_t *lr = NULL;
++	if (vre != NULL && reflow_offset > synced_offset) {
++		lr = zfs_rangelock_tryenter(&vre->vre_rangelock,
++		    synced_offset, reflow_offset - synced_offset, RL_WRITER);
++		if (lr == NULL) {
++			zfs_dbgmsg("rzx-ubsync: txg %llu advances spa_ubsync "
++			    "with i/o in flight in [%llu, %llu)",
++			    (u_longlong_t)txg, (u_longlong_t)synced_offset,
++			    (u_longlong_t)reflow_offset);
++		}
++	}
+ 	spa->spa_ubsync = spa->spa_uberblock;
++	if (lr != NULL)
++		zfs_rangelock_exit(lr);
+ 	spa_config_exit(spa, SCL_CONFIG, FTAG);
+ 
+ 	/*

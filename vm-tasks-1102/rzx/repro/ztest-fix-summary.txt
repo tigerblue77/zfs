@@ -1,0 +1,4 @@
+run 1 [-K eraidz -r 5 -R 1 -m 0 -v 1 -s 256m] rc=0
+run 2 [-K eraidz -r 6 -R 2 -m 0 -v 1 -s 256m] rc=0
+run 3 [-X -t 16 -K raidz -r 5 -R 1 -m 0 -v 1 -s 256m] rc=0
+run 4 [-X -t 16 -K raidz -r 7 -R 2 -m 0 -v 1 -s 256m] rc=0

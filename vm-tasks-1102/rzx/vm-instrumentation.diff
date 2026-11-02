@@ -1,0 +1,26 @@
+diff --git a/module/zfs/spa.c b/module/zfs/spa.c
+index 202fe6504c..d0da08675a 100644
+--- a/module/zfs/spa.c
++++ b/module/zfs/spa.c
+@@ -11498,8 +11498,19 @@ spa_sync(spa_t *spa, uint64_t txg)
+ 	uint64_t reflow_offset = RRSS_GET_OFFSET(&spa->spa_uberblock);
+ 	zfs_locked_range_t *lr = NULL;
+ 	if (vre != NULL && reflow_offset > synced_offset) {
+-		lr = zfs_rangelock_enter(&vre->vre_rangelock, synced_offset,
+-		    reflow_offset - synced_offset, RL_WRITER);
++		lr = zfs_rangelock_tryenter(&vre->vre_rangelock,
++		    synced_offset, reflow_offset - synced_offset, RL_WRITER);
++		if (lr == NULL) {
++			hrtime_t t0 = gethrtime();
++			lr = zfs_rangelock_enter(&vre->vre_rangelock,
++			    synced_offset, reflow_offset - synced_offset,
++			    RL_WRITER);
++			zfs_dbgmsg("rzx-ubsync: txg %llu waited %llu us for "
++			    "i/o in [%llu, %llu)", (u_longlong_t)txg,
++			    (u_longlong_t)NSEC2USEC(gethrtime() - t0),
++			    (u_longlong_t)synced_offset,
++			    (u_longlong_t)reflow_offset);
++		}
+ 	}
+ 	spa->spa_ubsync = spa->spa_uberblock;
+ 	if (lr != NULL)
