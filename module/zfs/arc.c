@@ -8931,17 +8931,19 @@ l2arc_read_done(zio_t *zio)
 
 	/*
 	 * If the data was read into a temporary buffer,
-	 * move it and free the buffer.
+	 * move it and free the buffer.  The cache device holds the
+	 * block as stored, PSIZE bytes, also when the ARC caches it
+	 * decompressed and arc_hdr_size() is LSIZE.
 	 */
 	if (cb->l2rcb_abd != NULL) {
-		ASSERT3U(arc_hdr_size(hdr), <, zio->io_size);
+		ASSERT3U(HDR_GET_PSIZE(hdr), <, zio->io_size);
 		if (zio->io_error == 0) {
 			if (using_rdata) {
 				abd_copy(hdr->b_crypt_hdr.b_rabd,
-				    cb->l2rcb_abd, arc_hdr_size(hdr));
+				    cb->l2rcb_abd, HDR_GET_PSIZE(hdr));
 			} else {
 				abd_copy(hdr->b_l1hdr.b_pabd,
-				    cb->l2rcb_abd, arc_hdr_size(hdr));
+				    cb->l2rcb_abd, HDR_GET_PSIZE(hdr));
 			}
 		}
 
@@ -8957,7 +8959,7 @@ l2arc_read_done(zio_t *zio)
 		 * needs real data.
 		 */
 		abd_free(cb->l2rcb_abd);
-		zio->io_size = zio->io_orig_size = arc_hdr_size(hdr);
+		zio->io_size = zio->io_orig_size = HDR_GET_PSIZE(hdr);
 
 		if (using_rdata) {
 			ASSERT(HDR_HAS_RABD(hdr));
