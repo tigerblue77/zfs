@@ -6357,6 +6357,7 @@ top:
 				l2arc_read_callback_t *cb;
 				abd_t *abd;
 				uint64_t asize;
+				uint64_t l2size = size;
 
 				DTRACE_PROBE1(l2arc__hit, arc_buf_hdr_t *, hdr);
 				ARCSTAT_BUMP(arcstat_l2_hits);
@@ -6373,15 +6374,17 @@ top:
 				 * When Compressed ARC is disabled, but the
 				 * L2ARC block is compressed, arc_hdr_size()
 				 * will have returned LSIZE rather than PSIZE.
+				 * The read from the pool, should this one
+				 * fail, still needs LSIZE.
 				 */
 				if (HDR_GET_COMPRESS(hdr) != ZIO_COMPRESS_OFF &&
 				    !HDR_COMPRESSION_ENABLED(hdr) &&
 				    HDR_GET_PSIZE(hdr) != 0) {
-					size = HDR_GET_PSIZE(hdr);
+					l2size = HDR_GET_PSIZE(hdr);
 				}
 
-				asize = vdev_psize_to_asize(vd, size);
-				if (asize != size) {
+				asize = vdev_psize_to_asize(vd, l2size);
+				if (asize != l2size) {
 					abd = abd_alloc_for_io(asize,
 					    HDR_ISTYPE_METADATA(hdr));
 					cb->l2rcb_abd = abd;
@@ -9017,8 +9020,13 @@ l2arc_read_done(zio_t *zio)
 
 			ASSERT(!pio || pio->io_child_type == ZIO_CHILD_LOGICAL);
 
+			/*
+			 * io_size is the size read from the cache device,
+			 * the PSIZE of a block that is cached decompressed.
+			 */
 			zio = zio_read(pio, zio->io_spa, zio->io_bp,
-			    abd, zio->io_size, arc_read_done,
+			    abd, using_rdata ? HDR_GET_PSIZE(hdr) :
+			    arc_hdr_size(hdr), arc_read_done,
 			    hdr, zio->io_priority, cb->l2rcb_flags,
 			    &cb->l2rcb_zb);
 
