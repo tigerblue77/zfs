@@ -1,0 +1,35 @@
+diff --git a/module/zfs/lz4_zfs.c b/module/zfs/lz4_zfs.c
+index 672b1bd27e..5785c2346c 100644
+--- a/module/zfs/lz4_zfs.c
++++ b/module/zfs/lz4_zfs.c
+@@ -333,6 +333,8 @@ typedef struct _U64_S {
+ 
+ #define	COPYLENGTH 8
+ #define	LASTLITERALS 5
++/* Test only: end the last match TEST_TAIL bytes earlier (valid LZ4). */
++#define	TEST_TAIL 64
+ #define	MFLIMIT (COPYLENGTH + MINMATCH)
+ #define	MINLENGTH (MFLIMIT + 1)
+ 
+@@ -492,8 +494,8 @@ LZ4_compressCtx(void *ctx, const char *source, char *dest, int isize,
+ 	const BYTE *anchor = ip;
+ 	const BYTE *const iend = ip + isize;
+ 	const BYTE *const oend = (BYTE *) dest + osize;
+-	const BYTE *const mflimit = iend - MFLIMIT;
+-#define	matchlimit (iend - LASTLITERALS)
++	const BYTE *const mflimit = iend - MFLIMIT - TEST_TAIL;
++#define	matchlimit (iend - LASTLITERALS - TEST_TAIL)
+ 
+ 	BYTE *op = (BYTE *) dest;
+ 
+@@ -682,8 +684,8 @@ LZ4_compress64kCtx(void *ctx, const char *source, char *dest, int isize,
+ 	const BYTE *const base = ip;
+ 	const BYTE *const iend = ip + isize;
+ 	const BYTE *const oend = (BYTE *) dest + osize;
+-	const BYTE *const mflimit = iend - MFLIMIT;
+-#define	matchlimit (iend - LASTLITERALS)
++	const BYTE *const mflimit = iend - MFLIMIT - TEST_TAIL;
++#define	matchlimit (iend - LASTLITERALS - TEST_TAIL)
+ 
+ 	BYTE *op = (BYTE *) dest;
+ 

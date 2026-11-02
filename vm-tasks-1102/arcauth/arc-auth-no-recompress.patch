@@ -1,0 +1,221 @@
+From 62abfac4146ad7c6e5038641447cd01a6d365c98 Mon Sep 17 00:00:00 2001
+From: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 11:19:30 +0000
+Subject: [PATCH] ARC: Keep authenticated blocks as stored when compressed ARC
+ is off
+
+The MAC of a block that is authenticated but not encrypted, such as
+the ZPL master node of an encrypted dataset, covers the block as it is
+stored, compressed.  With zfs_compressed_arc_enabled=0 the ARC keeps
+only the decompressed data, so arc_hdr_authenticate() compresses it
+again and checks the MAC over the result.  That gives back the stored
+bytes only if the reader's compressor produces the same output as the
+writer's.  It does not across byte order, since the LZ4 compressor
+hashes native-endian words, nor after an update that changes the
+output of a compressor.  The MAC check then fails with ECKSUM, which
+is not the EACCES forgiven as best effort, and the read returns EIO
+and logs a permanent error although the block on disk is intact.
+
+Keep these blocks as stored in the ARC whatever the tunable says, as
+every block is by default, and check the MAC over b_pabd directly.
+Few blocks are authenticated rather than encrypted, so this changes
+little of what the tunable saves.  The flag is set where a header gets
+its data: in arc_read() before b_pabd is allocated, and in
+arc_write_ready().  A header restored from a persistent L2ARC records
+whether the block is protected but not whether it is encrypted, so
+arc_read() may set the flag on a header that has an L2 header; its
+l2ad_alloc charge, which follows arc_hdr_size(), moves to the new
+size.  arc_hdr_verify() asserts that an authenticated header has the
+flag.  The L2ARC now writes these blocks as they are instead of
+compressing them again.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>
+---
+ man/man4/zfs.4        |  5 ++-
+ module/zfs/arc.c      | 81 +++++++++++++++++++++++++------------------
+ module/zfs/dmu_send.c |  2 +-
+ 3 files changed, 53 insertions(+), 35 deletions(-)
+
+diff --git a/man/man4/zfs.4 b/man/man4/zfs.4
+index b3651312d1..0d4e29f2c0 100644
+--- a/man/man4/zfs.4
++++ b/man/man4/zfs.4
+@@ -1140,7 +1140,10 @@ transaction record (itx).
+ .It Sy zfs_compressed_arc_enabled Ns = Ns Sy 1 Ns | Ns 0 Pq int
+ Enables storing ARC buffers in their on-disk compressed form, reducing
+ memory pressure.
+-When disabled, buffers are decompressed before being cached.
++When disabled, buffers are decompressed before being cached,
++except the blocks of encrypted datasets that are authenticated but not
++encrypted, such as the ZPL master node:
++these stay in their on-disk form so that their MAC can be verified.
+ .
+ .It Sy zfs_condense_indirect_commit_entry_delay_ms Ns = Ns Sy 0 Ns ms Pq int
+ Vdev indirection layer (used for device removal) sleeps for this many
+diff --git a/module/zfs/arc.c b/module/zfs/arc.c
+index 0265389641..8f9978d289 100644
+--- a/module/zfs/arc.c
++++ b/module/zfs/arc.c
+@@ -143,7 +143,9 @@
+  * it will match its on-disk compression characteristics. This behavior can be
+  * disabled by setting 'zfs_compressed_arc_enabled' to B_FALSE. When the
+  * compressed ARC functionality is disabled, the b_pabd will point to an
+- * uncompressed version of the on-disk data.
++ * uncompressed version of the on-disk data, except for blocks that are
++ * authenticated but not encrypted, whose MAC can only be verified on the
++ * on-disk data.
+  *
+  * Data in the L1ARC is not accessed by consumers of the ARC directly. Each
+  * arc_buf_hdr_t can have multiple ARC buffers (arc_buf_t) which reference it.
+@@ -1394,8 +1396,9 @@ arc_get_compression(arc_buf_t *buf)
+ }
+ 
+ /*
+- * Return the compression algorithm used to store this data in the ARC. If ARC
+- * compression is enabled or this is an encrypted block, this will be the same
++ * Return the compression algorithm used to store this data in the ARC. If
++ * ARC_FLAG_COMPRESSED_ARC is set (ARC compression is enabled, or this is an
++ * authenticated block, see arc_hdr_keep_compressed()), this will be the same
+  * as what's used to store it on-disk. Otherwise, this will be ZIO_COMPRESS_OFF.
+  */
+ static inline enum zio_compress
+@@ -1817,42 +1820,52 @@ arc_hdr_size(arc_buf_hdr_t *hdr)
+ 	return (size);
+ }
+ 
++/*
++ * The MAC of a block that is authenticated but not encrypted covers the
++ * block as stored on disk.  Compressing the logical data again need not
++ * give back those bytes (another compressor version, or a host of the other
++ * byte order), so such a block is kept as stored even when compressed ARC
++ * is disabled.  Called before b_pabd is allocated.
++ */
++static void
++arc_hdr_keep_compressed(arc_buf_hdr_t *hdr)
++{
++	ASSERT(HDR_EMPTY_OR_LOCKED(hdr));
++	ASSERT(HDR_HAS_L1HDR(hdr));
++	ASSERT0P(hdr->b_l1hdr.b_pabd);
++
++	if (HDR_COMPRESSION_ENABLED(hdr) || HDR_GET_PSIZE(hdr) == 0)
++		return;
++
++	/*
++	 * l2ad_alloc is accounted by arc_hdr_size(), which this changes.  A
++	 * header restored from a persistent L2ARC gets here with an L2 header.
++	 */
++	l2arc_dev_t *dev = HDR_HAS_L2HDR(hdr) ? hdr->b_l2hdr.b_dev : NULL;
++	if (dev != NULL) {
++		(void) zfs_refcount_remove_many(&dev->l2ad_alloc,
++		    arc_hdr_size(hdr), hdr);
++	}
++	arc_hdr_set_flags(hdr, ARC_FLAG_COMPRESSED_ARC);
++	if (dev != NULL) {
++		(void) zfs_refcount_add_many(&dev->l2ad_alloc,
++		    arc_hdr_size(hdr), hdr);
++	}
++}
++
+ static int
+ arc_hdr_authenticate(arc_buf_hdr_t *hdr, spa_t *spa, uint64_t dsobj)
+ {
+ 	int ret;
+-	uint64_t csize;
+-	uint64_t lsize = HDR_GET_LSIZE(hdr);
+ 	uint64_t psize = HDR_GET_PSIZE(hdr);
+ 	abd_t *abd = hdr->b_l1hdr.b_pabd;
+-	boolean_t free_abd = B_FALSE;
+ 
+ 	ASSERT(HDR_EMPTY_OR_LOCKED(hdr));
+ 	ASSERT(HDR_AUTHENTICATED(hdr));
+ 	ASSERT3P(abd, !=, NULL);
+-
+-	/*
+-	 * The MAC is calculated on the compressed data that is stored on disk.
+-	 * However, if compressed arc is disabled we will only have the
+-	 * decompressed data available to us now. Compress it into a temporary
+-	 * abd so we can verify the MAC. The performance overhead of this will
+-	 * be relatively low, since most objects in an encrypted objset will
+-	 * be encrypted (instead of authenticated) anyway.
+-	 */
+-	if (HDR_GET_COMPRESS(hdr) != ZIO_COMPRESS_OFF &&
+-	    !HDR_COMPRESSION_ENABLED(hdr)) {
+-		abd = NULL;
+-		csize = zio_compress_data(HDR_GET_COMPRESS(hdr),
+-		    hdr->b_l1hdr.b_pabd, &abd, lsize, MIN(lsize, psize),
+-		    hdr->b_complevel);
+-		if (csize >= lsize || csize > psize) {
+-			ret = SET_ERROR(EIO);
+-			return (ret);
+-		}
+-		ASSERT3P(abd, !=, NULL);
+-		abd_zero_off(abd, csize, psize - csize);
+-		free_abd = B_TRUE;
+-	}
++	/* The MAC covers b_pabd as is; see arc_hdr_keep_compressed(). */
++	ASSERT(HDR_GET_COMPRESS(hdr) == ZIO_COMPRESS_OFF ||
++	    HDR_COMPRESSION_ENABLED(hdr));
+ 
+ 	/*
+ 	 * Authentication is best effort. We authenticate whenever the key is
+@@ -1860,7 +1873,7 @@ arc_hdr_authenticate(arc_buf_hdr_t *hdr, spa_t *spa, uint64_t dsobj)
+ 	 */
+ 	if (hdr->b_crypt_hdr.b_ot == DMU_OT_OBJSET) {
+ 		ASSERT3U(HDR_GET_COMPRESS(hdr), ==, ZIO_COMPRESS_OFF);
+-		ASSERT3U(lsize, ==, psize);
++		ASSERT3U(HDR_GET_LSIZE(hdr), ==, psize);
+ 		ret = spa_do_crypt_objset_mac_abd(B_FALSE, spa, dsobj, abd,
+ 		    psize, hdr->b_l1hdr.b_byteswap != DMU_BSWAP_NUMFUNCS);
+ 	} else {
+@@ -1873,9 +1886,6 @@ arc_hdr_authenticate(arc_buf_hdr_t *hdr, spa_t *spa, uint64_t dsobj)
+ 	else if (ret == EACCES)
+ 		ret = 0;
+ 
+-	if (free_abd)
+-		abd_free(abd);
+-
+ 	return (ret);
+ }
+ 
+@@ -5602,6 +5612,7 @@ arc_hdr_verify(arc_buf_hdr_t *hdr, blkptr_t *bp)
+ 			ASSERT3U(arc_hdr_get_compress(hdr), ==,
+ 			    BP_GET_COMPRESS(bp));
+ 		}
++		IMPLY(BP_IS_AUTHENTICATED(bp), HDR_COMPRESSION_ENABLED(hdr));
+ 		ASSERT3U(HDR_GET_LSIZE(hdr), ==, BP_GET_LSIZE(bp));
+ 		ASSERT3U(HDR_GET_PSIZE(hdr), ==, BP_GET_PSIZE(bp));
+ 		ASSERT3U(!!HDR_PROTECTED(hdr), ==, BP_IS_PROTECTED(bp));
+@@ -6248,6 +6259,8 @@ top:
+ 		if (!embedded_bp)
+ 			arc_access(hdr, *arc_flags, B_FALSE);
+ 		arc_hdr_set_flags(hdr, ARC_FLAG_IO_IN_PROGRESS);
++		if (BP_IS_AUTHENTICATED(bp))
++			arc_hdr_keep_compressed(hdr);
+ 		arc_hdr_alloc_abd(hdr, alloc_flags);
+ 		if (encrypted_read) {
+ 			ASSERT(HDR_HAS_RABD(hdr));
+@@ -6946,6 +6959,8 @@ arc_write_ready(zio_t *zio)
+ 	}
+ 	HDR_SET_PSIZE(hdr, psize);
+ 	arc_hdr_set_compress(hdr, compress);
++	if (BP_IS_AUTHENTICATED(bp))
++		arc_hdr_keep_compressed(hdr);
+ 	hdr->b_complevel = zio->io_prop.zp_complevel;
+ 
+ 	if (zio->io_error != 0 || psize == 0)
+diff --git a/module/zfs/dmu_send.c b/module/zfs/dmu_send.c
+index c706aee61e..37c1d819d0 100644
+--- a/module/zfs/dmu_send.c
++++ b/module/zfs/dmu_send.c
+@@ -1680,7 +1680,7 @@ issue_data_read(struct send_reader_thread_arg *srta, struct send_range *range)
+ 	    zioflags, &aflags, &zb);
+ 	/*
+ 	 * The ARC only honors a request for compressed data if the header
+-	 * is compressed, which is not the case for cached blocks when
++	 * is compressed, which is not always the case for cached blocks when
+ 	 * zfs_compressed_arc_enabled=0.  Such a buffer holds the logical
+ 	 * data, while the record is sent with the block's compression and
+ 	 * psize, so read the block from disk instead.
+-- 
+2.43.0
+
