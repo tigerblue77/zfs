@@ -8696,13 +8696,19 @@ vdev_raidz_migrate_preflight(vdev_t *vd, raidz_migrate_need_t *rmn)
 	for (uint64_t i = 0; i < segs.ms_n; i++)
 		free += segs.ms_size[i];
 
-	/* The slop is in deflated bytes; this check works in raw ones. */
+	/*
+	 * The slop is in deflated bytes; this check works in raw ones.  No
+	 * floating point, for the kernel: vs_dspace is vs_space deflated by
+	 * vdev_deflate_ratio (vdev_deflated_space()), so this is slop *
+	 * vs_space / vs_dspace; slop, at most spa_max_slop or spa_min_slop
+	 * (128 GiB by default), does not overflow shifted by 9 bits.
+	 */
 	slop = spa_get_slop_space(spa);
-	if (vd->vdev_stat.vs_dspace != 0) {
-		slop = (uint64_t)((double)slop *
-		    (double)vd->vdev_stat.vs_space /
-		    (double)vd->vdev_stat.vs_dspace);
+	if (vd->vdev_stat.vs_dspace != 0 && vd->vdev_deflate_ratio != 0) {
+		slop = (slop << SPA_MINBLOCKSHIFT) /
+		    vd->vdev_deflate_ratio;
 	}
+
 
 	end = rmn->rmn_redirect_new + rmn->rmn_redirect_keep +
 	    rmn->rmn_rewrite_new + rmn->rmn_nredirect * rmn->rmn_entry_bytes;
