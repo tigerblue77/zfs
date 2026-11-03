@@ -89,14 +89,16 @@ only as frees and remaps make entries obsolete and condensing drops them
 (`vdev_indirect.c:63-67`, `129-132`). Blind to block boundaries, it
 cannot lay a block out at another parity or width, which is why master
 refuses to remove any top-level vdev but a log from a pool with a RAID-Z
-vdev (`vdev_removal.c:86-89`, `2340-2363`). A per-block mapping, with
-rows only for relocated blocks, does not have that limit. Parity
-conversion would be its first use; these could be later ones:
+vdev (`vdev_removal.c:86-89`, `2340-2363`). A block-aware mapping with
+rows only for relocated blocks would not have that limit; it is a
+proposed extension of what the prototypes build, since the published
+virtual/backing prototype still pairs new allocations. Parity conversion
+would be its first use; these could be later ones:
 
 - removing a RAID-Z top-level vdev, or a special or dedup vdev from a
-  pool that has a RAID-Z vdev, which the same check refuses (in a pool
-  without RAID-Z, device removal already handles them, snapshot-held
-  blocks included);
+  pool that has a RAID-Z vdev, which the same check refuses (in
+  otherwise eligible pools, native device removal already handles
+  special and dedup vdevs, snapshot-held allocations included);
 - narrowing a RAID-Z vdev, impossible in place (above), so every block
   would move;
 - restriping the blocks written before an expansion, which
@@ -104,19 +106,18 @@ conversion would be its first use; these could be later ones:
   (`zpool-attach.8:90-95`, and the third constraint above).
 
 None of them is part of this design, and neither prototype implements
-any of them. Each would need its own design and proof: removal a
-destination vdev in every row and routing across vdevs, narrowing a
-layout of the new width and its own space admission, and all of them
-complete coverage, recovery after a crash and safe publication of the
-result. What they would share with parity conversion is the mapping
-and the questions of section 3 about its lifetime, bootstrap, census
-and space.
+any of them. Each would need its own design and proof: removal an
+unambiguous destination for each relocated extent and routing across
+vdevs, narrowing a layout of the new width and its own space admission,
+and all of them complete coverage, recovery after a crash and safe
+publication of the result. What they would share with parity conversion
+is the mapping and the questions of section 3 about its lifetime,
+bootstrap, census and space.
 
-Set aside: a new pool format with a virtual address in every block
-pointer of the pool. It would lift the block pointer constraint for
-good, but it puts a translation on every I/O and needs a row per block,
-where device removal's per-segment mapping already costs about
-50-100 MB of memory per TB (section 3, point 3).
+A pool-wide virtual-address format is outside the scope of this parity
+proposal. It would require a separate compatibility and bootstrap
+design, and an analysis of mapping granularity, lookup and memory costs.
+No choice about that future format is made here.
 
 ## 2. The two mechanisms
 
