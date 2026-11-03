@@ -8487,11 +8487,18 @@ vdev_raidz_redirect_move_sync(void *arg, dmu_tx_t *tx)
 
 		/*
 		 * SPIKE: the bytes are written as stored, with no checksum of
-		 * their own; a failed write would leak N.
+		 * their own.  A failed write (more children lost during the
+		 * move than the parity covers) gives N back and refuses the
+		 * block, rather than stopping the sync thread: nothing
+		 * refers to N yet.
 		 */
-		VERIFY0(zio_wait(zio_rewrite(NULL, spa, txg, &wbp,
+		rdm->rdm_error = zio_wait(zio_rewrite(NULL, spa, txg, &wbp,
 		    rdm->rdm_data, rdm->rdm_psize, NULL, NULL,
-		    ZIO_PRIORITY_SYNC_WRITE, ZIO_FLAG_CANFAIL, NULL)));
+		    ZIO_PRIORITY_SYNC_WRITE, ZIO_FLAG_CANFAIL, NULL));
+		if (rdm->rdm_error != 0) {
+			metaslab_free(spa, &wbp, txg, B_TRUE);
+			continue;
+		}
 
 		if (!spike_redirect_split_txg) {
 			vdev_raidz_redirect_persist(vd, ent, bp, rdm->rdm_zb,
@@ -8708,7 +8715,6 @@ vdev_raidz_migrate_preflight(vdev_t *vd, raidz_migrate_need_t *rmn)
 		slop = (slop << SPA_MINBLOCKSHIFT) /
 		    vd->vdev_deflate_ratio;
 	}
-
 
 	end = rmn->rmn_redirect_new + rmn->rmn_redirect_keep +
 	    rmn->rmn_rewrite_new + rmn->rmn_nredirect * rmn->rmn_entry_bytes;
