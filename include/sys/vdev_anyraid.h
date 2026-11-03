@@ -122,6 +122,9 @@ extern void vdev_anyraid_write_map_sync(vdev_t *vd, zio_t *pio, uint64_t txg,
 
 extern void vdev_anyraid_expand(vdev_t *tvd, vdev_t *newvd);
 extern boolean_t vdev_anyraid_mapped(vdev_t *vd, uint64_t offset, uint64_t txg);
+extern boolean_t vdev_anyraid_has_map(vdev_t *vd);
+extern nvlist_t *vdev_anyraid_adopt_raidz_config(nvlist_t *nv);
+extern int zfs_anyraid_adopt_raidz;
 uint64_t vdev_anyraid_child_num_tiles(vdev_t *vd, vdev_t *cvd);
 uint64_t vdev_anyraid_child_capacity(vdev_t *vd, vdev_t *cvd);
 int spa_anyraid_relocate_get_stats(spa_t *spa,

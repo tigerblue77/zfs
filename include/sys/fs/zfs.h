@@ -1046,6 +1046,7 @@ typedef struct zpool_load_policy {
 /* ANYRAID configuration */
 #define	ZPOOL_CONFIG_ANYRAID_PARITY_TYPE	"anyraid_parity_type"
 #define	ZPOOL_CONFIG_ANYRAID_NDATA	"anyraid_ndata"
+#define	ZPOOL_CONFIG_ANYRAID_LEGACY_TILE_SIZE	"anyraid_legacy_tile_size"
 
 #define	VDEV_TYPE_ROOT			"root"
 #define	VDEV_TYPE_MIRROR		"mirror"

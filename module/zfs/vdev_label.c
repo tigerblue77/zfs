@@ -1980,7 +1980,7 @@ vdev_extra_sync_list(vdev_t **svd, int svdcount, int flags, uint64_t txg,
 	boolean_t have_extra = B_FALSE;
 
 	for (int i = 0; i < svdcount; i++) {
-		if (vdev_is_anyraid(svd[i])) {
+		if (vdev_is_anyraid(svd[i]) && vdev_anyraid_has_map(svd[i])) {
 			have_extra = B_TRUE;
 			break;
 		}

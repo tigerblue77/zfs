@@ -796,6 +796,22 @@ depends on kernel configuration.
 This is the minimum allocation size that will use scatter (page-based) ABDs.
 Smaller allocations will use linear ABDs.
 .
+.It Sy zfs_anyraid_adopt_raidz Ns = Ns Sy 0 Ns | Ns 1 Pq int
+Test only.
+Open every never-expanded top-level RAID-Z vdev of a pool being imported as a
+legacy anyraidz vdev, whose tiles are the RAID-Z layout and which has no tile
+map on disk.
+An import that can write then records the anyraidz vdev in the configuration.
+.
+.It Sy zfs_anyraid_adopt_test_rotate Ns = Ns Sy 0 Pq uint
+Test only.
+Place column
+.Em c
+of every legacy anyraidz tile on child
+.Em c
+plus this value, modulo the width, which makes every read of such a vdev
+wrong; a negative control of the adoption test.
+.
 .It Sy zfs_active_allocator Ns = Ns Sy dynamic Pq charp
 Select the SPA metaslab allocator.
 Valid values are

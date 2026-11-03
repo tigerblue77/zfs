@@ -157,6 +157,18 @@ static
 #endif	/* _KERNEL */
 unsigned long anyraid_relocate_max_bytes_pause = 0;
 
+/*
+ * Test only.  Import every never-expanded top-level RAID-Z vdev of a pool
+ * as a legacy anyraidz vdev whose tiles are the RAID-Z layout.
+ */
+int zfs_anyraid_adopt_raidz = 0;
+
+/*
+ * Test only.  Negative control of the adoption test: map column c of a
+ * legacy tile onto child (c + rotate) % width, which must break every read.
+ */
+static uint_t zfs_anyraid_adopt_test_rotate = 0;
+
 static int tasklist_read(vdev_t *vd);
 static void anyraid_scrub_done(spa_t *spa, dmu_tx_t *tx, void *arg);
 
@@ -348,11 +360,24 @@ vdev_anyraid_init(spa_t *spa, nvlist_t *nv, void **tsd)
 		return (SET_ERROR(EINVAL));
 	}
 
+	uint64_t legacy_tile_size = 0;
+	if (nvlist_lookup_uint64(nv, ZPOOL_CONFIG_ANYRAID_LEGACY_TILE_SIZE,
+	    &legacy_tile_size) == 0 && (parity_type != VAP_RAIDZ ||
+	    ndata + nparity != children || !ISP2(legacy_tile_size) ||
+	    legacy_tile_size * ndata < SPA_MAXBLOCKSIZE)) {
+		zfs_dbgmsg("invalid legacy anyraid vdev");
+		return (SET_ERROR(EINVAL));
+	}
+
 	vdev_anyraid_t *va = kmem_zalloc(sizeof (*va), KM_SLEEP);
 	va->vd_parity_type = parity_type;
 	va->vd_ndata = ndata;
 	va->vd_nparity = nparity;
 	va->vd_contracting_leaf = -1;
+	if (legacy_tile_size != 0) {
+		va->vd_legacy = B_TRUE;
+		va->vd_tile_size = legacy_tile_size;
+	}
 	switch (parity_type) {
 		case VAP_MIRROR:
 			va->vd_width = ndata;
@@ -438,6 +463,48 @@ vdev_anyraid_config_generate(vdev_t *vd, nvlist_t *nv)
 	    (uint8_t)va->vd_parity_type);
 	fnvlist_add_uint8(nv, ZPOOL_CONFIG_ANYRAID_NDATA,
 	    (uint8_t)va->vd_ndata);
+	if (va->vd_legacy) {
+		fnvlist_add_uint64(nv, ZPOOL_CONFIG_ANYRAID_LEGACY_TILE_SIZE,
+		    va->vd_tile_size);
+	}
+}
+
+/*
+ * Test only: the configuration of an anyraidz vdev that adopts the
+ * top-level RAID-Z vdev described by nv, or NULL if it cannot be adopted.
+ * The tiles are one metaslab per child, so that a logical tile is a whole
+ * number of metaslabs and no block crosses a tile.
+ */
+nvlist_t *
+vdev_anyraid_adopt_raidz_config(nvlist_t *nv)
+{
+	uint_t children;
+	nvlist_t **child;
+	uint64_t nparity, ms_shift;
+
+	if (nvlist_lookup_nvlist_array(nv, ZPOOL_CONFIG_CHILDREN, &child,
+	    &children) != 0 || children > VDEV_ANYRAID_MAX_DISKS ||
+	    nvlist_lookup_uint64(nv, ZPOOL_CONFIG_NPARITY, &nparity) != 0 ||
+	    nvlist_lookup_uint64(nv, ZPOOL_CONFIG_METASLAB_SHIFT,
+	    &ms_shift) != 0 || ms_shift == 0)
+		return (NULL);
+	/* An expanded RAID-Z has a width that depends on the birth txg. */
+	if (nvlist_exists(nv, ZPOOL_CONFIG_RAIDZ_EXPANDING) ||
+	    nvlist_exists(nv, ZPOOL_CONFIG_RAIDZ_EXPAND_TXGS)) {
+		zfs_dbgmsg("not adopting an expanded raidz");
+		return (NULL);
+	}
+
+	nvlist_t *anv = fnvlist_dup(nv);
+	fnvlist_add_uint8(anv, ZPOOL_CONFIG_ANYRAID_PARITY_TYPE, VAP_RAIDZ);
+	fnvlist_add_uint8(anv, ZPOOL_CONFIG_ANYRAID_NDATA,
+	    (uint8_t)(children - nparity));
+	fnvlist_add_uint64(anv, ZPOOL_CONFIG_ANYRAID_LEGACY_TILE_SIZE,
+	    1ULL << ms_shift);
+	zfs_dbgmsg("adopting raidz%llu with %u children as anyraidz, "
+	    "tile size 2^%llu per child", (u_longlong_t)nparity, children,
+	    (u_longlong_t)ms_shift);
+	return (anv);
 }
 
 /*
@@ -1127,6 +1194,50 @@ calculate_asize(vdev_t *vd, uint64_t *num_tiles)
 	return (count * va->vd_width * va->vd_tile_size);
 }
 
+/*
+ * Open a legacy vdev.  Its space is what the RAID-Z it adopted had, width
+ * times the smallest child, so that it keeps the same metaslabs; its tiles
+ * cover that space, the last one possibly past the end of the children.
+ * There is no map to read: every tile is the identity.
+ */
+static int
+vdev_anyraid_open_legacy(vdev_t *vd, uint64_t *asize, uint64_t *max_asize,
+    uint64_t *logical_ashift, uint64_t *physical_ashift)
+{
+	vdev_anyraid_t *va = vd->vdev_tsd;
+	uint64_t lt = va->vd_tile_size * va->vd_width;
+
+	if (vd->vdev_ms_shift != 0 && lt % (1ULL << vd->vdev_ms_shift) != 0) {
+		zfs_dbgmsg("legacy anyraid tile 0x%llx is not a multiple of "
+		    "the metaslab size", (u_longlong_t)lt);
+		vd->vdev_stat.vs_aux = VDEV_AUX_BAD_LABEL;
+		return (SET_ERROR(EINVAL));
+	}
+
+	*asize = 0;
+	*max_asize = 0;
+	for (int c = 0; c < vd->vdev_children; c++) {
+		vdev_t *cvd = vd->vdev_child[c];
+		if (cvd->vdev_open_error != 0)
+			continue;
+		*asize = MIN(*asize - 1, cvd->vdev_asize - 1) + 1;
+		*max_asize = MIN(*max_asize - 1, cvd->vdev_max_asize - 1) + 1;
+		*logical_ashift = MAX(*logical_ashift, cvd->vdev_ashift);
+		*physical_ashift = vdev_best_ashift(*logical_ashift,
+		    *physical_ashift, cvd->vdev_physical_ashift);
+	}
+	*asize *= vd->vdev_children;
+	*max_asize *= vd->vdev_children;
+
+	uint64_t ntiles = DIV_ROUND_UP(*max_asize, lt);
+	if (ntiles > VDEV_ANYRAID_MAX_TPD)
+		return (SET_ERROR(EOVERFLOW));
+	rw_enter(&va->vd_lock, RW_WRITER);
+	vdev_anyraid_legacy_tiles(va, ntiles);
+	rw_exit(&va->vd_lock);
+	return (0);
+}
+
 static int
 vdev_anyraid_open(vdev_t *vd, uint64_t *asize, uint64_t *max_asize,
     uint64_t *logical_ashift, uint64_t *physical_ashift)
@@ -1154,6 +1265,10 @@ vdev_anyraid_open(vdev_t *vd, uint64_t *asize, uint64_t *max_asize,
 		vd->vdev_stat.vs_aux = VDEV_AUX_NO_REPLICAS;
 		return (lasterror);
 	}
+
+	if (va->vd_legacy)
+		return (vdev_anyraid_open_legacy(vd, asize, max_asize,
+		    logical_ashift, physical_ashift));
 
 	int32_t *child_capacities = NULL;
 	if (vd->vdev_reopening) {
@@ -1417,7 +1532,19 @@ vdev_anyraid_legacy_tiles(vdev_anyraid_t *va, uint64_t ntiles)
 {
 	VERIFY(va->vd_legacy);
 	VERIFY3U(ntiles, <=, VDEV_ANYRAID_MAX_TPD);
-	for (uint64_t t = 0; t < ntiles; t++) {
+	uint64_t first = avl_numnodes(&va->vd_tile_map);
+	for (int c = 0; c < va->vd_width; c++) {
+		vdev_anyraid_node_t *van = va->vd_children[c];
+		avl_remove(&va->vd_children_tree, van);
+		if (first == 0) {
+			anyraid_freelist_destroy(&van->van_freelist);
+			anyraid_freelist_create(&van->van_freelist, 0);
+		}
+		/* No free slot: nothing is ever allocated outside a tile. */
+		van->van_capacity = MAX(van->van_capacity, ntiles);
+		avl_add(&va->vd_children_tree, van);
+	}
+	for (uint64_t t = first; t < ntiles; t++) {
 		anyraid_tile_t *at = kmem_alloc(sizeof (*at), KM_SLEEP);
 		at->at_tile_id = t;
 		at->at_synced = 0;
@@ -1426,11 +1553,13 @@ vdev_anyraid_legacy_tiles(vdev_anyraid_t *va, uint64_t ntiles)
 		for (int c = 0; c < va->vd_width; c++) {
 			anyraid_tile_node_t *atn =
 			    kmem_alloc(sizeof (*atn), KM_SLEEP);
-			atn->atn_disk = c;
+			atn->atn_disk = (c + zfs_anyraid_adopt_test_rotate) %
+			    va->vd_width;
 			atn->atn_tile_idx = t;
 			list_insert_tail(&at->at_list, atn);
 
-			vdev_anyraid_node_t *van = va->vd_children[c];
+			vdev_anyraid_node_t *van =
+			    va->vd_children[atn->atn_disk];
 			avl_remove(&va->vd_children_tree, van);
 			anyraid_freelist_remove(&van->van_freelist, t);
 			avl_add(&va->vd_children_tree, van);
@@ -1854,12 +1983,25 @@ vdev_anyraid_write_map_done(zio_t *zio)
 		atomic_inc_64(good_writes);
 }
 
+/*
+ * A legacy vdev has no tile map on disk: its tiles are all the identity,
+ * and the configuration says so.
+ */
+boolean_t
+vdev_anyraid_has_map(vdev_t *vd)
+{
+	ASSERT(vdev_is_anyraid(vd));
+	return (!((vdev_anyraid_t *)vd->vdev_tsd)->vd_legacy);
+}
+
 void
 vdev_anyraid_write_map_sync(vdev_t *vd, zio_t *pio, uint64_t txg,
     uint64_t *good_writes, int flags, vdev_config_sync_status_t status)
 {
 	vdev_t *anyraidvd = vd->vdev_parent;
 	ASSERT(vdev_is_anyraid(anyraidvd));
+	if (!vdev_anyraid_has_map(anyraidvd))
+		return;
 	spa_t *spa = vd->vdev_spa;
 	vdev_anyraid_t *va = anyraidvd->vdev_tsd;
 	uint32_t header_size = VDEV_ANYRAID_MAP_HEADER_SIZE(vd->vdev_ashift);
@@ -2055,6 +2197,11 @@ vdev_anyraid_min_asize(vdev_t *pvd, vdev_t *cvd)
 {
 	ASSERT(vdev_is_anyraid(pvd));
 	vdev_anyraid_t *va = pvd->vdev_tsd;
+	/* No map copies on a legacy child: what RAID-Z asked of it. */
+	if (va->vd_legacy) {
+		return ((pvd->vdev_min_asize + pvd->vdev_children - 1) /
+		    pvd->vdev_children);
+	}
 	if (va->vd_tile_size == 0)
 		return (VDEV_ANYRAID_TOTAL_MAP_SIZE(cvd->vdev_ashift));
 
@@ -3785,6 +3932,12 @@ vdev_anyraid_compact_children(vdev_t *vd)
 		}
 	}
 }
+
+ZFS_MODULE_PARAM(zfs, zfs_, anyraid_adopt_raidz, INT, ZMOD_RW,
+	"Test only: import RAID-Z vdevs as legacy anyraidz vdevs");
+
+ZFS_MODULE_PARAM(zfs, zfs_, anyraid_adopt_test_rotate, UINT, ZMOD_RW,
+	"Test only: rotate the children of legacy anyraidz tiles");
 
 ZFS_MODULE_PARAM(zfs_vdev_anyraid, zfs_vdev_anyraid_, min_tile_size, U64,
 	ZMOD_RW, "Minimum tile size for anyraid");

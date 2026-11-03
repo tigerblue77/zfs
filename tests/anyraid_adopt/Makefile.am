@@ -12,3 +12,13 @@ noinst_PROGRAMS += %D%/anyraid_adopt_map
 	libzpool.la \
 	libzfs_core.la \
 	libnvpair.la
+
+noinst_PROGRAMS += %D%/anyraid_adopt_pool
+
+%C%_anyraid_adopt_pool_CFLAGS   = $(AM_CFLAGS) $(KERNEL_CFLAGS)
+%C%_anyraid_adopt_pool_CPPFLAGS = $(AM_CPPFLAGS) $(LIBZPOOL_CPPFLAGS)
+%C%_anyraid_adopt_pool_SOURCES  = %D%/anyraid_adopt_pool.c
+%C%_anyraid_adopt_pool_LDADD    = \
+	libzpool.la \
+	libzfs_core.la \
+	libnvpair.la

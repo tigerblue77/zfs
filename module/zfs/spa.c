@@ -8356,6 +8356,9 @@ spa_vdev_attach(spa_t *spa, uint64_t guid, nvlist_t *nvroot, int replacing,
 			return (spa_vdev_exit(spa, NULL, txg,
 			    ZFS_ERR_RAIDZ_EXPAND_IN_PROGRESS));
 		}
+	} else if (anyraid && !vdev_anyraid_has_map(oldvd)) {
+		/* Spike: a legacy vdev has no map to record new tiles in. */
+		return (spa_vdev_exit(spa, NULL, txg, ENOTSUP));
 	} else if (!anyraid && !oldvd->vdev_ops->vdev_op_leaf) {
 		return (spa_vdev_exit(spa, NULL, txg, ENOTSUP));
 	}
@@ -12080,6 +12083,8 @@ spa_check_start_rebalance(void *arg, dmu_tx_t *tx) {
 	spa_t *spa = vd->vdev_spa;
 	if (!vdev_is_anyraid(vd))
 		return (SET_ERROR(EINVAL));
+	if (!vdev_anyraid_has_map(vd))
+		return (SET_ERROR(ENOTSUP));
 	if (vdev_anyraid_relocate_status(vd)->var_state == ARS_SCANNING)
 		return (SET_ERROR(EALREADY));
 	if (vd->vdev_spa->spa_anyraid_relocate != NULL)
@@ -12163,6 +12168,8 @@ spa_check_start_contract(void *arg, dmu_tx_t *tx) {
 	spa_t *spa = tvd->vdev_spa;
 	if (!vdev_is_anyraid(tvd))
 		return (SET_ERROR(EINVAL));
+	if (!vdev_anyraid_has_map(tvd))
+		return (SET_ERROR(ENOTSUP));
 	if (vdev_anyraid_relocate_status(tvd)->var_state == ARS_SCANNING ||
 	    vdev_anyraid_relocate_status(tvd)->var_state == ARS_SCRUBBING)
 		return (SET_ERROR(EALREADY));

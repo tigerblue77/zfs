@@ -964,8 +964,16 @@ vdev_alloc(spa_t *spa, vdev_t **vdp, nvlist_t *nv, vdev_t *parent, uint_t id,
 	 * error reporting and cleanup code paths.
 	 */
 	void *tsd = NULL;
+	nvlist_t *adopt_nv = NULL;
+	if (ops == &vdev_raidz_ops && top_level &&
+	    alloctype == VDEV_ALLOC_LOAD && zfs_anyraid_adopt_raidz != 0 &&
+	    (adopt_nv = vdev_anyraid_adopt_raidz_config(nv)) != NULL)
+		ops = &vdev_anyraidz_ops;
 	if (ops->vdev_op_init != NULL) {
-		rc = ops->vdev_op_init(spa, nv, &tsd);
+		rc = ops->vdev_op_init(spa, adopt_nv != NULL ? adopt_nv : nv,
+		    &tsd);
+		if (adopt_nv != NULL)
+			fnvlist_free(adopt_nv);
 		if (rc != 0) {
 			return (rc);
 		}
