@@ -79,6 +79,45 @@ is left at the old parity.
 7. Size: the mapping's memory is estimated before a move starts and held
    to a budget (point 3).
 
+**Not only parity.** The goal stays the one above: raise the parity of
+one RAID-Z top-level vdev at the same width. The mapping both prototypes
+build is not specific to parity, though, and device removal's indirect
+vdevs are a precedent for it. Device removal keeps a mapping for a whole
+vdev, from each allocated segment to another vdev
+(`vdev_removal.c:1605-1615`, `vdev_indirect.c:36-45`), and shrinks it
+only as frees and remaps make entries obsolete and condensing drops them
+(`vdev_indirect.c:63-67`, `129-132`). Blind to block boundaries, it
+cannot lay a block out at another parity or width, which is why master
+refuses to remove any top-level vdev but a log from a pool with a RAID-Z
+vdev (`vdev_removal.c:86-89`, `2340-2363`). A per-block mapping, with
+rows only for relocated blocks, does not have that limit. Parity
+conversion would be its first use; these could be later ones:
+
+- removing a RAID-Z top-level vdev, or a special or dedup vdev from a
+  pool that has a RAID-Z vdev, which the same check refuses (in a pool
+  without RAID-Z, device removal already handles them, snapshot-held
+  blocks included);
+- narrowing a RAID-Z vdev, impossible in place (above), so every block
+  would move;
+- restriping the blocks written before an expansion, which
+  `zfs rewrite` does only for the blocks it can reach
+  (`zpool-attach.8:90-95`, and the third constraint above).
+
+None of them is part of this design, and neither prototype implements
+any of them. Each would need its own design and proof: removal a
+destination vdev in every row and routing across vdevs, narrowing a
+layout of the new width and its own space admission, and all of them
+complete coverage, recovery after a crash and safe publication of the
+result. What they would share with parity conversion is the mapping
+and the questions of section 3 about its lifetime, bootstrap, census
+and space.
+
+Set aside: a new pool format with a virtual address in every block
+pointer of the pool. It would lift the block pointer constraint for
+good, but it puts a translation on every I/O and needs a row per block,
+where device removal's per-segment mapping already costs about
+50-100 MB of memory per TB (section 3, point 3).
+
 ## 2. The two mechanisms
 
 Writes: rdmitry0911; tigerblue77 corrects the column describing the
