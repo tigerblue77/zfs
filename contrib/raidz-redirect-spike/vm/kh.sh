@@ -248,19 +248,20 @@ case_a() {
 		chk scrub0 scrubok "$R.status"
 		chk rw_export xp
 		chk zdb zdbok "$R" 1
-		# The same input through the same code in userspace.
+		# The same input through the same code in userspace, with the
+		# file information callback the kernel's ZPL registers.
 		U=$W/a/$c-$m-user
 		cpin "$W/inputs/$c" "$U"
-		UM=$(ku "$U" rw rewrite-feature epoch "move $m")
+		UM=$(ku "$U" rw zpl-accounting rewrite-feature epoch "move $m")
 		fxdrop "$U"
-		UC=$(ku "$U" ro census)
+		UC=$(ku "$U" ro zpl-accounting census)
 		for k in entries rewritten redirected kept census_left; do
 			chk "as_user_$k" eq "$(fld "$MOVE" $k)" "$(fld "$UM" $k)"
 		done
 		chk as_user_after_drop eq "$(fld "$C2" entries)" "$(fld "$UC" entries)"
 		got="$(fld "$MOVE" entries) $(fld "$C2" entries) $(fld "$MOVE" rewritten) $(fld "$MOVE" redirected) $(( $(fld "$MOVE" kept) / 1024 ))"
 		eq "$got" "$e1 $e2 $e3 $e4 $e5" && k=SAME || k=DIFFERENT
-		log "RESULT $CASE kernel: entries after_drop rewritten redirected kept_KiB = $got; 1 Nov: $e1 $e2 $e3 $e4 $e5 ($k); mover_ms=$(fld "$MOVE" mover_ms) user_mover_ms=$(fld "$UM" mover_ms)"
+		log "RESULT $CASE kernel: entries after_drop rewritten redirected kept_KiB = $got; 1 Nov: $e1 $e2 $e3 $e4 $e5 ($k); round1=$(fld "$MOVE" round1) user_round1=$(fld "$UM" round1) mover_ms=$(fld "$MOVE" mover_ms) user_mover_ms=$(fld "$UM" mover_ms)"
 		end
 	done 3<<< "$EXPECT"
 }

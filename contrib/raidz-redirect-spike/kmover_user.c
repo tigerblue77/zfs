@@ -29,11 +29,14 @@
  * and an fsync commit it; "volume-minor" does with the log of <pool>/fill
  * what the kernel does when it creates the volume's minor on an import;
  * "destroy <dataset>" destroys <pool>/<dataset>, as "zfs destroy" does;
- * "sync" waits for a txg to sync.  Any other command is written to the
- * mover with the pool name inserted after its first word ("epoch", "move
- * hybrid", "census") and its result line printed.  A rw pool is exported
- * at the end.  Exit status: 0 if every command returned rc=0, 1 if one did
- * not, 2 usage.
+ * "sync" waits for a txg to sync; "zpl-accounting", anywhere, registers
+ * before the pool is imported a file information callback for DMU_OST_ZFS,
+ * as the kernel's ZPL does when the module loads (zfs_init()), so that
+ * owning a file system read-write starts its user accounting upgrade as it
+ * does there.  Any other command is written to the mover with the pool
+ * name inserted after its first word ("epoch", "move hybrid", "census")
+ * and its result line printed.  A rw pool is exported at the end.  Exit
+ * status: 0 if every command returned rc=0, 1 if one did not, 2 usage.
  */
 
 #include <stdio.h>
@@ -74,6 +77,17 @@ rw_feature_sync(void *arg, dmu_tx_t *tx)
 	(void) arg;
 	spa_feature_enable(dmu_tx_pool(tx)->dp_spa,
 	    SPA_FEATURE_PHYSICAL_REWRITE, tx);
+}
+
+/* zpl_get_file_info()'s answer for an object that is not a znode. */
+static int
+zpl_info_cb(dmu_object_type_t bonustype, const void *data,
+    zfs_file_info_t *zfi)
+{
+	(void) data, (void) zfi;
+	if (bonustype != DMU_OT_ZNODE && bonustype != DMU_OT_SA)
+		return (SET_ERROR(ENOENT));
+	return (SET_ERROR(ENOTSUP));
 }
 
 #define	FILL_BLOCK	(128ULL << 10)
@@ -308,6 +322,10 @@ main(int argc, char **argv)
 		return (2);
 	}
 	ro = strcmp(argv[3], "ro") == 0;
+	for (int i = 4; i < argc; i++) {
+		if (strcmp(argv[i], "zpl-accounting") == 0)
+			dmu_objset_register_type(DMU_OST_ZFS, zpl_info_cb);
+	}
 	(void) snprintf(cache, sizeof (cache), "%s/zpool.cache", argv[1]);
 	spa_config_path = cache;
 	kernel_init(ro ? SPA_MODE_READ : SPA_MODE_READ | SPA_MODE_WRITE);
@@ -336,6 +354,8 @@ main(int argc, char **argv)
 				rc = 1;
 			continue;
 		}
+		if (strcmp(argv[i], "zpl-accounting") == 0)
+			continue;
 		if (strncmp(argv[i], "fill ", 5) == 0) {
 			char *end;
 			uint64_t mib = strtoull(argv[i] + 5, &end, 10);

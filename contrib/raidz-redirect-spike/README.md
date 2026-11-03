@@ -1023,3 +1023,20 @@ with (`vdev_raidz_gang_read_size()`) and accept either size, as
 `census_err=52` before; after, 256 old-size headers among 1928 gang DVAs,
 `rc=0`, a census of 0, every record read back and zdb clean.  With the
 census fixed and not the liveness check, 5432 refusals with ESTALE.
+
+Case (a), the hybrid at 100 % retained: 116 and 816 entries instead of
+130 and 830, every check passing.  The kernel's ZPL registers file
+information for `DMU_OST_ZFS` when the module loads, and the fixtures'
+root is a `DMU_OST_ZFS` objset that libzpool created without user
+accounting, so the mover's read-write ownership of it started the
+accounting upgrade, which rewrote the head's dnodes at the new parity
+during the move, as far as the stop at each disown let it.
+`kmover_user zpl-accounting` registers the same callback: 116 and 816
+entries, and objects -1 and -2 in the head.  The mover now owns the head
+with `dmu_objset_own_obj()`, which starts no upgrade: 130 and 830 with the
+callback as without.  Running the upgrade in userspace hung one export
+of four, the objset's eviction waiting for holds on its meta-dnode; from
+reading, libspl's `taskq_cancel_id()` neither cancels nor waits, so the
+stop at a disown does not wait for a running upgrade there as it does in
+the kernel.  After the three changes, the 16 runs with and without the
+callback equal tree D.

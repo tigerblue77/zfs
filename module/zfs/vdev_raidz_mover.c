@@ -378,6 +378,28 @@ rzm_redirect(rzm_t *rz, rzm_mv_t **list, int n)
 }
 
 /*
+ * Own the head read-write as dmu_objset_own() does, but without starting
+ * the upgrade that it starts for a file system that lacks user accounting:
+ * the ZPL registers DMU_OST_ZFS when the module loads, so that in the
+ * kernel, and not in userspace, owning the fixtures' root, which libzpool
+ * created, rewrote its dnodes at the new parity during the move, as far as
+ * the stop at the disown let it.
+ */
+static int
+rzm_own_head(rzm_t *rz, objset_t **osp)
+{
+	dsl_pool_t *dp;
+	int err;
+
+	if ((err = dsl_pool_hold(rz->rz_head, FTAG, &dp)) != 0)
+		return (err);
+	err = dmu_objset_own_obj(dp, rz->rz_head_obj, DMU_OST_ANY, B_FALSE,
+	    B_TRUE, rz, osp);
+	dsl_pool_rele(dp, FTAG);
+	return (err);
+}
+
+/*
  * hybrid_probe's rewrite_head(): rewrite, as zfs rewrite -P does, every
  * level-0 block of a plain file of the head that the head owns and that is
  * older than the epoch.
@@ -389,9 +411,7 @@ rzm_rewrite_head(rzm_t *rz)
 	uint64_t obj = 0;
 	int err;
 
-	err = dmu_objset_own(rz->rz_head, DMU_OST_ANY, B_FALSE, B_TRUE, FTAG,
-	    &os);
-	if (err != 0)
+	if ((err = rzm_own_head(rz, &os)) != 0)
 		return (err);
 	while (err == 0 && dmu_object_next(os, &obj, B_FALSE, 0) == 0) {
 		dmu_object_info_t doi;
@@ -434,7 +454,7 @@ rzm_rewrite_head(rzm_t *rz)
 			dmu_tx_commit(tx);
 		}
 	}
-	dmu_objset_disown(os, B_TRUE, FTAG);
+	dmu_objset_disown(os, B_TRUE, rz);
 	txg_wait_synced(spa_get_dsl(rz->rz_spa), 0);
 	return (err);
 }
@@ -584,10 +604,9 @@ rzm_move(rzm_t *rz, char *buf, size_t size)
 	if (rz->rz_hybrid) {
 		objset_t *os;
 
-		if (dmu_objset_own(rz->rz_head, DMU_OST_ANY, B_FALSE, B_TRUE,
-		    FTAG, &os) == 0) {
+		if (rzm_own_head(rz, &os) == 0) {
 			rz->rz_head_rw = B_TRUE;
-			dmu_objset_disown(os, B_TRUE, FTAG);
+			dmu_objset_disown(os, B_TRUE, rz);
 		}
 	}
 	RZM_ADD(" head_rw=%d", rz->rz_head_rw);
