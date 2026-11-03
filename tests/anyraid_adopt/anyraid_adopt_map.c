@@ -92,6 +92,7 @@ typedef struct stats {
 	uint64_t psize_bad;
 	uint64_t printed_map;
 	uint64_t printed_xlate;
+	uint64_t printed_xlate_lines;
 	uint64_t printed_cross;
 } stats_t;
 
@@ -241,7 +242,8 @@ check_block(uint64_t b, uint64_t s, int type)
 			if (pr.rs_start != pa.rs_start ||
 			    pr.rs_end != pa.rs_end) {
 				xsame = B_FALSE;
-				if (cfg.verbose && st.printed_xlate < 3) {
+				if (cfg.verbose &&
+				    st.printed_xlate_lines++ < 20) {
 					(void) printf("  xlate child %llu of "
 					    "[0x%llx, 0x%llx): raidz "
 					    "[0x%llx, 0x%llx) anyraid "
