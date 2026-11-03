@@ -87,6 +87,7 @@ typedef struct stats {
 	uint64_t cross_tile;
 	uint64_t cross_tile_map_bad;
 	uint64_t cross_tile_in_ms;
+	uint64_t cross_tile_in_ms_map_bad;
 	uint64_t asize_bad;
 	uint64_t psize_bad;
 	uint64_t printed_map;
@@ -274,8 +275,11 @@ check_block(uint64_t b, uint64_t s, int type)
 		st.cross_tile++;
 		if (!same)
 			st.cross_tile_map_bad++;
-		if (in_ms)
+		if (in_ms) {
 			st.cross_tile_in_ms++;
+			if (!same)
+				st.cross_tile_in_ms_map_bad++;
+		}
 	}
 	uint64_t *printed = !in_tile ? &st.printed_cross :
 	    !same ? &st.printed_map : &st.printed_xlate;
@@ -423,6 +427,20 @@ main(int argc, char **argv)
 			for (uint64_t b = lo; b < hi; b++)
 				for (int i = 0; i < ns; i++)
 					check_both(b, sizes[i]);
+			/* Blocks that end near the boundary. */
+			for (int i = 0; i < ns; i++) {
+				uint64_t as = vdev_raidz_ops.
+				    vdev_op_psize_to_asize(rvd,
+				    sizes[i] << cfg.ashift, 1) >> cfg.ashift;
+				if (as + cfg.count > end)
+					continue;
+				for (uint64_t b = end - as - cfg.count;
+				    b < end - as + cfg.count; b++) {
+					if (b >= lo && b < hi)
+						continue;
+					check_both(b, sizes[i]);
+				}
+			}
 		}
 		break;
 	}
@@ -447,9 +465,11 @@ main(int argc, char **argv)
 	    (u_longlong_t)st.in_tile_in_ms_map_bad,
 	    (u_longlong_t)st.in_tile_in_ms_xlate_bad);
 	(void) printf("  crossing a tile boundary: %llu, map mismatches %llu; "
-	    "inside one metaslab (blocks that can exist): %llu\n",
-	    (u_longlong_t)st.cross_tile, (u_longlong_t)st.cross_tile_map_bad,
-	    (u_longlong_t)st.cross_tile_in_ms);
+	    "inside one metaslab (blocks that can exist): %llu, map mismatches "
+	    "%llu\n", (u_longlong_t)st.cross_tile,
+	    (u_longlong_t)st.cross_tile_map_bad,
+	    (u_longlong_t)st.cross_tile_in_ms,
+	    (u_longlong_t)st.cross_tile_in_ms_map_bad);
 
 	boolean_t ok = (st.in_tile_map_bad == 0 && st.in_tile_xlate_bad == 0 &&
 	    st.asize_bad == 0 && st.psize_bad == 0 && st.cross_tile_in_ms == 0);
