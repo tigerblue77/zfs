@@ -354,6 +354,10 @@ typedef struct raidz_migrate_need {
 extern void vdev_raidz_migrate_need_add(vdev_t *, raidz_migrate_need_t *,
     const struct blkptr *, int, boolean_t);
 extern int vdev_raidz_migrate_preflight(vdev_t *, raidz_migrate_need_t *);
+/* SPIKE: reading a gang header as zio does, of either size. */
+extern uint64_t vdev_raidz_gang_read_size(spa_t *, const struct blkptr *);
+extern uint64_t vdev_raidz_gang_header_size(spa_t *,
+    const struct blkptr *, abd_t *, uint64_t);
 /* SPIKE: the test-only mover and its trigger (vdev_raidz_mover.c) */
 extern int vdev_raidz_spike_mover_start(const char *);
 extern int vdev_raidz_spike_mover_status(char *, size_t);

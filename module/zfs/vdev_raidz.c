@@ -8134,6 +8134,50 @@ vdev_raidz_extent_allocated(vdev_t *vd, uint64_t offset, uint64_t size)
 }
 
 /*
+ * SPIKE: the bytes a read of the gang header gbp takes, as
+ * zio_gang_tree_assemble() computes them: with
+ * feature@dynamic_gang_header active, the smallest header psize of the
+ * vdevs of its DVAs.
+ */
+uint64_t
+vdev_raidz_gang_read_size(spa_t *spa, const blkptr_t *gbp)
+{
+	uint64_t gsize = UINT64_MAX;
+
+	if (!spa_feature_is_active(spa, SPA_FEATURE_DYNAMIC_GANG_HEADER))
+		return (SPA_OLD_GANGBLOCKSIZE);
+	spa_config_enter(spa, SCL_VDEV, FTAG, RW_READER);
+	for (int d = 0; d < BP_GET_NDVAS(gbp); d++) {
+		gsize = MIN(gsize, vdev_gang_header_psize(vdev_lookup_top(spa,
+		    DVA_GET_VDEV(&gbp->blk_dva[d]))));
+	}
+	spa_config_exit(spa, SCL_VDEV, FTAG);
+	return (gsize);
+}
+
+/*
+ * SPIKE: the size of the gang header gbp, whose first gsize bytes, read
+ * with vdev_raidz_gang_read_size(), are in abd, or 0 if its embedded
+ * checksum matches none.  A header written before
+ * feature@dynamic_gang_header became active holds SPA_OLD_GANGBLOCKSIZE
+ * bytes, its checksum at their end, so that zio_checksum_error() tries that
+ * size too: a pool can hold both kinds.
+ */
+uint64_t
+vdev_raidz_gang_header_size(spa_t *spa, const blkptr_t *gbp, abd_t *abd,
+    uint64_t gsize)
+{
+	if (zio_checksum_error_impl(spa, gbp, ZIO_CHECKSUM_GANG_HEADER, abd,
+	    gsize, 0, NULL) == 0)
+		return (gsize);
+	if (gsize > SPA_OLD_GANGBLOCKSIZE && zio_checksum_error_impl(spa, gbp,
+	    ZIO_CHECKSUM_GANG_HEADER, abd, SPA_OLD_GANGBLOCKSIZE, 0,
+	    NULL) == 0)
+		return (SPA_OLD_GANGBLOCKSIZE);
+	return (0);
+}
+
+/*
  * SPIKE: B_TRUE if gbp, a live gang block, has bp in its gang tree.  Each
  * header is read where it lies now (through its redirect, if it moved) and
  * checked against its own embedded checksum before its block pointers are
@@ -8143,7 +8187,7 @@ static boolean_t
 vdev_raidz_redirect_in_gang(spa_t *spa, const blkptr_t *gbp,
     const blkptr_t *bp, int depth)
 {
-	uint64_t gsize = SPA_OLD_GANGBLOCKSIZE;
+	uint64_t gsize, hsize;
 	boolean_t found = B_FALSE;
 	blkptr_t rbp;
 	abd_t *abd;
@@ -8151,14 +8195,7 @@ vdev_raidz_redirect_in_gang(spa_t *spa, const blkptr_t *gbp,
 	/* A bound, so that no header chain can recurse without end. */
 	if (!BP_IS_GANG(gbp) || depth >= 8)
 		return (B_FALSE);
-	if (spa_feature_is_active(spa, SPA_FEATURE_DYNAMIC_GANG_HEADER)) {
-		gsize = UINT64_MAX;
-		for (int d = 0; d < BP_GET_NDVAS(gbp); d++) {
-			gsize = MIN(gsize, vdev_gang_header_psize(
-			    vdev_lookup_top(spa,
-			    DVA_GET_VDEV(&gbp->blk_dva[d]))));
-		}
-	}
+	gsize = vdev_raidz_gang_read_size(spa, gbp);
 
 	/* The header's bytes, as stored, from its first DVA. */
 	rbp = *gbp;
@@ -8175,13 +8212,13 @@ vdev_raidz_redirect_in_gang(spa_t *spa, const blkptr_t *gbp,
 	abd = abd_alloc_linear(gsize, B_TRUE);
 	if (zio_wait(zio_read(NULL, spa, &rbp, abd, gsize, NULL, NULL,
 	    ZIO_PRIORITY_SYNC_READ, ZIO_FLAG_CANFAIL | ZIO_FLAG_SPECULATIVE,
-	    NULL)) == 0 && zio_checksum_error_impl(spa, gbp,
-	    ZIO_CHECKSUM_GANG_HEADER, abd, gsize, 0, NULL) == 0) {
+	    NULL)) == 0 && (hsize = vdev_raidz_gang_header_size(spa, gbp,
+	    abd, gsize)) != 0) {
 		zio_gbh_phys_t *gbh = abd_to_buf(abd);
 
 		if (BP_SHOULD_BYTESWAP(gbp))
-			byteswap_uint64_array(gbh, gsize);
-		for (int g = 0; !found && g < gbh_nblkptrs(gsize); g++) {
+			byteswap_uint64_array(gbh, hsize);
+		for (int g = 0; !found && g < gbh_nblkptrs(hsize); g++) {
 			const blkptr_t *cbp = gbh_bp(gbh, g);
 
 			found = BP_EQUAL(cbp, bp) ||

@@ -1011,3 +1011,15 @@ epoch and a move, and on upstream master (3028351741), but not with
 `feature@async_destroy`, whose destroy frees the log with
 `zil_destroy_sync()`.  `old_synchronous_dataset_destroy()` now does so
 too, and case (c) runs clean in userspace.
+
+Case (d), gang blocks: the kernel's pool has `feature@dynamic_gang_header`
+enabled, which the first gang write activates, so the headers written
+before hold 512 bytes and the later ones a sector: the census checksummed
+every header at the larger size and failed with ECKSUM.  The census and
+the move's liveness check now read a header with the size zio reads it
+with (`vdev_raidz_gang_read_size()`) and accept either size, as
+`zio_checksum_error()` does (`vdev_raidz_gang_header_size()`).
+`kh_gang.c` makes case (d)'s pool in userspace: with the feature,
+`census_err=52` before; after, 256 old-size headers among 1928 gang DVAs,
+`rc=0`, a census of 0, every record read back and zdb clean.  With the
+census fixed and not the liveness check, 5432 refusals with ESTALE.

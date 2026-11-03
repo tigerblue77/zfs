@@ -102,7 +102,6 @@ typedef struct rzm {
 	uint64_t	rz_head_obj;
 	uint64_t	rz_prev_snap;
 	boolean_t	rz_head_rw;
-	uint64_t	rz_gsize;	/* a gang header's psize */
 	uint64_t	*rz_key;	/* the census's set of DVAs */
 	rzm_mv_t	*rz_mv;		/* NULL: the census only counts */
 	int		rz_nmv;
@@ -111,6 +110,7 @@ typedef struct rzm {
 	int		rz_census_err;
 	uint64_t	rz_gang_dvas;	/* old gang headers and children */
 	uint64_t	rz_gang_left;	/* of them, not taken */
+	uint64_t	rz_gang_small;	/* headers of the old, fixed size */
 	uint64_t	rz_zil_old;	/* old ZIL DVAs, never moved */
 	uint64_t	rz_live;	/* DVAs with a live redirect */
 	uint64_t	rz_kept;	/* their rde_old_reserved */
@@ -179,13 +179,16 @@ static void rzm_count_bp(rzm_t *, const blkptr_t *, const zbookmark_phys_t *,
 /*
  * The children of the gang block bp, from its header's first copy, which
  * must match the checksum embedded in it before its block pointers are
- * believed (vdev_raidz_redirect_in_gang() does the same).
+ * believed (vdev_raidz_redirect_in_gang() does the same).  The header is
+ * read with the size zio reads it with, and is of that size or, written
+ * before feature@dynamic_gang_header became active, of the old one.
  */
 static void
 rzm_count_gang(rzm_t *rz, const blkptr_t *bp, const zbookmark_phys_t *zb,
     int depth)
 {
-	uint64_t gsize = rz->rz_gsize;
+	uint64_t gsize = vdev_raidz_gang_read_size(rz->rz_spa, bp);
+	uint64_t hsize = 0;
 	abd_t *abd;
 	int err;
 
@@ -196,15 +199,19 @@ rzm_count_gang(rzm_t *rz, const blkptr_t *bp, const zbookmark_phys_t *zb,
 	}
 	abd = rzm_read_raw(rz->rz_spa, bp, 0, gsize, B_TRUE, &err);
 	if (err == 0) {
-		err = zio_checksum_error_impl(rz->rz_spa, bp,
-		    ZIO_CHECKSUM_GANG_HEADER, abd, gsize, 0, NULL);
+		hsize = vdev_raidz_gang_header_size(rz->rz_spa, bp, abd,
+		    gsize);
+		if (hsize == 0)
+			err = SET_ERROR(ECKSUM);
+		else if (hsize < gsize)
+			rz->rz_gang_small++;
 	}
 	if (err == 0) {
 		zio_gbh_phys_t *gbh = abd_to_buf(abd);
 
 		if (BP_SHOULD_BYTESWAP(bp))
-			byteswap_uint64_array(gbh, gsize);
-		for (int g = 0; g < gbh_nblkptrs(gsize); g++)
+			byteswap_uint64_array(gbh, hsize);
+		for (int g = 0; g < gbh_nblkptrs(hsize); g++)
 			rzm_count_bp(rz, gbh_bp(gbh, g), zb, depth + 1);
 	} else if (rz->rz_census_err == 0) {
 		rz->rz_census_err = err;
@@ -291,7 +298,8 @@ rzm_census(rzm_t *rz)
 	memset(rz->rz_key, 0, 2 * RZM_SET_SLOTS * sizeof (uint64_t));
 	rz->rz_nmv = 0;
 	rz->rz_census_err = 0;
-	rz->rz_gang_dvas = rz->rz_gang_left = rz->rz_zil_old = 0;
+	rz->rz_gang_dvas = rz->rz_gang_left = rz->rz_gang_small = 0;
+	rz->rz_zil_old = 0;
 	rz->rz_live = rz->rz_kept = 0;
 	err = traverse_pool(rz->rz_spa, 0, TRAVERSE_PRE | TRAVERSE_HARD |
 	    TRAVERSE_NO_DECRYPT, rzm_census_cb, rz);
@@ -328,7 +336,9 @@ rzm_redirect(rzm_t *rz, rzm_mv_t **list, int n)
 			rzm_mv_t *m = list[i++];
 			boolean_t gang =
 			    DVA_GET_GANG(&m->mv_bp.blk_dva[m->mv_dva]);
-			uint64_t psize = gang ? rz->rz_gsize :
+			/* All the bytes a read through the redirect takes. */
+			uint64_t psize = gang ?
+			    vdev_raidz_gang_read_size(spa, &m->mv_bp) :
 			    BP_GET_PSIZE(&m->mv_bp);
 			abd_t *abd = rzm_read_raw(spa, &m->mv_bp, m->mv_dva,
 			    psize, gang, &err);
@@ -520,10 +530,12 @@ rzm_print_census(rzm_t *rz, char *buf, size_t size)
 	uint64_t v = rz->rz_vd->vdev_id;
 
 	(void) snprintf(buf, size, " census_err=%d census_left=%llu "
-	    "gang_dvas=%llu gang_left=%llu zil_old=%llu live=%llu kept=%llu "
-	    "entries=%llu tombstones=%llu damaged=%llu extra=%lld",
+	    "gang_dvas=%llu gang_left=%llu gang_small=%llu zil_old=%llu "
+	    "live=%llu kept=%llu entries=%llu tombstones=%llu damaged=%llu "
+	    "extra=%lld",
 	    rz->rz_census_err, (u_longlong_t)(rz->rz_nmv + rz->rz_gang_left),
 	    (u_longlong_t)rz->rz_gang_dvas, (u_longlong_t)rz->rz_gang_left,
+	    (u_longlong_t)rz->rz_gang_small,
 	    (u_longlong_t)rz->rz_zil_old, (u_longlong_t)rz->rz_live,
 	    (u_longlong_t)rz->rz_kept,
 	    (u_longlong_t)vdev_raidz_redirect_count(spa, v),
@@ -605,10 +617,12 @@ rzm_move(rzm_t *rz, char *buf, size_t size)
 	}
 	pf = vdev_raidz_migrate_preflight(vd, rmn);
 	RZM_ADD(" census_dvas=%d to_redirect=%d to_rewrite=%d gang_dvas=%llu "
-	    "zil_old=%llu preflight=%d pf_free=%llu pf_slop=%llu "
-	    "pf_need_end=%llu pf_new=%llu pf_packed=%llu pf_left=%llu "
-	    "pf_need_left=%llu pf_keep=%llu", rz->rz_nmv, nred, nrw,
-	    (u_longlong_t)rz->rz_gang_dvas, (u_longlong_t)rz->rz_zil_old, pf,
+	    "gang_small=%llu zil_old=%llu preflight=%d pf_free=%llu "
+	    "pf_slop=%llu pf_need_end=%llu pf_new=%llu pf_packed=%llu "
+	    "pf_left=%llu pf_need_left=%llu pf_keep=%llu", rz->rz_nmv, nred,
+	    nrw,
+	    (u_longlong_t)rz->rz_gang_dvas, (u_longlong_t)rz->rz_gang_small,
+	    (u_longlong_t)rz->rz_zil_old, pf,
 	    (u_longlong_t)rmn->rmn_free, (u_longlong_t)rmn->rmn_slop,
 	    (u_longlong_t)rmn->rmn_need_end,
 	    (u_longlong_t)rmn->rmn_redirect_new,
@@ -703,9 +717,6 @@ rzm_run(rzm_t *rz, char *buf, size_t size)
 		err = SET_ERROR(EINVAL);
 		goto close;
 	}
-	rz->rz_gsize = spa_feature_is_active(rz->rz_spa,
-	    SPA_FEATURE_DYNAMIC_GANG_HEADER) ?
-	    vdev_gang_header_psize(rz->rz_vd) : SPA_OLD_GANGBLOCKSIZE;
 	rz->rz_key = vmem_alloc(2 * RZM_SET_SLOTS * sizeof (uint64_t),
 	    KM_SLEEP);
 	if (rz->rz_cmd == RZM_MOVE) {

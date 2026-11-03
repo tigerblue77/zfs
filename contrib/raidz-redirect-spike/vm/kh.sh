@@ -426,6 +426,9 @@ case_d() {
 		M=$RES
 		chk gang_found gt0 "$(fld "$M" gang_dvas)"
 		if [ "$v" = gang ]; then
+			# Headers written before feature@dynamic_gang_header
+			# became active have the old, fixed size.
+			chk old_size_headers gt0 "$(fld "$M" gang_small)"
 			chk move_rc0 eq "$(fld "$M" rc)" 0
 			chk census0 eq "$(fld "$M" census_left)" 0
 		else
