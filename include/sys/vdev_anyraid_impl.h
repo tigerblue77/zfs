@@ -327,6 +327,15 @@ int vdev_anyraid_pick_best_mapping(vdev_t *cvd,
 int vdev_anyraid_open_header(vdev_t *cvd, int header,
     anyraid_header_t *out_header);
 
+/*
+ * These functions are exposed for the adoption test programs.
+ */
+struct raidz_map;
+void vdev_anyraid_raidz_map_translate(vdev_t *vd, struct raidz_map *rm,
+    anyraid_tile_t *tile, vdev_anyraid_relocate_task_t *task);
+void vdev_anyraid_legacy_tiles(vdev_anyraid_t *va, uint64_t ntiles);
+anyraid_tile_t *vdev_anyraid_find_tile(vdev_anyraid_t *va, uint64_t offset);
+
 #ifdef	__cplusplus
 }
 #endif

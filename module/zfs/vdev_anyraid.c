@@ -280,6 +280,17 @@ vdev_anyraid_header_offset(vdev_t *vd, int id)
 		    (VDEV_ANYRAID_MAP_COPIES - id) * full_size);
 }
 
+/*
+ * Offset on a child of the start of its first tile slot.
+ */
+static inline uint64_t
+vdev_anyraid_slot_base(const vdev_anyraid_t *va, const vdev_t *cvd)
+{
+	if (va->vd_legacy)
+		return (0);
+	return (VDEV_ANYRAID_START_OFFSET(cvd->vdev_ashift));
+}
+
 static inline int
 anyraid_tile_compare(const void *p1, const void *p2)
 {
@@ -1319,7 +1330,7 @@ vdev_anyraid_mirror_start(zio_t *zio, anyraid_tile_t *tile,
 		mirror_child_t *mc = &mm->mm_child[c];
 		vdev_t *cvd = vd->vdev_child[disk];
 		mc->mc_vd = cvd;
-		mc->mc_offset = VDEV_ANYRAID_START_OFFSET(cvd->vdev_ashift) +
+		mc->mc_offset = vdev_anyraid_slot_base(va, cvd) +
 		    offset * tsize + zio->io_offset % tsize;
 		ASSERT3U(mc->mc_offset, <, cvd->vdev_psize -
 		    VDEV_LABEL_END_SIZE);
@@ -1339,7 +1350,7 @@ vdev_anyraid_mirror_start(zio_t *zio, anyraid_tile_t *tile,
  * Translate the allocated and configured raidz map to use the proper disks
  * based on the anyraid tile mapping.
  */
-static void
+void
 vdev_anyraid_raidz_map_translate(vdev_t *vd, raidz_map_t *rm,
     anyraid_tile_t *tile, vdev_anyraid_relocate_task_t *task)
 {
@@ -1371,8 +1382,7 @@ vdev_anyraid_raidz_map_translate(vdev_t *vd, raidz_map_t *rm,
 		uint64_t tile_off = rc->rc_offset % va->vd_tile_size;
 		uint64_t disk_off = tile_off +
 		    offset * va->vd_tile_size;
-		rc->rc_offset = VDEV_ANYRAID_START_OFFSET(vd->vdev_ashift) +
-		    disk_off;
+		rc->rc_offset = vdev_anyraid_slot_base(va, vd) + disk_off;
 		rc->rc_devidx = disk;
 	}
 	kmem_free(mapping, sizeof (*mapping) * va->vd_width);
@@ -1396,6 +1406,45 @@ vdev_anyraid_raidz_start(zio_t *zio, anyraid_tile_t *tile,
 	zio->io_vsd_ops = &vdev_raidz_vsd_ops;
 	zio->io_aux_vsd = lr;
 	vdev_raidz_io_start_impl(zio, rm, va->vd_width, va->vd_width);
+}
+
+/*
+ * Give a legacy vdev its tiles: tile k is slot k of every child, in child
+ * order, which is where a RAID-Z of the same width put the same offsets.
+ */
+void
+vdev_anyraid_legacy_tiles(vdev_anyraid_t *va, uint64_t ntiles)
+{
+	VERIFY(va->vd_legacy);
+	VERIFY3U(ntiles, <=, VDEV_ANYRAID_MAX_TPD);
+	for (uint64_t t = 0; t < ntiles; t++) {
+		anyraid_tile_t *at = kmem_alloc(sizeof (*at), KM_SLEEP);
+		at->at_tile_id = t;
+		at->at_synced = 0;
+		list_create(&at->at_list, sizeof (anyraid_tile_node_t),
+		    offsetof(anyraid_tile_node_t, atn_node));
+		for (int c = 0; c < va->vd_width; c++) {
+			anyraid_tile_node_t *atn =
+			    kmem_alloc(sizeof (*atn), KM_SLEEP);
+			atn->atn_disk = c;
+			atn->atn_tile_idx = t;
+			list_insert_tail(&at->at_list, atn);
+
+			vdev_anyraid_node_t *van = va->vd_children[c];
+			avl_remove(&va->vd_children_tree, van);
+			anyraid_freelist_remove(&van->van_freelist, t);
+			avl_add(&va->vd_children_tree, van);
+		}
+		avl_add(&va->vd_tile_map, at);
+	}
+}
+
+anyraid_tile_t *
+vdev_anyraid_find_tile(vdev_anyraid_t *va, uint64_t offset)
+{
+	anyraid_tile_t search;
+	search.at_tile_id = offset / (va->vd_tile_size * va->vd_width);
+	return (avl_find(&va->vd_tile_map, &search, NULL));
 }
 
 typedef struct anyraid_map {
@@ -1537,7 +1586,7 @@ vdev_anyraid_io_start(zio_t *zio)
 	vdev_t *cvd = vd->vdev_child[atn->atn_disk];
 	uint64_t child_offset = atn->atn_tile_idx * tsize +
 	    zio->io_offset % tsize;
-	child_offset += VDEV_ANYRAID_START_OFFSET(cvd->vdev_ashift);
+	child_offset += vdev_anyraid_slot_base(va, cvd);
 
 	anyraid_map_t *mm = kmem_alloc(sizeof (*mm), KM_SLEEP);
 	mm->am_abd = abd_get_offset(zio->io_abd, 0);
@@ -1682,8 +1731,7 @@ vdev_anyraid_xlate(vdev_t *cvd, const zfs_range_seg64_t *logical_rs,
 		{
 			uint64_t child_offset = atn->atn_tile_idx * ptsize +
 			    logical_rs->rs_start % ptsize;
-			child_offset +=
-			    VDEV_ANYRAID_START_OFFSET(cvd->vdev_ashift);
+			child_offset += vdev_anyraid_slot_base(va, cvd);
 			uint64_t size = logical_rs->rs_end -
 			    logical_rs->rs_start;
 
@@ -1696,9 +1744,8 @@ vdev_anyraid_xlate(vdev_t *cvd, const zfs_range_seg64_t *logical_rs,
 			uint64_t width = va->vd_width;
 			uint64_t tgt_col = idx;
 			uint64_t ashift = anyraidvd->vdev_ashift;
-			uint64_t tile_start = VDEV_ANYRAID_START_OFFSET(
-			    anyraidvd->vdev_ashift) + atn->atn_tile_idx *
-			    ptsize;
+			uint64_t tile_start = vdev_anyraid_slot_base(va,
+			    anyraidvd) + atn->atn_tile_idx * ptsize;
 
 			uint64_t b_start =
 			    (logical_rs->rs_start % ltsize) >> ashift;
@@ -3072,10 +3119,8 @@ anyraid_relocate_impl(vdev_t *vd, vdev_anyraid_relocate_t *var,
 	abd_t *abd = abd_alloc_for_io(size, B_FALSE);
 	vdev_t *source_vd = vd->vdev_child[vart->vart_source_disk];
 	vdev_t *dest_vd = vd->vdev_child[vart->vart_dest_disk];
-	uint64_t source_header =
-	    VDEV_ANYRAID_START_OFFSET(source_vd->vdev_ashift);
-	uint64_t dest_header =
-	    VDEV_ANYRAID_START_OFFSET(dest_vd->vdev_ashift);
+	uint64_t source_header = vdev_anyraid_slot_base(va, source_vd);
+	uint64_t dest_header = vdev_anyraid_slot_base(va, dest_vd);
 	uint64_t dest_off = dest_header +
 	    vart->vart_dest_idx * va->vd_tile_size +
 	    ((offset - source_header) % va->vd_tile_size);

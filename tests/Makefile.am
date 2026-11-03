@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: CDDL-1.0
 include $(srcdir)/%D%/unit/Makefile.am
+include $(srcdir)/%D%/anyraid_adopt/Makefile.am
 include $(srcdir)/%D%/zfs-tests/Makefile.am
 
 

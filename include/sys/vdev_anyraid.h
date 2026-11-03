@@ -93,6 +93,12 @@ typedef struct vdev_anyraid {
 	uint8_t		vd_ndata;
 	uint8_t		vd_width;
 	uint64_t	vd_tile_size;
+	/*
+	 * Set on a vdev adopted from a never-expanded RAID-Z: tile k is
+	 * slot k of every child in child order, slots start at offset 0 of
+	 * the child, and there is no tile map on disk.
+	 */
+	boolean_t	vd_legacy;
 
 	krwlock_t	vd_lock;
 	avl_tree_t	vd_tile_map;
