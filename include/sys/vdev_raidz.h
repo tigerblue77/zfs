@@ -354,6 +354,9 @@ typedef struct raidz_migrate_need {
 extern void vdev_raidz_migrate_need_add(vdev_t *, raidz_migrate_need_t *,
     const struct blkptr *, int, boolean_t);
 extern int vdev_raidz_migrate_preflight(vdev_t *, raidz_migrate_need_t *);
+/* SPIKE: the test-only mover and its trigger (vdev_raidz_mover.c) */
+extern int vdev_raidz_spike_mover_start(const char *);
+extern int vdev_raidz_spike_mover_status(char *, size_t);
 extern boolean_t vdev_raidz_redirect_get(vdev_t *, uint64_t, uint64_t,
     raidz_redirect_ent_t *);
 extern boolean_t vdev_raidz_redirect_get_live(vdev_t *, uint64_t, uint64_t,

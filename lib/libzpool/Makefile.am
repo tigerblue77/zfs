@@ -167,6 +167,7 @@ nodist_libzpool_la_SOURCES = \
 	module/zfs/vdev_raidz_math_scalar.c \
 	module/zfs/vdev_raidz_math_sse2.c \
 	module/zfs/vdev_raidz_math_ssse3.c \
+	module/zfs/vdev_raidz_mover.c \
 	module/zfs/vdev_rebuild.c \
 	module/zfs/vdev_removal.c \
 	module/zfs/vdev_root.c \

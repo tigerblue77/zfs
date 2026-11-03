@@ -939,3 +939,55 @@ extents back to back in the densest metaslab (`steer`) does not change
 that (gang rate 28 % instead of 27 %).  After `destroy` of the snapshot,
 the hybrid's free space is whole again; the all-redirect mover keeps the
 head's 1820 entries and their tails, and 11 % of new 128K blocks gang.
+
+## The mover in the kernel module
+
+Until now every mover was probe code, linked against libzpool, and the
+prototype had never been built as a kernel module.  Two things stopped a
+kernel from running it.  `vdev_raidz_migrate_preflight()` converted the
+slop to raw bytes in floating point, which kernel code cannot use; it now
+divides by `vdev_deflate_ratio`, the ratio `vs_dspace` is made of, which
+gives the same value (the slop of `need_left` was equal to the byte on
+the 16K 30 % fixture).  And nothing in the module could start a move.
+
+`module/zfs/vdev_raidz_mover.c` is `hybrid_probe`'s mover in the module:
+census, pre-flight, redirect (P2), rewrite of what the head owns, three
+census rounds, a last census.  From `crypt_probe` it takes the census
+with `TRAVERSE_NO_DECRYPT` and the gang trees (headers and children;
+`nogang` leaves them, as `hybrid_probe` does).  It counts the old ZIL
+blocks it never moves (`zil_old`), and turns what the probes asserted
+into counted errors.  On Linux a test-only module parameter starts it in
+a thread of its own:
+
+    echo "epoch <pool>" > /sys/module/zfs/parameters/raidz_spike_mover
+    echo "move <pool> <hybrid|redirect> [head=<dataset>] [force] [nogang]" \
+        > /sys/module/zfs/parameters/raidz_spike_mover
+    echo "census <pool>" > /sys/module/zfs/parameters/raidz_spike_mover
+    cat /sys/module/zfs/parameters/raidz_spike_mover
+
+Reading it gives `running ...`, `idle`, or the last result as key=value
+pairs ending in `rc=`: 0, ENOSPC (28) for a pre-flight refusal, EAGAIN
+(11) if a DVA was refused or the last census is not 0.  The hybrid needs
+`feature@physical_rewrite` enabled and a head that is not mounted;
+otherwise it redirects everything (`head_rw=0`).  The move's write of N
+no longer asserts: a failed write gives N back and refuses that block.
+
+`kmover_user.c` runs the same code in userspace on an exported pool:
+
+    kmover_user <dir> <pool> <rw|ro> rewrite-feature epoch "move hybrid"
+
+On the eight common fixtures (generator 6319a29f86), both movers, a
+debug userspace build of this commit: census 0, both verifies and
+drop-retained pass, the cold read-only census finds every entry from the
+block pointers and none damaged, zdb -bcc finds no leak, and entries,
+entries after drop-retained, kept bytes, rewritten and redirected counts
+are those of fixture-results-20261101.txt (tree D) in all 16 runs.  A
+local libzpool helper (not committed) gave the 128K 30 % fixture a
+dataset with copies=2 and forced ganging, a snapshot and overwrites:
+the hybrid with that dataset as head moved 2526 old DVAs (2316 gang
+headers and children) to a census of 0, every record read back, zdb was
+clean; with `nogang`, 192 gang DVAs stayed.  With 450 MiB written after
+the epoch on the 16K 100 % fixture of 1000 units, the pre-flight refused
+the move (ENOSPC, nothing moved); with `force`, 7247 of 8046 DVAs moved,
+799 were refused with ENOSPC in each pass, and verify and zdb -bcc were
+clean.  The kernel build and every kernel run are still to be done.

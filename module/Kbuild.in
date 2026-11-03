@@ -418,6 +418,7 @@ ZFS_OBJS := \
 	vdev_raidz.o \
 	vdev_raidz_math.o \
 	vdev_raidz_math_scalar.o \
+	vdev_raidz_mover.o \
 	vdev_rebuild.o \
 	vdev_removal.o \
 	vdev_root.o \
