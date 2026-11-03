@@ -24,6 +24,13 @@ scripts_zfs_tests_bin_PROGRAMS += %D%/badsend
 	libnvpair.la
 
 
+scripts_zfs_tests_bin_PROGRAMS += %D%/anyraid_tile_id
+%C%_anyraid_tile_id_CPPFLAGS = $(AM_CPPFLAGS) $(LIBZPOOL_CPPFLAGS)
+%C%_anyraid_tile_id_LDADD = \
+	libzpool.la \
+	libnvpair.la
+
+
 scripts_zfs_tests_bin_PROGRAMS += %D%/btree_test
 %C%_btree_test_CPPFLAGS = $(AM_CPPFLAGS) $(LIBZPOOL_CPPFLAGS)
 %C%_btree_test_LDADD = \
