@@ -1,23 +1,17 @@
-# VM task: the hybrid RAID-Z parity mover in the kernel (spike/kernel-hybrid)
+# VM task: the hybrid RAID-Z parity mover in the kernel (spike/kernel-hybrid-v2)
 
 Self-contained task for a **disposable Debian 13 VM** (kernel 6.12, no pool
 on it that matters, reboots allowed). Nothing is posted anywhere; results
 stay on the VM and are copied back by hand. About 1.5 to 2 h, 6 reboots.
+The second run of this task: the first, on fork branch `spike/kernel-hybrid`
+(91df27c68d), passed most checks and found three problems, which fork
+branch **`spike/kernel-hybrid-v2`** addresses. Run everything again.
 
 ## What is being tested
 
-The RAID-Z parity prototype "hybrid" (rewrite what the head owns, redirect
-the rest) of fork branch `spike/bypass-free` (094d2a05f9, draft PR
-tigerblue77/zfs#3) has only ever run in userspace libzpool. Fork branch
-**`spike/kernel-hybrid`**, head **`91df27c68d49809eba85f1167f7a8c958f7a24dd`**
-(three commits on 094d2a05f9), makes it run in the kernel module:
-
-- the pre-flight's slop was computed in floating point (now integer);
-- the move asserted on a failed write in syncing context (now refuses);
-- the mover itself was probe code (fork, stdio, asserts). It is now
-  `module/zfs/vdev_raidz_mover.c`: hybrid_probe's mover, plus crypt_probe's
-  keyless census (`TRAVERSE_NO_DECRYPT`) and gang trees, errors instead of
-  asserts, started by a test-only module parameter:
+The RAID-Z parity prototype "hybrid" (rewrite what a head owns, redirect
+the rest) as a kernel module: `module/zfs/vdev_raidz_mover.c`, started by
+a test-only module parameter:
 
 ```sh
 P=/sys/module/zfs/parameters/raidz_spike_mover
@@ -30,19 +24,42 @@ cat $P   # "running ...", or the last result: key=value ... ms=N rc=E
 `rc=0` done; `rc=28` refused by the pre-flight; `rc=11` some DVA refused or
 the last census not 0. `census_left` is the old DVAs no live redirect
 covers (must be 0), `zil_old` the old ZIL DVAs (never moved), `entries`,
-`damaged`, `live` (entries reached from block pointers) are the table's.
+`damaged`, `live` (entries reached from block pointers) are the table's,
+`gang_small` the gang headers read that have the old, fixed size.
 
-Established on the development host, in userspace only (`kmover_user`:
-the same module code through the same entry points; details in
-`userspace-validation.txt`): on the 8 fixtures x 2 movers every check of
-the adapter passes and every count equals `fixture-results-20261101.txt`
-tree D; forced gang blocks with copies=2 move to census 0 (`nogang`
-leaves them, as hybrid_probe did); a too-full pool is refused, and moved
-partially with `force`, consistently.
+What the first run found, and what v2 changes (each reproduced and checked
+in userspace, with `kmover_user`, the same module code through the same
+entry points, before and after):
 
-**Not established, the point of this task**: the kernel build (the host had
-no kernel headers), and every run in a kernel: the fixtures, crash cuts,
-ENOSPC, gang, a keyless dataset with an unreplayed ZIL, offline/resilver.
+- **(c) `leaked space` after `zfs destroy -r <pool>/fill`: not the mover.**
+  The fixture pool has no feature but `raidz_parity_epochs`, so a destroy
+  there is synchronous, and its traversal frees a dataset's intent log only
+  while the log is claimed. Each import creates the volume's minor, whose
+  `zil_replay()` resets the clean log but its first block, unclaimed: the
+  destroy left that block allocated (51 sectors, a 120K block at parity 2,
+  from reasoning). Reproduced in userspace with the volume's writes through
+  its log, with and without the mover, and on upstream master; fixed in
+  `dsl_destroy.c`: the synchronous destroy frees the log with
+  `zil_destroy_sync()`, as the asynchronous ones do.
+- **(d) `census_err=52` on the kernel's pool.** With
+  `feature@dynamic_gang_header` active, a gang header written before the
+  feature became active (a gang write activates it) holds 512
+  bytes, its checksum at their end; the census and the move's liveness
+  check checksummed every header at the dynamic size. Both now try the old
+  size too, as `zio_checksum_error()` does (userspace, feature enabled:
+  `census_err=52` before; after, `gang_small=256`, `rc=0`, census 0, data
+  and zdb PASS).
+- **(a) p100 hybrid gave 116/816 entries instead of 130/830.** The kernel's
+  ZPL registers a file information callback for `DMU_OST_ZFS` when the
+  module loads; the fixtures' root is such an objset, created by libzpool
+  without user accounting, so the mover's read-write ownership of it
+  started the user accounting upgrade, which rewrote its dnodes at the new
+  parity during the move, as far as the stop at each disown allowed
+  (timing-dependent). The mover now owns the head with
+  `dmu_objset_own_obj()`, which starts no upgrade; `kh.sh` runs the
+  userspace leg with the same callback registered (`zpl-accounting`).
+
+**Not established, the point of this task**: every run of v2 in a kernel.
 
 ## Safety rules
 
@@ -56,14 +73,16 @@ ENOSPC, gang, a keyless dataset with an unreplayed ZIL, offline/resilver.
 
 ## Files needed on the VM
 
-Fork branch `vm-tasks-1103` of https://github.com/tigerblue77/zfs carries
-this document and `kh/kh.sh`:
+Fork branch `spike/kernel-hybrid-v2` of https://github.com/tigerblue77/zfs
+carries the tree to build, this document and `kh.sh`, both in
+`contrib/raidz-redirect-spike/vm/`. On a VM that ran the first task, keep
+its evidence and unload its modules first (or reboot):
 
 ```sh
-mkdir -p /root/kh && cd /root/kh
-timeout 600 git clone -q --depth 1 -b vm-tasks-1103 https://github.com/tigerblue77/zfs.git vmtasks
-cp vmtasks/kh/kh.sh /root/kh/kh.sh && chmod +x /root/kh/kh.sh
-sha256sum /root/kh/kh.sh   # must be 455a6e482ad3fb101b574efb6c66d8f5960d6346e832a5c96fd40f2a37653850
+zpool list 2>/dev/null                    # nothing of the task may be imported
+[ -d /root/kh/zfs ] && /root/kh/zfs/scripts/zfs.sh -u
+[ -d /var/tmp/kh ] && mv /var/tmp/kh /var/tmp/kh-v1
+[ -d /root/kh/zfs ] && mv /root/kh/zfs /root/kh/zfs-v1
 ```
 
 ## 1. Prepare the VM (once, about 10 min)
@@ -84,8 +103,10 @@ lsmod | grep -w zfs; zpool list 2>/dev/null   # must show nothing that matters
 
 ```sh
 mkdir -p /root/kh && cd /root/kh
-timeout 1800 git clone -b spike/kernel-hybrid https://github.com/tigerblue77/zfs.git zfs
-git -C zfs log -1 --format=%H    # must be 91df27c68d49809eba85f1167f7a8c958f7a24dd
+timeout 1800 git clone -b spike/kernel-hybrid-v2 https://github.com/tigerblue77/zfs.git zfs
+git -C zfs rev-parse HEAD^       # must be ae8dc980e9d1a83b5dd41b5343b0378985706259
+cp zfs/contrib/raidz-redirect-spike/vm/kh.sh /root/kh/kh.sh && chmod +x /root/kh/kh.sh
+sha256sum /root/kh/kh.sh         # must be 2984adb7ac761d7b08f6824d7a1dbb9d3a61b5e7525ff07951a70eefe5bd9215
 git init -q gen-src && timeout 1800 git -C gen-src fetch -q --depth 1 \
     https://github.com/rdmitry0911/zfs.git 6319a29f86a9771c62a4c59b029c9c18a839998b
 git -C gen-src checkout -q FETCH_HEAD && git -C gen-src rev-parse HEAD   # 6319a29f86...
@@ -123,7 +144,8 @@ copy: kernel import `-N`, `feature@physical_rewrite=enabled` (as the 1 Nov
 re-run did for both movers), `epoch`, `move`, export; generator `verify`;
 read-only kernel import + `census`; generator `drop-retained`; read-only
 `census`; `verify`; read-write import + `zpool scrub -w`; `zdb -bcc`. Then
-the same input through `kmover_user` (userspace), for comparison.
+the same input through `kmover_user` (userspace), for comparison, with
+the file information callback the kernel's ZPL registers (`zpl-accounting`).
 
 Expected: every CHECK PASS: `move_rc0`, `census0`, `verify1/2`,
 `cold_census0`, `cold_entries` (= after the move), `cold_reached`
@@ -131,8 +153,10 @@ Expected: every CHECK PASS: `move_rc0`, `census0`, `verify1/2`,
 0 errors, no counter on any vdev), `zdb` (No leaks), `as_user_*` (kernel
 = userspace for entries, rewritten, redirected, kept, census_left, entries
 after drop). Each `RESULT a-...` line should say `(SAME)` against 1 Nov
-tree D; DIFFERENT is not a failure in itself but must be reported with
-both lists. Failure signatures: `census_left` > 0 or `rc=11` (refused
+tree D, the p100 hybrid runs included (130 and 830 entries, 14 after the
+drop, `round1=14` in the kernel as in userspace: the head's metadata is
+redirected in round 1, not rewritten by an upgrade); DIFFERENT is not a
+failure in itself but must be reported with both lists. Failure signatures: `census_left` > 0 or `rc=11` (refused
 DVAs, `errs=<errno>:<n>`), `verify` FAIL (wrong bytes through a redirect),
 `damaged` > 0 or a refused read-write import (EROFS: the table did not
 load), zdb `leaked space` / claim errors, a kernel/userspace difference.
@@ -185,12 +209,18 @@ Expected: c-refused `rc=28`, `why=refused_by_preflight`, nothing moved
 (`entries=0`), verify and zdb PASS; the MOVER line shows `pf_free`,
 `pf_need_end`, `pf_packed` < `pf_new` or `pf_left` < `pf_need_left`
 (userspace: free 277 MB, new extents 297 MB, 275 MB packed). c-forced:
-`rc=11`, every refusal ENOSPC (`errs=28:<n>`; userspace 7247 moved, 3196
-refusals over 4 passes, 799 left), pool not suspended (`not_suspended`),
-verify and zdb PASS. c-freed: census 0, scrub, verify, zdb PASS. Failure
-signatures: the pre-flight accepts (`preflight=0`), a refusal other than
-28, the pool SUSPENDED or a panic in the sync thread (an allocation of the
-move or of the MOS failing in syncing context), zdb leaks.
+`rc=11`, every refusal ENOSPC (`errs=28:<n>`; userspace, the volume
+written through its log: 7249 to 7280 moved, the rest refused in each of
+4 passes, 766 to 797 left), pool not suspended (`not_suspended`), verify
+and zdb PASS; then an `INFO c-forced fill log first block: DVA[0]=<...>`
+line, the volume's block that the destroy left allocated in the first run
+(v1 zdb3: vdev 0, offset 0x20048000, 208896 bytes, not checked against
+that run's log). c-freed: census 0, scrub, verify, **zdb3 PASS** (v1:
+`leaked space`). Failure signatures: the pre-flight
+accepts (`preflight=0`), a refusal other than 28, the pool SUSPENDED or a
+panic in the sync thread (an allocation of the move or of the MOS failing
+in syncing context), zdb leaks: give the `leaked space` lines and the
+INFO line.
 
 ## 6. (d) Gang blocks and copies=2 (about 10 min)
 
@@ -209,9 +239,12 @@ show `ganged count` > 0. Then epoch and `move hybrid head=khpool/g`
 (`d-gang`), or the same with `nogang` (`d-nogang`).
 Files of `g` and of a clone of `g@s` are compared with their sources.
 
-Expected d-gang: `gang_found` (gang_dvas > 0), `rc=0`, `census0`, data of
-head and snapshot identical, scrub0, zdb PASS (userspace, on the fixture:
-2526 old DVAs, 2316 gang, 1719 redirected, 32 rewritten). d-nogang:
+Expected d-gang: `gang_found` (gang_dvas > 0), `old_size_headers`
+(`gang_small` > 0: the v1 run failed here with `census_failed
+census_err=52`), `rc=0`, `census0`, data of head and snapshot identical,
+scrub0, zdb PASS (userspace, `kh_gang.c`'s pool, the same as this one:
+2008 old DVAs, 1928 gang, 256 old-size headers, 1597 redirected, 32
+rewritten). d-nogang:
 `rc=11`, census_left = gang_left > 0 (userspace 192): the probe's mover
 cannot move gang blocks, and the census says so. Failure signatures:
 census_left > 0 with gang_left 0 (a gang child not reached), ESTALE
@@ -277,16 +310,18 @@ output of `kh.sh summary`. Run directories can be deleted afterwards.
 
 ```
 VM: <name>, Debian 13, kernel <uname -r>, <nproc> CPUs, <RAM>
-tree 91df27c68d built --enable-debug: rc=<0|n>, modpost undefined: <none|list>
+tree <git -C zfs rev-parse HEAD> built --enable-debug: rc=<0|n>, modpost undefined: <none|list>
 srcversion match: yes|no; checks: <n> PASS, <n> FAIL (kh.sh summary)
 (a) 16 runs: <n>/16 all PASS; kernel = userspace in <n>/16; SAME as 1 Nov
-    in <n>/16; mover_ms kernel vs user: <r128 hybrid> ... (one line)
+    in <n>/16; p100 hybrid round1 kernel/user: <r128> <r16>;
+    mover_ms kernel vs user: <r128 hybrid> ... (one line)
 (b) cut  mode     pct  delay_s  left_at_import  entries  checks
          hybrid   20   ...      ...             ...      PASS|FAIL <names>
          ... (6 rows)
 (c) refused: rc, pf_free, pf_new, pf_packed, pf_left, pf_need_left;
-    forced: redirected, refused, errs, census_left, health; freed: census
-(d) gang: census_dvas, gang_dvas, redirected, rewritten, rc; nogang:
+    forced: redirected, refused, errs, census_left, health; the INFO
+    "fill log first block" line; freed: census, zdb3 PASS|FAIL
+(d) gang: census_dvas, gang_dvas, gang_small, redirected, rewritten, rc; nogang:
     census_left, gang_left, rc; data PASS|FAIL
 (e) zil_old before/after move/after replay, files PASS|FAIL, mount rc
 (f) offline at <s> s, move rc, resilver time, scrub line, replace scrub line

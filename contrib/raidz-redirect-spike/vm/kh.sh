@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: CDDL-1.0
 #
 # kh.sh: the hybrid RAID-Z parity mover of tigerblue77/zfs
-# spike/kernel-hybrid, run in the kernel on the common fixtures and on the
-# hard cases.  Disposable VM only: it loads the tree's modules, imports,
+# spike/kernel-hybrid-v2, run in the kernel on the common fixtures and on
+# the hard cases.  Disposable VM only: it loads the tree's modules, imports,
 # exports and creates pools named jointfixture and khpool from files under
 # $KH_WORK, changes metaslab_force_ganging for a moment, and "b-cut" reboots
 # the VM through sysrq.  See VM-kernel-hybrid.md.
