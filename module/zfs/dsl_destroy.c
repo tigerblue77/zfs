@@ -772,10 +772,9 @@ kill_blkptr(spa_t *spa, zilog_t *zilog, const blkptr_t *bp,
 	if (zb->zb_level == ZB_ZIL_LEVEL) {
 		ASSERT(zilog != NULL);
 		/*
-		 * It's a block in the intent log.  It has no
-		 * accounting, so just free it.
+		 * A block of the intent log, or one it points to: the caller
+		 * frees those with zil_destroy_sync().
 		 */
-		dsl_free(ka->tx->tx_pool, ka->tx->tx_txg, bp);
 	} else {
 		ASSERT0P(zilog);
 		ASSERT3U(BP_GET_BIRTH(bp), >,
@@ -790,6 +789,9 @@ static void
 old_synchronous_dataset_destroy(dsl_dataset_t *ds, dmu_tx_t *tx)
 {
 	struct killarg ka;
+	objset_t *os;
+
+	VERIFY0(dmu_objset_from_ds(ds, &os));
 
 	spa_history_log_internal_ds(ds, "destroy", tx,
 	    "(synchronous, mintxg=%llu)",
@@ -804,6 +806,13 @@ old_synchronous_dataset_destroy(dsl_dataset_t *ds, dmu_tx_t *tx)
 	 */
 	ka.ds = ds;
 	ka.tx = tx;
+	/*
+	 * As the asynchronous destroys do.  The traversal visits a log only
+	 * while it is claimed, and opening a dataset since the import (a
+	 * mount, a volume's minor) resets a clean log, which then holds its
+	 * first block unclaimed.
+	 */
+	zil_destroy_sync(dmu_objset_zil(os), tx);
 	VERIFY0(traverse_dataset(ds,
 	    dsl_dataset_phys(ds)->ds_prev_snap_txg, TRAVERSE_POST |
 	    TRAVERSE_NO_DECRYPT, kill_blkptr, &ka));

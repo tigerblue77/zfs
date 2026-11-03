@@ -991,3 +991,23 @@ the epoch on the 16K 100 % fixture of 1000 units, the pre-flight refused
 the move (ENOSPC, nothing moved); with `force`, 7247 of 8046 DVAs moved,
 799 were refused with ENOSPC in each pass, and verify and zdb -bcc were
 clean.  The kernel build and every kernel run are still to be done.
+
+## The first kernel run
+
+A Debian 13 VM (kernel 6.12) ran the module of the previous commit
+through `vm/kh.sh` (`vm/VM-kernel-hybrid.md` is the procedure): most
+checks passed, and three cases found a problem.
+
+Case (c), the pool too full: once the volume `fill` was destroyed, zdb
+found 208896 bytes leaked.  Not the mover's.  The fixtures enable no
+feature but `raidz_parity_epochs`, so a destroy there is synchronous, and
+its traversal frees an intent log only while the log is claimed.  Each
+import creates the volume's minor, whose `zil_replay()` resets a clean log
+but its first block, which stays allocated and unclaimed: the destroy left
+it.  `kmover_user` can now write the volume through its log as the
+kernel's volume does (`fill <MiB> zil`), do with that log what the minor
+does (`volume-minor`), and `destroy` it: the leak comes with or without an
+epoch and a move, and on upstream master (3028351741), but not with
+`feature@async_destroy`, whose destroy frees the log with
+`zil_destroy_sync()`.  `old_synchronous_dataset_destroy()` now does so
+too, and case (c) runs clean in userspace.

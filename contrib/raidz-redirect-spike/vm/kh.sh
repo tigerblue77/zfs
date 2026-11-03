@@ -362,6 +362,13 @@ case_c() {
 	chk export xp
 	chk verify2 fxv "$R" verify2
 	chk zdb2 zdbok "$R" 2
+	# The block the volume's log keeps: each import's minor resets the
+	# log, and a destroy on this pool (no feature@async_destroy) is
+	# synchronous, which left that block allocated (zdb3) until
+	# old_synchronous_dataset_destroy() freed the log.
+	log "INFO $CASE fill log first block: $(timeout 600 "$T/zdb" -e -p "$R" \
+	    -ivvvvvv "$POOL/fill" 2>&1 | sed -n 's/.*Block seqno [0-9]*, [^D]*\(DVA\[0\]=<[^>]*>\).*/\1/p' |
+	    head -n 1)"
 	end
 	begin c-freed
 	chk import imp "$R"
