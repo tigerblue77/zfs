@@ -1041,8 +1041,9 @@ Limits of this run:
   read-only imports.
 - The mover is still the probe's, without a feature flag for the table or
   a reservation during a move.
-- The logs stay on the VM; the counts above are copied from `kh.sh
-  summary`.
+- The counts above are copied from `kh.sh summary`; the text logs of
+  both runs are published with
+  [the run logs at `28f2f17707`](https://github.com/tigerblue77/zfs/tree/28f2f177074e99934bdadb8c8120277cdaeef93a/contrib/raidz-redirect-spike/vm/results-20261103).
 
 Source: [the procedure and script at `d07e30bdb3`](https://github.com/tigerblue77/zfs/tree/d07e30bdb3929c9f303d065de47af0987b362634/contrib/raidz-redirect-spike/vm).
 
