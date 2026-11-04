@@ -1,0 +1,1660 @@
+autoreconf: export WARNINGS=
+autoreconf: Entering directory '.'
+autoreconf: configure.ac: not using Gettext
+autoreconf: running: aclocal --force -I config
+autoreconf: configure.ac: tracing
+autoreconf: running: libtoolize --copy --force
+libtoolize: putting auxiliary files in AC_CONFIG_AUX_DIR, 'config'.
+libtoolize: copying file 'config/ltmain.sh'
+libtoolize: putting macros in AC_CONFIG_MACRO_DIRS, 'config'.
+libtoolize: copying file 'config/libtool.m4'
+libtoolize: copying file 'config/ltoptions.m4'
+libtoolize: copying file 'config/ltsugar.m4'
+libtoolize: copying file 'config/ltversion.m4'
+libtoolize: copying file 'config/lt~obsolete.m4'
+autoreconf: configure.ac: not using Intltool
+autoreconf: configure.ac: not using Gtkdoc
+autoreconf: running: aclocal --force -I config
+autoreconf: running: /usr/bin/autoconf --force
+autoreconf: running: /usr/bin/autoheader --force
+autoreconf: running: automake --add-missing --copy --force-missing
+configure.ac:39: installing 'config/compile'
+configure.ac:30: installing 'config/config.guess'
+configure.ac:30: installing 'config/config.sub'
+configure.ac:33: installing 'config/install-sh'
+configure.ac:33: installing 'config/missing'
+Makefile.am: installing 'config/depcomp'
+autoreconf: Leaving directory '.'
+checking for gawk... gawk
+checking metadata... META file
+checking build system type... x86_64-pc-linux-gnu
+checking host system type... x86_64-pc-linux-gnu
+checking target system type... x86_64-pc-linux-gnu
+checking whether to enable maintainer-specific portions of Makefiles... no
+checking whether make supports nested variables... yes
+checking for a BSD-compatible install... /usr/bin/install -c
+checking whether sleep supports fractional seconds... yes
+checking filesystem timestamp resolution... 0.01
+checking whether build environment is sane... yes
+checking for a race-free mkdir -p... /usr/bin/mkdir -p
+checking whether make sets $(MAKE)... yes
+checking xargs -n works... yes
+checking how to create a pax tar archive... gnutar
+checking how to print strings... printf
+checking whether make supports the include directive... yes (GNU style)
+checking for gcc... gcc
+checking whether the C compiler works... yes
+checking for C compiler default output file name... a.out
+checking for suffix of executables... 
+checking whether we are cross compiling... no
+checking for suffix of object files... o
+checking whether the compiler supports GNU C... yes
+checking whether gcc accepts -g... yes
+checking for gcc option to enable C11 features... none needed
+checking whether gcc understands -c and -o together... yes
+checking dependency style of gcc... gcc3
+checking for a sed that does not truncate output... /usr/bin/sed
+checking for grep that handles long lines and -e... /usr/bin/grep
+checking for egrep... /usr/bin/grep -E
+checking for fgrep... /usr/bin/grep -F
+checking for ld used by gcc... /usr/bin/ld
+checking if the linker (/usr/bin/ld) is GNU ld... yes
+checking for BSD- or MS-compatible name lister (nm)... /usr/bin/nm -B
+checking the name lister (/usr/bin/nm -B) interface... BSD nm
+checking whether ln -s works... yes
+checking the maximum length of command line arguments... 1572864
+checking how to convert x86_64-pc-linux-gnu file names to x86_64-pc-linux-gnu format... func_convert_file_noop
+checking how to convert x86_64-pc-linux-gnu file names to toolchain format... func_convert_file_noop
+checking for /usr/bin/ld option to reload object files... -r
+checking for file... file
+checking for objdump... objdump
+checking how to recognize dependent libraries... pass_all
+checking for dlltool... no
+checking how to associate runtime and link libraries... printf %s\n
+checking for ranlib... ranlib
+checking for ar... ar
+checking for archiver @FILE support... @
+checking for strip... strip
+checking command to parse /usr/bin/nm -B output from gcc object... ok
+checking for sysroot... no
+checking for a working dd... /usr/bin/dd
+checking how to truncate binary pipes... /usr/bin/dd bs=4096 count=1
+checking for mt... mt
+checking if mt is a manifest tool... no
+checking for stdio.h... yes
+checking for stdlib.h... yes
+checking for string.h... yes
+checking for inttypes.h... yes
+checking for stdint.h... yes
+checking for strings.h... yes
+checking for sys/stat.h... yes
+checking for sys/types.h... yes
+checking for unistd.h... yes
+checking for dlfcn.h... yes
+checking for objdir... .libs
+checking if gcc supports -fno-rtti -fno-exceptions... no
+checking for gcc option to produce PIC... -fPIC -DPIC
+checking if gcc PIC flag -fPIC -DPIC works... yes
+checking if gcc static flag -static works... yes
+checking if gcc supports -c -o file.o... yes
+checking if gcc supports -c -o file.o... (cached) yes
+checking whether the gcc linker (/usr/bin/ld -m elf_x86_64) supports shared libraries... yes
+checking whether -lc should be explicitly linked in... no
+checking dynamic linker characteristics... GNU/Linux ld.so
+checking how to hardcode library paths into programs... immediate
+checking whether stripping libraries is possible... yes
+checking if libtool supports shared libraries... yes
+checking whether to build shared libraries... yes
+checking whether to build static libraries... yes
+checking for gcc... (cached) gcc
+checking whether the compiler supports GNU C... (cached) yes
+checking whether gcc accepts -g... (cached) yes
+checking for gcc option to enable C11 features... (cached) none needed
+checking whether gcc understands -c and -o together... (cached) yes
+checking dependency style of gcc... (cached) gcc3
+checking whether ln -s works... yes
+checking for pkg-config... /usr/bin/pkg-config
+checking pkg-config is at least version 0.9.0... yes
+checking dependency style of gcc... gcc3
+checking how to run the C preprocessor... gcc -E
+checking for egrep -e... (cached) /usr/bin/grep -E
+checking whether gcc is Clang... no
+checking whether pthreads work with "-pthread" and "-lpthread"... yes
+checking for joinable pthread attribute... PTHREAD_CREATE_JOINABLE
+checking whether more special flags are required for pthreads... no
+checking for PTHREAD_PRIO_INHERIT... yes
+checking whether to build with code coverage support... no
+checking how to create a pax tar archive... (cached) gnutar
+checking zfs author... OpenZFS
+checking zfs license... CDDL
+checking zfs config... all
+checking the number of available CPUs... 16
+checking whether gcc supports -Wno-clobbered... yes
+checking whether gcc supports -Winfinite-recursion... yes
+checking whether gcc supports -Winfinite-recursion... yes
+checking whether gcc supports -Wno-atomic-alignment... yes
+checking whether gcc supports -Wimplicit-fallthrough... yes
+checking whether gcc supports -Wframe-larger-than=<size>... yes
+checking whether gcc supports -Wno-format-truncation... yes
+checking whether gcc supports -Wno-format-zero-length... yes
+checking whether gcc supports -Wno-format-zero-length... yes
+checking whether gcc supports -Wformat-overflow... yes
+checking whether gcc supports -fno-omit-frame-pointer... yes
+checking whether gcc supports -fno-ipa-sra... yes
+checking whether gcc supports -fno-ipa-sra... yes
+checking whether to build with -fsanitize=address support... no
+checking whether to build with -fsanitize=undefined support... no
+checking whether host toolchain supports SSE2... yes
+checking whether host toolchain supports SSSE3... yes
+checking whether host toolchain supports SSE4_1... yes
+checking whether host toolchain supports AVX... yes
+checking whether host toolchain supports AVX2... yes
+checking whether host toolchain supports AVX512F... yes
+checking whether host toolchain supports AVX512BW... yes
+checking whether host toolchain supports AVX512VL... yes
+checking whether host toolchain supports AES... yes
+checking whether host toolchain supports PCLMULQDQ... yes
+checking whether host toolchain supports MOVBE... yes
+checking whether host toolchain supports VAES... yes
+checking whether host toolchain supports VPCLMULQDQ... yes
+checking whether host toolchain supports SHA512EXT... yes
+checking whether host toolchain supports XSAVE... yes
+checking whether host toolchain supports XSAVEOPT... yes
+checking whether host toolchain supports XSAVES... yes
+checking for system type (linux-gnu)... Linux
+checking for conflicting environment variables... done
+checking for python3... python3
+checking for python version... 3.13
+checking for python platform... linux
+checking for GNU default python prefix... ${prefix}
+checking for GNU default python exec_prefix... ${exec_prefix}
+checking for python script directory (pythondir)... ${PYTHON_PREFIX}/lib/python3.13/site-packages
+checking for python extension module directory (pyexecdir)... ${PYTHON_EXEC_PREFIX}/lib/python3.13/site-packages
+checking for python3 module: packaging... yes
+checking for python3.13... /usr/bin/python3.13
+checking for a version of Python >= '2.1.0'... yes
+checking for a version of Python >= '3.6.0'... yes
+checking for the sysconfig Python package... yes
+checking for Python include path... -I/usr/include/python3.13
+checking for Python library path... -L/usr/lib/x86_64-linux-gnu -lpython3.13
+checking for Python site-packages path... /usr/local/lib/python3.13/site-packages
+checking for Python platform specific site-packages path... /usr/local/lib/python3.13/site-packages
+checking python extra libraries... -ldl -lm
+checking python extra linking flags... -Xlinker -export-dynamic -Wl,-O1 -Wl,-Bsymbolic-functions
+checking consistency of all components of python development environment... yes
+checking for python3.13 module: setuptools... yes
+checking for python3.13 module: cffi... yes
+checking whether to enable pyzfs: ... yes
+checking for sed --in-place... --in-place
+checking for cppcheck... no
+checking for shellcheck... no
+checking for checkbashisms... no
+checking for parallel... no
+checking for zfs channel program support... yes
+checking for  option for large files... none needed
+checking size of off_t... 8
+checking for 64-bit off_t... yes, 8 bytes
+checking for dracut directory... /usr/lib/dracut
+checking for zlib... yes
+checking for zlib.h... yes
+checking for compress2 in -lz... yes
+checking for uncompress in -lz... yes
+checking for crc32 in -lz... yes
+checking for udev directories... /lib/udev;/lib/udev/rules.d
+checking for systemd support... yes
+checking for libudev... yes
+checking for libudev.h... yes
+checking for main in -ludev... yes
+checking for udev_device_get_is_initialized... yes
+checking for uuid... yes
+checking for uuid/uuid.h... yes
+checking for uuid_generate in -luuid... yes
+checking for uuid_is_null in -luuid... yes
+checking for blkid... yes
+checking for blkid/blkid.h... yes
+checking for main in -lblkid... yes
+checking for sys/stat.h... (cached) yes
+checking for statx... yes
+checking for STATX_MNT_ID... yes
+checking for mount_setattr... yes
+checking for struct mount_attr... yes
+checking for library containing xdrmem_create... no
+checking for libtirpc... yes
+checking for rpc/xdr.h... yes
+checking for xdrmem_create in -ltirpc... yes
+checking for libcrypto... yes
+checking for openssl/evp.h... yes
+checking for PKCS5_PBKDF2_HMAC_SHA1 in -lcrypto... yes
+checking for libaio.h... yes
+checking for main in -laio... yes
+checking whether -latomic is required... no
+checking for libfetch... libcurl
+checking for aio.h... yes
+checking for lio_listio in -lrt... yes
+checking for clock_gettime... yes
+checking for security/pam_modules.h... yes
+checking for library containing backtrace... none required
+checking for libunwind... yes
+checking for libunwind.h... yes
+checking for main in -lunwind... yes
+checking for unw_get_elf_filename in libunwind... yes
+checking whether libunwind is llvm libunwind... no
+checking for execvpe... yes
+checking for issetugid... no
+checking for mlockall... yes
+checking for strlcat... yes
+checking for strlcpy... yes
+checking for gettid... yes
+checking for preadv2... yes
+checking for pwritev2... yes
+checking kernel source and build directories... done
+checking kernel source directory... /usr/src/linux-headers-6.12.113+deb13-common
+checking kernel build directory... /usr/src/linux-headers-6.12.113+deb13-cloud-amd64
+checking kernel source version... 6.12.113+deb13-cloud-amd64
+checking for kernel config option compatibility... done
+checking whether CONFIG_MODULES is defined... yes
+checking whether CONFIG_BLOCK is defined... yes
+checking whether mutex_lock() is GPL-only... no
+checking whether CONFIG_TRIM_UNUSED_KSYM is disabled... yes
+checking whether CONFIG_ZLIB_DEFLATE is defined... yes
+checking whether CONFIG_ZLIB_INFLATE is defined... yes
+checking kernel file name for module symbols... Module.symvers
+checking whether fpu headers are available... asm/fpu/api.h
+checking whether objtool header is available... linux/objtool.h
+checking whether /dev/zfs minor is available... 249
+checking whether DECLARE_EVENT_CLASS() is available... no
+checking for available kernel interfaces... done
+checking whether kernel toolchain supports SSE2... yes
+checking whether kernel toolchain supports SSSE3... yes
+checking whether kernel toolchain supports SSE4_1... yes
+checking whether kernel toolchain supports AVX... yes
+checking whether kernel toolchain supports AVX2... yes
+checking whether kernel toolchain supports AVX512F... yes
+checking whether kernel toolchain supports AVX512BW... yes
+checking whether kernel toolchain supports AVX512VL... yes
+checking whether kernel toolchain supports AES... yes
+checking whether kernel toolchain supports PCLMULQDQ... yes
+checking whether kernel toolchain supports MOVBE... yes
+checking whether kernel toolchain supports VAES... yes
+checking whether kernel toolchain supports VPCLMULQDQ... yes
+checking whether kernel toolchain supports SHA512EXT... yes
+checking whether kernel toolchain supports XSAVE... yes
+checking whether kernel toolchain supports XSAVEOPT... yes
+checking whether kernel toolchain supports XSAVES... yes
+checking whether kernel defines intptr_t... yes
+checking whether access_ok() has 'type' parameter... no
+checking whether compile-time stack validation (objtool) is available... yes
+checking whether STACK_FRAME_NON_STANDARD is defined... yes
+checking whether STACK_FRAME_NON_STANDARD asm macro is defined... yes
+checking whether CONFIG_OBJTOOL_WERROR is defined... no
+checking whether pde_data() is lowercase... yes
+checking whether generic_fadvise() is available... yes
+checking whether header linux/sched/rt.h exists... yes
+checking whether usleep_range() is available... yes
+checking whether __vmalloc(ptr, flags, pageflags) is available... no
+checking whether timestamp_truncate() exists... yes
+checking whether inode_get_ctime() exists... yes
+checking whether inode_set_ctime_to_ts() exists... yes
+checking whether inode_get_atime() exists... yes
+checking whether inode_set_atime_to_ts() exists... yes
+checking whether inode_get_mtime() exists... yes
+checking whether inode_set_mtime_to_ts() exists... yes
+checking whether proc_ops structure exists... yes
+checking whether bops->check_events() exists... yes
+checking whether bops->release() is void and takes 2 args... no
+checking whether bops->release() is void and takes 1 arg... yes
+checking whether bops->revalidate_disk() exists... no
+checking whether bops->getgeo() takes gendisk as first arg... no
+checking whether bio_set_op_attrs is available... no
+checking whether bio_set_dev() is GPL-only... yes
+checking whether bio_set_dev() is a macro... no
+checking whether current->bio_list exists... yes
+checking whether blkg_tryget() is available... no
+checking whether bio->bi_bdev->bd_disk exists... yes
+checking whether block_device_operations->submit_bio() returns void... yes
+checking whether bio_alloc() wants 4 args... yes
+checking if bvec_iter has bi_offset... no
+checking whether blkdev_get_by_path() exists and takes 3 args... no
+checking whether blkdev_get_by_path() exists and takes 4 args... no
+checking whether bdev_open_by_path() exists... no
+checking whether bdev_file_open_by_path() exists... yes
+checking whether blkdev_put() exists... no
+checking whether blkdev_put() accepts void* as arg 2... no
+checking whether bdev_release() exists... no
+checking whether blkdev_reread_part() exists... no
+checking whether invalidate_bdev() exists... yes
+checking whether lookup_bdev() wants dev_t arg... yes
+checking whether bdev_logical_block_size() is available... yes
+checking whether bdev_physical_block_size() is available... yes
+checking whether check_disk_change() exists... no
+checking whether bdev_check_media_change() exists... no
+checking whether bdev_whole() is available... yes
+checking whether bdev_nr_bytes() is available... yes
+checking whether bdevname() exists... no
+checking whether blkdev_get_by_path() handles ERESTARTSYS... no
+checking whether blkdev_issue_discard() is available... yes
+checking whether blkdev_issue_discard(flags) is available... no
+checking whether __blkdev_issue_discard() is available... yes
+checking whether __blkdev_issue_discard(flags) is available... no
+checking whether blkdev_issue_secure_erase() is available... yes
+checking whether bdev_kobj() exists... yes
+checking whether part_to_dev() exists... no
+checking whether disk_check_media_change() exists... yes
+checking whether BLK_STS_RESV_CONFLICT is defined... yes
+checking whether blk_mode_t is defined... yes
+checking whether struct blk_plug is available... yes
+checking whether blk_queue bdi is dynamic... no
+checking whether backing_dev_info is available through queue gendisk... yes
+checking whether blk_queue_update_readahead() exists... no
+checking whether disk_update_readahead() exists... no
+checking whether bdev_max_discard_sectors() is available... yes
+checking whether bdev_max_secure_erase_sectors() is available... yes
+checking whether blk_queue_max_hw_sectors() is available... no
+checking whether blk_queue_max_segments() is available... no
+checking whether blk_queue_rot() is available... no
+checking whether block multiqueue hardware context is cached in struct request... yes
+checking whether GENHD_FL_EXT_DEVT flag is available... no
+checking whether GENHD_FL_NO_PART flag is available... yes
+checking whether revalidate_disk_size() is available... no
+checking whether revalidate_disk() is available... no
+checking whether get_disk_ro() is available... yes
+checking whether ql->discard_granularity is available... yes
+checking whether super_block uses const struct xattr_handler... yes
+checking whether xattr_handler->get() wants dentry and inode and flags... no
+checking whether posix_acl_equiv_mode() wants umode_t... yes
+checking whether posix_acl_to_xattr() allocates its result... no
+checking whether iops->get_acl() exists... yes
+checking whether iops->set_acl() takes struct dentry... yes
+checking whether inode_state_read_once() exists... no
+checking whether sops->show_options() wants dentry... yes
+checking whether super_block has s_shrink... no
+checking whether super_block has s_shrink pointer... yes
+checking whether new var-arg register_shrinker() exists... no
+checking whether shrinker_register() exists... yes
+checking whether iops->create() takes a flag arg... yes
+checking whether iops->mkdir() returns struct dentry*... no
+checking whether iops->lookup() passes flags... yes
+checking for id mapping mechanism... mnt_idmap
+checking whether i_op->tmpfile() takes struct file... yes
+checking whether dops->d_automount() exists... yes
+checking whether dops->d_revalidate() takes 4 args... no
+checking whether eops->commit_metadata() exists... yes
+checking whether insert_inode_locked() is available... yes
+checking whether d_obtain_alias() is available... yes
+checking whether d_set_d_op() is available... yes
+checking whether set_default_d_op() is available... no
+checking whether dentry aliases are in d_u member... yes
+checking whether truncate_setsize() is available... yes
+checking whether security_inode_init_security wants callback... yes
+checking whether fs_context exists... yes
+checking whether fs_parse() takes fs_parameter_spec directly... yes
+checking whether vfs_parse_fs_string() takes 3 args... no
+checking whether SB_DYING is defined... yes
+checking whether super_set_uuid() is available... yes
+checking whether set_nlink() is available... yes
+checking whether filemap_dirty_folio exists... yes
+checking whether read_folio exists... yes
+checking whether migrate_folio exists... yes
+checking whether migratepage exists... no
+checking whether vfs_fsync() wants 2 args... yes
+checking whether file_operations has fop_flags... yes
+checking whether aops->readpages exists... no
+checking whether aops->writepage exists... yes
+checking whether __set_page_dirty_nobuffers exists... no
+checking whether fault_in_iov_iter_readable() is available... yes
+checking whether iov_iter_type() is available... yes
+checking whether iov_iter_get_pages2() is available... yes
+checking whether iter_is_ubuf() is available... yes
+checking whether iter_iov() is available... yes
+checking whether generic_copy_file_range() is available... no
+checking whether splice_copy_file_range() is available... yes
+checking whether fops->remap_file_range() is available... yes
+checking whether fops->clone_file_range() is available... no
+checking whether fops->dedupe_file_range() is available... no
+checking whether kmap_atomic wants 1 args... yes
+checking whether kmap_local_page exists... yes
+checking whether follow_down_one() is available... yes
+checking whether follow_down() takes a flags parameter... yes
+checking whether submit_bio is member of struct block_device_operations... yes
+checking whether blk_alloc_disk() exists... no
+checking whether blk_alloc_disk() exists and takes 2 args... yes
+checking whether struct queue_limits has a features field... yes
+checking whether blk_cleanup_disk() exists... no
+checking whether 6.3+ bdev_*_io_acct() are available... yes
+checking whether kernel fpu is available... internal
+checking whether kernel defines fmode_t... yes
+checking whether kuid_t/kgid_t is available... yes
+checking whether i_(uid|gid)_(read|write) exist... yes
+checking whether totalram_pages() exists... yes
+checking whether totalhigh_pages() exists... yes
+checking whether is inside percpu_ref.data... yes
+checking whether generic_fillattr request_mask... yes
+checking whether bio_max_segs() exists... yes
+checking whether rq_for_each_bvec() exists... yes
+checking whether kernel_siginfo_t tyepedef exists... yes
+checking whether struct kobj_type.default_groups exists... yes
+checking whether standalone <linux/stdarg.h> exists... yes
+checking whether strlcpy() exists... no
+checking whether folio_wait_bit() exists... yes
+checking whether readahead_page() exists... yes
+checking whether add_disk() returns int... yes
+checking whether kthread_complete_and_exit() is available... yes
+checking whether dequeue_signal() takes 4 arguments... no
+checking whether 3-arg dequeue_signal() takes a type argument... yes
+checking whether ZERO_PAGE() is GPL-only... no
+checking whether idmapped mounts have a user namespace... yes
+checking whether iattr->ia_vfsuid and iattr->ia_vfsgid exist... yes
+checking whether int (*writepage_t)() takes struct folio*... yes
+checking whether write_cache_pages() is available... yes
+checking whether struct reclaim_state has reclaimed field... yes
+checking whether register_sysctl_table exists... no
+checking whether register_sysctl_sz exists... yes
+checking whether proc_handler ctl_table arg is const... yes
+checking whether copy_splice_read() exists... yes
+checking whether fsync_bdev() exists... checking whether sync_blockdev() exists... yes
+checking whether PG_error flag is available... no
+checking whether 'flags' in 'struct page' is a struct... no
+checking whether page_size() is available... yes
+checking whether page_mapping() is available... no
+checking whether __assign_str() has one arg... no
+checking whether file->f_version exists... no
+checking whether pin_user_pages_unlocked() is available... yes
+checking whether timer_delete_sync() is available... yes
+checking whether super_block has s_wb_err... yes
+checking whether sops->free_inode() exists... yes
+checking whether ns_type is accessible through ns_common... no
+checking whether inode_generic_drop() exists... no
+checking whether kasan_enabled() is GPL-only... no
+checking for standalone filelock header... yes
+checking how to flush delay workqueue... internal+percpu
+checking for unchecked kernel build results to cache... done
+checking os distribution... debian
+checking default package type... deb
+checking default init directory... ${prefix}/etc/init.d
+checking default shell... /bin/sh
+checking default nfs server init script... nfs-kernel-server
+checking default init config directory... /etc/default
+checking whether initramfs-tools is available... yes
+checking default bash completion directory... /usr/share/bash-completion/completions
+checking whether rpm is available... yes (4.20.1)
+checking whether rpmbuild is available... yes (4.20.1)
+checking whether to use rpm configure caching... no
+checking whether spec files are available... yes (rpm/generic/*.spec.in)
+checking whether rpm database is readable... no (using directory /root/kh/zfs/.rpmdb)
+checking whether dpkg is available... yes (1.22.22)
+checking whether dpkg-buildpackage is available... yes (1.22.22.)
+checking whether alien is available... yes (8.95.8)
+checking whether assertion support will be enabled... yes
+checking whether debuginfo support will be forced... no
+checking whether basic kmem accounting is enabled... no
+checking whether detailed kmem tracking is enabled... no
+checking whether FreeBSD kernel INVARIANTS checks are enabled... no
+checking whether metaslab tracing is enabled... no
+checking whether objtool error on warning behavior is enabled... no
+checking that generated files are newer than configure... done
+configure: creating ./config.status
+config.status: creating contrib/debian/rules
+config.status: creating contrib/debian/changelog
+config.status: creating Makefile
+config.status: creating include/Makefile
+config.status: creating lib/libzfs/libzfs.pc
+config.status: creating lib/libzfs_core/libzfs_core.pc
+config.status: creating lib/libzfsbootenv/libzfsbootenv.pc
+config.status: creating module/Kbuild
+config.status: creating module/Makefile
+config.status: creating rpm/generic/zfs-dkms.spec
+config.status: creating rpm/generic/zfs-kmod.spec
+config.status: creating rpm/generic/zfs.spec
+config.status: creating rpm/redhat/zfs-dkms.spec
+config.status: creating rpm/redhat/zfs-kmod.spec
+config.status: creating rpm/redhat/zfs.spec
+config.status: creating tests/zfs-tests/tests/Makefile
+config.status: creating zfs.release
+config.status: creating scripts/objtool-wrapper
+config.status: creating zfs_config.h
+config.status: executing depfiles commands
+config.status: executing libtool commands
+make  all-recursive
+make[1]: Entering directory '/root/kh/zfs'
+Making all in include
+make[2]: Entering directory '/root/kh/zfs/include'
+make[2]: Nothing to be done for 'all'.
+make[2]: Leaving directory '/root/kh/zfs/include'
+Making all in tests/zfs-tests/tests
+make[2]: Entering directory '/root/kh/zfs/tests/zfs-tests/tests'
+  GEN      functional/pyzfs/pyzfs_unittest.ksh
+  GEN      functional/pam/utilities.kshlib
+make[2]: Leaving directory '/root/kh/zfs/tests/zfs-tests/tests'
+Making all in module
+make[2]: Entering directory '/root/kh/zfs/module'
+mkdir -p os/linux/spl/
+make -C "/root/kh/zfs" gitrev
+mkdir -p avl/ icp/ icp/algs/aes/ icp/algs/blake3/ icp/algs/edonr/ icp/algs/modes/ icp/algs/sha2/ icp/algs/skein/ icp/api/ icp/asm-aarch64/blake3/ icp/asm-aarch64/sha2/ icp/asm-arm/sha2/ icp/asm-ppc64/blake3/ icp/asm-ppc64/sha2/ icp/asm-x86_64/aes/ icp/asm-x86_64/blake3/ icp/asm-x86_64/modes/ icp/asm-x86_64/sha2/ icp/core/ icp/io/ icp/spi/ lua/ lua/setjmp/ nvpair/ os/linux/zfs/ zcommon/ zfs/ zstd/ zstd/lib/common/ zstd/lib/compress/ zstd/lib/decompress/
+# Pre-6.10 kernel builds didn't need to copy over the source files to the
+# build directory. We need to do it though post-6.10 due to these commits:
+make[3]: Entering directory '/root/kh/zfs'
+#
+# b1992c3 kbuild: use  instead of / for source dir
+# 9a0ebe5 kbuild: use / instead of / for common pattern rules
+if [ "/root/kh/zfs/module" != "/root/kh/zfs/module" ]; then \
+	cp -rsf "/root/kh/zfs/module"/*/ "/root/kh/zfs/module"; \
+fi
+make -C /usr/src/linux-headers-6.12.113+deb13-cloud-amd64  \
+	  \
+	 \
+	 \
+	 \
+	M="$PWD"  O=/usr/src/linux-headers-6.12.113+deb13-cloud-amd64 CONFIG_ZFS=m modules
+make[3]: Entering directory '/usr/src/linux-headers-6.12.113+deb13-cloud-amd64'
+  GEN      gitrev
+make[3]: Leaving directory '/root/kh/zfs'
+  CC [M]  /root/kh/zfs/module/os/linux/spl/spl-condvar.o
+  CC [M]  /root/kh/zfs/module/os/linux/spl/spl-cred.o
+  CC [M]  /root/kh/zfs/module/os/linux/spl/spl-err.o
+  CC [M]  /root/kh/zfs/module/os/linux/spl/spl-generic.o
+  CC [M]  /root/kh/zfs/module/os/linux/spl/spl-kmem-cache.o
+  CC [M]  /root/kh/zfs/module/os/linux/spl/spl-kmem.o
+  CC [M]  /root/kh/zfs/module/os/linux/spl/spl-kstat.o
+  CC [M]  /root/kh/zfs/module/os/linux/spl/spl-math-compat.o
+  CC [M]  /root/kh/zfs/module/os/linux/spl/spl-proc.o
+  CC [M]  /root/kh/zfs/module/os/linux/spl/spl-procfs-list.o
+  CC [M]  /root/kh/zfs/module/os/linux/spl/spl-shrinker.o
+  CC [M]  /root/kh/zfs/module/os/linux/spl/spl-taskq.o
+  CC [M]  /root/kh/zfs/module/os/linux/spl/spl-thread.o
+  CC [M]  /root/kh/zfs/module/os/linux/spl/spl-trace.o
+  CC [M]  /root/kh/zfs/module/os/linux/spl/spl-tsd.o
+  CC [M]  /root/kh/zfs/module/os/linux/spl/spl-vmem.o
+  CC [M]  /root/kh/zfs/module/os/linux/spl/spl-xdr.o
+  CC [M]  /root/kh/zfs/module/os/linux/spl/spl-zlib.o
+  CC [M]  /root/kh/zfs/module/os/linux/spl/spl-zone.o
+  CC [M]  /root/kh/zfs/module/avl/avl.o
+  CC [M]  /root/kh/zfs/module/icp/algs/aes/aes_impl.o
+  CC [M]  /root/kh/zfs/module/icp/algs/aes/aes_impl_generic.o
+  CC [M]  /root/kh/zfs/module/icp/algs/aes/aes_modes.o
+  CC [M]  /root/kh/zfs/module/icp/algs/blake3/blake3.o
+  CC [M]  /root/kh/zfs/module/icp/algs/blake3/blake3_generic.o
+  CC [M]  /root/kh/zfs/module/icp/algs/blake3/blake3_impl.o
+  CC [M]  /root/kh/zfs/module/icp/algs/edonr/edonr.o
+  CC [M]  /root/kh/zfs/module/icp/algs/modes/ccm.o
+  CC [M]  /root/kh/zfs/module/icp/algs/modes/gcm.o
+  CC [M]  /root/kh/zfs/module/icp/algs/modes/gcm_generic.o
+  CC [M]  /root/kh/zfs/module/icp/algs/modes/modes.o
+  CC [M]  /root/kh/zfs/module/icp/algs/sha2/sha2_generic.o
+  CC [M]  /root/kh/zfs/module/icp/algs/sha2/sha256_impl.o
+  CC [M]  /root/kh/zfs/module/icp/algs/sha2/sha512_impl.o
+  CC [M]  /root/kh/zfs/module/icp/algs/skein/skein.o
+  CC [M]  /root/kh/zfs/module/icp/algs/skein/skein_block.o
+  CC [M]  /root/kh/zfs/module/icp/algs/skein/skein_iv.o
+  CC [M]  /root/kh/zfs/module/icp/api/kcf_cipher.o
+  CC [M]  /root/kh/zfs/module/icp/api/kcf_ctxops.o
+  CC [M]  /root/kh/zfs/module/icp/api/kcf_mac.o
+  CC [M]  /root/kh/zfs/module/icp/core/kcf_callprov.o
+  CC [M]  /root/kh/zfs/module/icp/core/kcf_mech_tabs.o
+  CC [M]  /root/kh/zfs/module/icp/core/kcf_prov_lib.o
+  CC [M]  /root/kh/zfs/module/icp/core/kcf_prov_tabs.o
+  CC [M]  /root/kh/zfs/module/icp/core/kcf_sched.o
+  CC [M]  /root/kh/zfs/module/icp/illumos-crypto.o
+  CC [M]  /root/kh/zfs/module/icp/io/aes.o
+  CC [M]  /root/kh/zfs/module/icp/io/sha2_mod.o
+  CC [M]  /root/kh/zfs/module/icp/spi/kcf_spi.o
+  CC [M]  /root/kh/zfs/module/lua/lapi.o
+  CC [M]  /root/kh/zfs/module/lua/lauxlib.o
+  CC [M]  /root/kh/zfs/module/lua/lbaselib.o
+  CC [M]  /root/kh/zfs/module/lua/lcode.o
+  CC [M]  /root/kh/zfs/module/lua/lcompat.o
+  CC [M]  /root/kh/zfs/module/lua/lcorolib.o
+  CC [M]  /root/kh/zfs/module/lua/lctype.o
+  CC [M]  /root/kh/zfs/module/lua/ldebug.o
+  CC [M]  /root/kh/zfs/module/lua/ldo.o
+  CC [M]  /root/kh/zfs/module/lua/lfunc.o
+  CC [M]  /root/kh/zfs/module/lua/lgc.o
+  CC [M]  /root/kh/zfs/module/lua/llex.o
+  CC [M]  /root/kh/zfs/module/lua/lmem.o
+  CC [M]  /root/kh/zfs/module/lua/lobject.o
+  CC [M]  /root/kh/zfs/module/lua/lopcodes.o
+  CC [M]  /root/kh/zfs/module/lua/lparser.o
+  CC [M]  /root/kh/zfs/module/lua/lstate.o
+  CC [M]  /root/kh/zfs/module/lua/lstring.o
+  CC [M]  /root/kh/zfs/module/lua/lstrlib.o
+  CC [M]  /root/kh/zfs/module/lua/ltable.o
+  CC [M]  /root/kh/zfs/module/lua/ltablib.o
+  CC [M]  /root/kh/zfs/module/lua/ltm.o
+  CC [M]  /root/kh/zfs/module/lua/lvm.o
+  CC [M]  /root/kh/zfs/module/lua/lzio.o
+  AS [M]  /root/kh/zfs/module/lua/setjmp/setjmp.o
+  CC [M]  /root/kh/zfs/module/nvpair/fnvpair.o
+  CC [M]  /root/kh/zfs/module/nvpair/nvpair.o
+  CC [M]  /root/kh/zfs/module/nvpair/nvpair_alloc_fixed.o
+  CC [M]  /root/kh/zfs/module/nvpair/nvpair_alloc_spl.o
+  CC [M]  /root/kh/zfs/module/zcommon/cityhash.o
+  CC [M]  /root/kh/zfs/module/zcommon/simd_stat.o
+  CC [M]  /root/kh/zfs/module/zcommon/zfeature_common.o
+  CC [M]  /root/kh/zfs/module/zcommon/zfs_comutil.o
+  CC [M]  /root/kh/zfs/module/zcommon/zfs_deleg.o
+  CC [M]  /root/kh/zfs/module/zcommon/zfs_fletcher.o
+  CC [M]  /root/kh/zfs/module/zcommon/zfs_fletcher_superscalar.o
+  CC [M]  /root/kh/zfs/module/zcommon/zfs_fletcher_superscalar4.o
+  CC [M]  /root/kh/zfs/module/zcommon/zfs_namecheck.o
+  CC [M]  /root/kh/zfs/module/zcommon/zfs_prop.o
+  CC [M]  /root/kh/zfs/module/zcommon/zfs_valstr.o
+  CC [M]  /root/kh/zfs/module/zcommon/zpool_prop.o
+  CC [M]  /root/kh/zfs/module/zcommon/zprop_common.o
+  CC [M]  /root/kh/zfs/module/zstd/zfs_zstd.o
+  CC [M]  /root/kh/zfs/module/zstd/zstd_sparc.o
+  CC [M]  /root/kh/zfs/module/zstd/lib/common/entropy_common.o
+  CC [M]  /root/kh/zfs/module/zstd/lib/common/error_private.o
+  CC [M]  /root/kh/zfs/module/zstd/lib/common/fse_decompress.o
+  CC [M]  /root/kh/zfs/module/zstd/lib/common/pool.o
+  CC [M]  /root/kh/zfs/module/zstd/lib/common/zstd_common.o
+  CC [M]  /root/kh/zfs/module/zstd/lib/compress/fse_compress.o
+  CC [M]  /root/kh/zfs/module/zstd/lib/compress/hist.o
+  CC [M]  /root/kh/zfs/module/zstd/lib/compress/huf_compress.o
+  CC [M]  /root/kh/zfs/module/zstd/lib/compress/zstd_compress.o
+  CC [M]  /root/kh/zfs/module/zstd/lib/compress/zstd_compress_literals.o
+  CC [M]  /root/kh/zfs/module/zstd/lib/compress/zstd_compress_sequences.o
+  CC [M]  /root/kh/zfs/module/zstd/lib/compress/zstd_compress_superblock.o
+  CC [M]  /root/kh/zfs/module/zstd/lib/compress/zstd_double_fast.o
+  CC [M]  /root/kh/zfs/module/zstd/lib/compress/zstd_fast.o
+  CC [M]  /root/kh/zfs/module/zstd/lib/compress/zstd_lazy.o
+  CC [M]  /root/kh/zfs/module/zstd/lib/compress/zstd_ldm.o
+  CC [M]  /root/kh/zfs/module/zstd/lib/compress/zstd_opt.o
+  CC [M]  /root/kh/zfs/module/zstd/lib/compress/zstd_preSplit.o
+  CC [M]  /root/kh/zfs/module/zstd/lib/decompress/huf_decompress.o
+  CC [M]  /root/kh/zfs/module/zstd/lib/decompress/zstd_ddict.o
+  CC [M]  /root/kh/zfs/module/zstd/lib/decompress/zstd_decompress.o
+  CC [M]  /root/kh/zfs/module/zstd/lib/decompress/zstd_decompress_block.o
+  CC [M]  /root/kh/zfs/module/zfs/abd.o
+  CC [M]  /root/kh/zfs/module/zfs/aggsum.o
+  CC [M]  /root/kh/zfs/module/zfs/arc.o
+  CC [M]  /root/kh/zfs/module/zfs/blake3_zfs.o
+  CC [M]  /root/kh/zfs/module/zfs/blkptr.o
+  CC [M]  /root/kh/zfs/module/zfs/bplist.o
+  CC [M]  /root/kh/zfs/module/zfs/bpobj.o
+  CC [M]  /root/kh/zfs/module/zfs/bptree.o
+  CC [M]  /root/kh/zfs/module/zfs/bqueue.o
+  CC [M]  /root/kh/zfs/module/zfs/brt.o
+  CC [M]  /root/kh/zfs/module/zfs/btree.o
+  CC [M]  /root/kh/zfs/module/zfs/dataset_kstats.o
+  CC [M]  /root/kh/zfs/module/zfs/dbuf.o
+  CC [M]  /root/kh/zfs/module/zfs/dbuf_stats.o
+  CC [M]  /root/kh/zfs/module/zfs/ddt.o
+  CC [M]  /root/kh/zfs/module/zfs/ddt_log.o
+  CC [M]  /root/kh/zfs/module/zfs/ddt_stats.o
+  CC [M]  /root/kh/zfs/module/zfs/ddt_zap.o
+  CC [M]  /root/kh/zfs/module/zfs/dmu.o
+  CC [M]  /root/kh/zfs/module/zfs/dmu_direct.o
+  CC [M]  /root/kh/zfs/module/zfs/dmu_diff.o
+  CC [M]  /root/kh/zfs/module/zfs/dmu_object.o
+  CC [M]  /root/kh/zfs/module/zfs/dmu_objset.o
+  CC [M]  /root/kh/zfs/module/zfs/dmu_recv.o
+  CC [M]  /root/kh/zfs/module/zfs/dmu_redact.o
+  CC [M]  /root/kh/zfs/module/zfs/dmu_send.o
+  CC [M]  /root/kh/zfs/module/zfs/dmu_traverse.o
+  CC [M]  /root/kh/zfs/module/zfs/dmu_tx.o
+  CC [M]  /root/kh/zfs/module/zfs/dmu_zfetch.o
+  CC [M]  /root/kh/zfs/module/zfs/dnode.o
+  CC [M]  /root/kh/zfs/module/zfs/dnode_sync.o
+  CC [M]  /root/kh/zfs/module/zfs/dsl_bookmark.o
+  CC [M]  /root/kh/zfs/module/zfs/dsl_crypt.o
+  CC [M]  /root/kh/zfs/module/zfs/dsl_dataset.o
+  CC [M]  /root/kh/zfs/module/zfs/dsl_deadlist.o
+  CC [M]  /root/kh/zfs/module/zfs/dsl_deleg.o
+  CC [M]  /root/kh/zfs/module/zfs/dsl_destroy.o
+  CC [M]  /root/kh/zfs/module/zfs/dsl_dir.o
+  CC [M]  /root/kh/zfs/module/zfs/dsl_pool.o
+  CC [M]  /root/kh/zfs/module/zfs/dsl_prop.o
+  CC [M]  /root/kh/zfs/module/zfs/dsl_scan.o
+  CC [M]  /root/kh/zfs/module/zfs/dsl_synctask.o
+  CC [M]  /root/kh/zfs/module/zfs/dsl_userhold.o
+  CC [M]  /root/kh/zfs/module/zfs/edonr_zfs.o
+  CC [M]  /root/kh/zfs/module/zfs/fm.o
+  CC [M]  /root/kh/zfs/module/zfs/gzip.o
+  CC [M]  /root/kh/zfs/module/zfs/hkdf.o
+  CC [M]  /root/kh/zfs/module/zfs/lz4.o
+  CC [M]  /root/kh/zfs/module/zfs/lz4_zfs.o
+  CC [M]  /root/kh/zfs/module/zfs/lzjb.o
+  CC [M]  /root/kh/zfs/module/zfs/metaslab.o
+  CC [M]  /root/kh/zfs/module/zfs/mmp.o
+  CC [M]  /root/kh/zfs/module/zfs/multilist.o
+  CC [M]  /root/kh/zfs/module/zfs/objlist.o
+  CC [M]  /root/kh/zfs/module/zfs/pathname.o
+  CC [M]  /root/kh/zfs/module/zfs/range_tree.o
+  CC [M]  /root/kh/zfs/module/zfs/refcount.o
+  CC [M]  /root/kh/zfs/module/zfs/rrwlock.o
+  CC [M]  /root/kh/zfs/module/zfs/sa.o
+  CC [M]  /root/kh/zfs/module/zfs/sha2_zfs.o
+  CC [M]  /root/kh/zfs/module/zfs/skein_zfs.o
+  CC [M]  /root/kh/zfs/module/zfs/spa.o
+  CC [M]  /root/kh/zfs/module/zfs/spa_checkpoint.o
+  CC [M]  /root/kh/zfs/module/zfs/spa_config.o
+  CC [M]  /root/kh/zfs/module/zfs/spa_errlog.o
+  CC [M]  /root/kh/zfs/module/zfs/spa_history.o
+  CC [M]  /root/kh/zfs/module/zfs/spa_log_spacemap.o
+  CC [M]  /root/kh/zfs/module/zfs/spa_misc.o
+  CC [M]  /root/kh/zfs/module/zfs/spa_stats.o
+  CC [M]  /root/kh/zfs/module/zfs/space_map.o
+  CC [M]  /root/kh/zfs/module/zfs/space_reftree.o
+  CC [M]  /root/kh/zfs/module/zfs/txg.o
+  CC [M]  /root/kh/zfs/module/zfs/u8_textprep.o
+  CC [M]  /root/kh/zfs/module/zfs/uberblock.o
+  CC [M]  /root/kh/zfs/module/zfs/unique.o
+  CC [M]  /root/kh/zfs/module/zfs/vdev.o
+  CC [M]  /root/kh/zfs/module/zfs/vdev_draid.o
+  CC [M]  /root/kh/zfs/module/zfs/vdev_draid_rand.o
+  CC [M]  /root/kh/zfs/module/zfs/vdev_file.o
+  CC [M]  /root/kh/zfs/module/zfs/vdev_indirect.o
+  CC [M]  /root/kh/zfs/module/zfs/vdev_indirect_births.o
+  CC [M]  /root/kh/zfs/module/zfs/vdev_indirect_mapping.o
+  CC [M]  /root/kh/zfs/module/zfs/vdev_initialize.o
+  CC [M]  /root/kh/zfs/module/zfs/vdev_label.o
+  CC [M]  /root/kh/zfs/module/zfs/vdev_mirror.o
+  CC [M]  /root/kh/zfs/module/zfs/vdev_missing.o
+  CC [M]  /root/kh/zfs/module/zfs/vdev_queue.o
+  CC [M]  /root/kh/zfs/module/zfs/vdev_raidz.o
+  CC [M]  /root/kh/zfs/module/zfs/vdev_raidz_math.o
+  CC [M]  /root/kh/zfs/module/zfs/vdev_raidz_math_scalar.o
+  CC [M]  /root/kh/zfs/module/zfs/vdev_raidz_mover.o
+  CC [M]  /root/kh/zfs/module/zfs/vdev_rebuild.o
+  CC [M]  /root/kh/zfs/module/zfs/vdev_removal.o
+  CC [M]  /root/kh/zfs/module/zfs/vdev_root.o
+  CC [M]  /root/kh/zfs/module/zfs/vdev_trim.o
+  CC [M]  /root/kh/zfs/module/zfs/zap.o
+  CC [M]  /root/kh/zfs/module/zfs/zap_fat.o
+  CC [M]  /root/kh/zfs/module/zfs/zap_impl.o
+  CC [M]  /root/kh/zfs/module/zfs/zap_leaf.o
+  CC [M]  /root/kh/zfs/module/zfs/zap_micro.o
+  CC [M]  /root/kh/zfs/module/zfs/zfeature.o
+  CC [M]  /root/kh/zfs/module/zfs/zfs_byteswap.o
+  CC [M]  /root/kh/zfs/module/zfs/zfs_chksum.o
+  CC [M]  /root/kh/zfs/module/zfs/zfs_debug_common.o
+  CC [M]  /root/kh/zfs/module/zfs/zfs_crrd.o
+  CC [M]  /root/kh/zfs/module/zfs/zfs_fm.o
+  CC [M]  /root/kh/zfs/module/zfs/zfs_fuid.o
+  CC [M]  /root/kh/zfs/module/zfs/zfs_impl.o
+  CC [M]  /root/kh/zfs/module/zfs/zfs_ioctl.o
+  CC [M]  /root/kh/zfs/module/zfs/zfs_log.o
+  CC [M]  /root/kh/zfs/module/zfs/zfs_onexit.o
+  CC [M]  /root/kh/zfs/module/zfs/zfs_quota.o
+  CC [M]  /root/kh/zfs/module/zfs/zfs_ratelimit.o
+  CC [M]  /root/kh/zfs/module/zfs/zfs_replay.o
+  CC [M]  /root/kh/zfs/module/zfs/zfs_rlock.o
+  CC [M]  /root/kh/zfs/module/zfs/zfs_sa.o
+  CC [M]  /root/kh/zfs/module/zfs/zfs_vnops.o
+  CC [M]  /root/kh/zfs/module/zfs/zfs_znode.o
+  CC [M]  /root/kh/zfs/module/zfs/zil.o
+  CC [M]  /root/kh/zfs/module/zfs/zio.o
+  CC [M]  /root/kh/zfs/module/zfs/zio_checksum.o
+  CC [M]  /root/kh/zfs/module/zfs/zio_compress.o
+  CC [M]  /root/kh/zfs/module/zfs/zio_crypt.o
+  CC [M]  /root/kh/zfs/module/zfs/zio_crypt_os_icp.o
+  CC [M]  /root/kh/zfs/module/zfs/zio_inject.o
+  CC [M]  /root/kh/zfs/module/zfs/zle.o
+  CC [M]  /root/kh/zfs/module/zfs/zrlock.o
+  CC [M]  /root/kh/zfs/module/zfs/zthr.o
+  CC [M]  /root/kh/zfs/module/zfs/zvol.o
+  CC [M]  /root/kh/zfs/module/zfs/zcp.o
+  CC [M]  /root/kh/zfs/module/zfs/zcp_get.o
+  CC [M]  /root/kh/zfs/module/zfs/zcp_global.o
+  CC [M]  /root/kh/zfs/module/zfs/zcp_iter.o
+  CC [M]  /root/kh/zfs/module/zfs/zcp_set.o
+  CC [M]  /root/kh/zfs/module/zfs/zcp_synctask.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/abd_os.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/arc_os.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/kasan_compat.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/mmp_os.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/policy.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/qat.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/qat_compress.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/qat_crypt.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/spa_misc_os.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/trace.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/vdev_disk.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/vdev_raidz.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/vdev_label_os.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/zfs_acl.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/zfs_ctldir.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/zfs_debug.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/zfs_dir.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/zfs_file_os.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/zfs_ioctl_os.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/zfs_racct.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/zfs_sysfs.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/zfs_uio.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/zfs_vfsops.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/zfs_vnops_os.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/zfs_znode_os.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/zpl_ctldir.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/zpl_export.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/zpl_file.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/zpl_file_range.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/zpl_inode.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/zpl_super.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/zpl_xattr.o
+  CC [M]  /root/kh/zfs/module/os/linux/zfs/zvol_os.o
+  CC [M]  /root/kh/zfs/module/icp/algs/aes/aes_impl_aesni.o
+  CC [M]  /root/kh/zfs/module/icp/algs/aes/aes_impl_x86-64.o
+  CC [M]  /root/kh/zfs/module/icp/algs/modes/gcm_pclmulqdq.o
+  AS [M]  /root/kh/zfs/module/icp/asm-x86_64/aes/aes_aesni.o
+  AS [M]  /root/kh/zfs/module/icp/asm-x86_64/aes/aes_amd64.o
+  CC [M]  /root/kh/zfs/module/icp/asm-x86_64/aes/aeskey.o
+  AS [M]  /root/kh/zfs/module/icp/asm-x86_64/blake3/blake3_avx2.o
+  AS [M]  /root/kh/zfs/module/icp/asm-x86_64/blake3/blake3_avx512.o
+  AS [M]  /root/kh/zfs/module/icp/asm-x86_64/blake3/blake3_sse2.o
+  AS [M]  /root/kh/zfs/module/icp/asm-x86_64/blake3/blake3_sse41.o
+  AS [M]  /root/kh/zfs/module/icp/asm-x86_64/sha2/sha256-x86_64.o
+  AS [M]  /root/kh/zfs/module/icp/asm-x86_64/sha2/sha512-x86_64.o
+  AS [M]  /root/kh/zfs/module/icp/asm-x86_64/modes/aesni-gcm-x86_64.o
+  AS [M]  /root/kh/zfs/module/icp/asm-x86_64/modes/aesni-gcm-avx2-vaes.o
+  AS [M]  /root/kh/zfs/module/icp/asm-x86_64/modes/gcm_pclmulqdq.o
+  AS [M]  /root/kh/zfs/module/icp/asm-x86_64/modes/ghash-x86_64.o
+  CC [M]  /root/kh/zfs/module/zcommon/zfs_fletcher_avx512.o
+  CC [M]  /root/kh/zfs/module/zcommon/zfs_fletcher_intel.o
+  CC [M]  /root/kh/zfs/module/zcommon/zfs_fletcher_sse.o
+  CC [M]  /root/kh/zfs/module/zfs/vdev_raidz_math_avx2.o
+  CC [M]  /root/kh/zfs/module/zfs/vdev_raidz_math_avx512bw.o
+  CC [M]  /root/kh/zfs/module/zfs/vdev_raidz_math_avx512f.o
+  CC [M]  /root/kh/zfs/module/zfs/vdev_raidz_math_sse2.o
+  CC [M]  /root/kh/zfs/module/zfs/vdev_raidz_math_ssse3.o
+  LD [M]  /root/kh/zfs/module/spl.o
+/root/kh/zfs/module/spl.o: warning: objtool: __cv_init+0xb6: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: __cv_signal+0x6a: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: __cv_broadcast+0x67: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: cv_wait_common+0x1b5: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: __cv_timedwait_common+0x1f3: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: __cv_timedwait_hires+0x23d: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: __cv_destroy+0x14a: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: random_get_pseudo_bytes+0x1d3: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: hostid_read+0x148: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: zone_get_hostid+0x89: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: spl_magazine_free+0x49: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: spl_kmem_cache_create+0x3d2: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: spl_slab_reclaim+0x19d: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: spl_cache_flush+0x2a7: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: spl_kmem_cache_destroy+0x2c5: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: spl_kmem_cache_free+0x1af: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: spl_kmem_cache_reap_now+0xca: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: spl_cache_grow_work+0x29e: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: spl_kmem_cache_alloc+0x203: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: spl_kmem_alloc+0x14a: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: spl_kmem_zalloc+0x135: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: kstat_default_update+0x4d: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: kstat_seq_data_addr+0x77: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: kstat_seq_next+0x69: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: proc_kstat_write+0x100: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: kstat_find_module+0x99: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: kstat_seq_stop+0xa7: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: kstat_seq_show+0x155: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: kstat_delete_module+0x1c6: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: kstat_create_module+0x1fd: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: kstat_seq_start+0x286: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: __kstat_create+0x35e: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: kstat_proc_entry_install+0x334: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: __kstat_install+0x71: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: kstat_proc_entry_delete+0x124: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: __kstat_delete+0x7b: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: spl_kstat_fini+0x4f: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: slab_seq_show+0x18b: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: procfs_list_seq_show+0x81: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: procfs_list_seq_stop+0x69: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: procfs_list_seq_start+0x15e: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: procfs_list_destroy+0x82: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: procfs_list_add+0x97: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: procfs_list_seq_next+0xc0: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: taskq_lowest_id+0xce: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: task_free+0x73: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: spl_taskq_expand+0x102: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: spl_taskq_prepare_down+0x124: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: spl_taskq_kstat_data+0x26d: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: task_expire+0x170: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: task_done+0xf1: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: taskq_destroy+0x3e6: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: taskq_cancel_id+0x1df: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: task_alloc+0x224: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: taskq_create+0x824: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: taskq_create_synced+0x101: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: taskq_dispatch+0x32f: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: taskq_thread+0x72a: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: taskq_dispatch_ent+0x297: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: taskq_dispatch_delay+0x1d0: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: thread_generic_wrapper+0x97: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: __thread_create+0x1b6: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: tsd_create+0x185: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: tsd_get_by_thread+0x7d: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: tsd_get+0x7f: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: tsd_exit+0x1d4: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: tsd_destroy+0x1f4: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: tsd_set+0x435: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: spl_tsd_fini+0x143: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: spl_vmem_alloc+0x4f: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: spl_vmem_zalloc+0x4f: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: zone_dataset_visible+0x24b: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: zone_dataset_attach+0x38c: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: zone_dataset_detach_uid+0x278: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: zone_dataset_detach+0x2d1: spl_panic() is missing a __noreturn annotation
+/root/kh/zfs/module/spl.o: warning: objtool: zone_dataset_attach_uid+0x357: spl_panic() is missing a __noreturn annotation
+  LD [M]  /root/kh/zfs/module/zfs.o
+/root/kh/zfs/module/zfs.o: warning: objtool: luaG_errormsg+0x84: luaD_throw() is missing a __noreturn annotation
+/root/kh/zfs/module/zfs.o: warning: objtool: GCTM+0x150: luaD_throw() is missing a __noreturn annotation
+/root/kh/zfs/module/zfs.o: warning: objtool: inclinenumber+0x136: luaD_throw() is missing a __noreturn annotation
+/root/kh/zfs/module/zfs.o: warning: objtool: save+0x10c: luaD_throw() is missing a __noreturn annotation
+/root/kh/zfs/module/zfs.o: warning: objtool: lexerror+0x94: luaD_throw() is missing a __noreturn annotation
+/root/kh/zfs/module/zfs.o: warning: objtool: luaM_realloc_+0x59: luaD_throw() is missing a __noreturn annotation
+/root/kh/zfs/module/zfs.o: warning: objtool: luaV_execute+0x379: luaD_throw() is missing a __noreturn annotation
+  MODPOST /root/kh/zfs/module/Module.symvers
+  CC [M]  /root/kh/zfs/module/spl.mod.o
+  CC [M]  /root/kh/zfs/module/.module-common.o
+  CC [M]  /root/kh/zfs/module/zfs.mod.o
+  LD [M]  /root/kh/zfs/module/spl.ko
+  BTF [M] /root/kh/zfs/module/spl.ko
+  LD [M]  /root/kh/zfs/module/zfs.ko
+  BTF [M] /root/kh/zfs/module/zfs.ko
+make[3]: Leaving directory '/usr/src/linux-headers-6.12.113+deb13-cloud-amd64'
+make[2]: Leaving directory '/root/kh/zfs/module'
+make[2]: Entering directory '/root/kh/zfs'
+  GEN      gitrev
+  CC       module/zcommon/libzfs_la-cityhash.lo
+  CC       module/zcommon/libzfs_la-zfeature_common.lo
+  CC       module/zcommon/libzfs_la-zfs_comutil.lo
+  CC       module/zcommon/libzfs_la-zfs_deleg.lo
+  CC       module/zcommon/libzfs_la-zfs_fletcher.lo
+  CC       module/zcommon/libzfs_la-zfs_fletcher_aarch64_neon.lo
+  CC       module/zcommon/libzfs_la-zfs_fletcher_avx512.lo
+  CC       module/zcommon/libzfs_la-zfs_fletcher_intel.lo
+  CC       module/zcommon/libzfs_la-zfs_fletcher_sse.lo
+  CC       module/zcommon/libzfs_la-zfs_fletcher_superscalar.lo
+  CC       module/zcommon/libzfs_la-zfs_fletcher_superscalar4.lo
+  CC       module/zcommon/libzfs_la-zfs_namecheck.lo
+  CC       module/zcommon/libzfs_la-zfs_prop.lo
+  CC       module/zcommon/libzfs_la-zfs_valstr.lo
+  CC       module/zcommon/libzfs_la-zpool_prop.lo
+  CC       module/zcommon/libzfs_la-zprop_common.lo
+  CC       module/zfs/libzfs_la-btree.lo
+  CC       module/zfs/libzfs_la-range_tree.lo
+  CC       module/zfs/tests_unit_test_zap-zap.o
+  CC       module/zfs/tests_unit_test_zap-zap_fat.o
+  CC       module/zfs/tests_unit_test_zap-zap_impl.o
+  CC       module/zfs/tests_unit_test_zap-zap_micro.o
+  CC       module/zfs/tests_unit_test_zap-zap_leaf.o
+  CC       module/zfs/tests_unit_test_zap-u8_textprep.o
+  CC       module/zfs/libbtree_la-btree.lo
+  CC       tests/unit/libunit_la-mock_dmu.lo
+  CC       tests/unit/libunit_la-munit.lo
+  CC       tests/unit/libunit_la-unit.lo
+  CC       tests/unit/test_namecheck-test_namecheck.o
+  CC       module/zcommon/tests_unit_test_namecheck-zfs_namecheck.o
+  CC       tests/unit/test_btree-test_btree.o
+  CC       module/avl/tests_unit_test_btree-avl.o
+  CC       module/zfs/tests_unit_test_btree-btree.o
+  CC       tests/unit/test_fletcher-test_fletcher.o
+  CC       module/zcommon/tests_unit_test_fletcher-zfs_fletcher.o
+  CC       module/zcommon/tests_unit_test_fletcher-zfs_fletcher_aarch64_neon.o
+  CC       module/zcommon/tests_unit_test_fletcher-zfs_fletcher_avx512.o
+  CC       module/zcommon/tests_unit_test_fletcher-zfs_fletcher_intel.o
+  CC       module/zcommon/tests_unit_test_fletcher-zfs_fletcher_sse.o
+  CC       module/zcommon/tests_unit_test_fletcher-zfs_fletcher_superscalar.o
+  CC       module/zcommon/tests_unit_test_fletcher-zfs_fletcher_superscalar4.o
+  CC       tests/unit/test_sha2-test_sha2.o
+  CC       module/zfs/tests_unit_test_sha2-zfs_impl.o
+  CC       tests/unit/test_cityhash-test_cityhash.o
+  CC       module/zcommon/tests_unit_test_cityhash-cityhash.o
+  CC       tests/unit/test_nvpair-test_nvpair.o
+  CC       module/nvpair/tests_unit_test_nvpair-nvpair.o
+  CC       module/nvpair/tests_unit_test_nvpair-fnvpair.o
+  CC       module/nvpair/tests_unit_test_nvpair-nvpair_alloc_fixed.o
+  CC       lib/libnvpair/tests_unit_test_nvpair-nvpair_alloc_system.o
+  CC       lib/libnvpair/tests_unit_test_nvpair-libnvpair.o
+  CC       cmd/zfs_ids_to_path.o
+  CC       cmd/zhack-zhack.o
+  CC       module/zfs/librange_tree_la-btree.lo
+  CC       module/zfs/librange_tree_la-range_tree.lo
+  CC       cmd/ztest-ztest.o
+  CC       cmd/zgenhostid.o
+  CC       tests/zfs-tests/cmd/libzfs_input_check.o
+  CC       tests/zfs-tests/cmd/libzfs_mnttab_cache_check.o
+  CC       tests/zfs-tests/cmd/manipulate_user_buffer.o
+  CC       tests/zfs-tests/cmd/mkbusy.o
+  CC       tests/zfs-tests/cmd/mkfile.o
+  CC       tests/zfs-tests/cmd/mkfiles.o
+  CC       tests/zfs-tests/cmd/mktree.o
+  CC       tests/zfs-tests/cmd/mmap_exec.o
+  CC       tests/zfs-tests/cmd/mmap_ftruncate.o
+  CC       tests/zfs-tests/cmd/mmap_seek.o
+  CC       tests/zfs-tests/cmd/mmap_sync.o
+  CC       tests/zfs-tests/cmd/mmapwrite.o
+  CC       tests/zfs-tests/cmd/readmmap.o
+  CC       tests/zfs-tests/cmd/mmap_write_sync.o
+  CC       tests/zfs-tests/cmd/mmap_read_truncate.o
+  CC       tests/zfs-tests/cmd/mmap_libaio-mmap_libaio.o
+  CC       tests/zfs-tests/cmd/zcp_support.o
+  CC       tests/zfs-tests/cmd/nvlist_to_lua.o
+  CC       tests/zfs-tests/cmd/rm_lnkcnt_zero_file.o
+  CC       tests/zfs-tests/cmd/send_doall.o
+  CC       tests/zfs-tests/cmd/stride_dd.o
+  CC       tests/zfs-tests/cmd/threadsappend.o
+  CC       tests/zfs-tests/cmd/ereports.o
+  CC       tests/zfs-tests/cmd/getfsuuid.o
+  CC       tests/zfs-tests/cmd/getversion.o
+  CC       tests/zfs-tests/cmd/user_ns_exec.o
+  CC       tests/zfs-tests/cmd/makedir.o
+  CC       tests/zfs-tests/cmd/mount_null_source.o
+  CC       tests/zfs-tests/cmd/renameat2.o
+  CC       tests/zfs-tests/cmd/statx.o
+  CC       tests/zfs-tests/cmd/statfs_nomount.o
+  CC       tests/zfs-tests/cmd/xattrtest.o
+  CC       tests/zfs-tests/cmd/zed_fd_spill-zedlet.o
+  CC       tests/zfs-tests/cmd/idmap_util.o
+  CC       tests/zfs-tests/cmd/setlease.o
+  CC       tests/zfs-tests/cmd/file/file_fadvise.o
+  CC       tests/zfs-tests/cmd/file/file_uncached.o
+  CC       tests/zfs-tests/cmd/file/file_unlink_fh.o
+  GEN      zarcstat
+  GEN      dbufstat
+  GEN      zilstat
+  GEN      contrib/initramfs/hooks/zfs
+  GEN      etc/init.d/zfs-import
+  GEN      contrib/initramfs/hooks/zfsunlock
+  GEN      etc/init.d/zfs-load-key
+  GEN      etc/init.d/zfs-mount
+  GEN      etc/init.d/zfs-share
+  GEN      etc/init.d/zfs-zed
+  GEN      cmd/zed/zed.d/history_event-zfs-list-cacher.sh
+  GEN      contrib/dracut/02zfsexpandknowledge/module-setup.sh
+  GEN      contrib/dracut/90zfs/export-zfs.sh
+  GEN      contrib/dracut/90zfs/import-opts-generator.sh
+  GEN      contrib/dracut/90zfs/module-setup.sh
+  GEN      contrib/dracut/90zfs/mount-zfs.sh
+  GEN      contrib/dracut/90zfs/parse-zfs.sh
+  GEN      contrib/dracut/90zfs/zfs-generator.sh
+  GEN      contrib/dracut/90zfs/zfs-lib.sh
+  GEN      contrib/dracut/90zfs/zfs-load-key.sh
+  GEN      contrib/dracut/90zfs/zfs-needshutdown.sh
+  GEN      fsck.zfs
+  GEN      tests/test-runner/bin/test-runner.py
+  GEN      tests/test-runner/bin/zts-report.py
+  GEN      man/man8/zed.8
+  GEN      man/man8/zfs_prepare_disk.8
+  GEN      man/man8/zfs-mount-generator.8
+  GEN      etc/default/zfs
+  GEN      contrib/bash_completion.d/zfs
+  GEN      tests/zfs-tests/include/default.cfg
+  GEN      contrib/dracut/90zfs/zfs-env-bootfs.service
+  GEN      contrib/dracut/90zfs/zfs-nonroot-necessities.service
+  GEN      contrib/dracut/90zfs/zfs-rollback-bootfs.service
+  GEN      contrib/dracut/90zfs/zfs-snapshot-bootfs.service
+  GEN      etc/zfs/zfs-functions
+  GEN      etc/systemd/system/zfs-import-cache.service
+  GEN      etc/systemd/system/zfs-import-scan.service
+  GEN      etc/systemd/system/zfs-import.target
+  GEN      etc/systemd/system/zfs-mount.service
+  GEN      etc/systemd/system/zfs-mount@.service
+  GEN      etc/systemd/system/zfs-scrub-monthly@.timer
+  GEN      etc/systemd/system/zfs-scrub-weekly@.timer
+  GEN      etc/systemd/system/zfs-scrub@.service
+  GEN      etc/systemd/system/zfs-trim-monthly@.timer
+  GEN      etc/systemd/system/zfs-trim-weekly@.timer
+  GEN      etc/systemd/system/zfs-trim@.service
+  GEN      etc/systemd/system/zfs-share.service
+  GEN      etc/systemd/system/zfs-volume-wait.service
+  GEN      etc/systemd/system/zfs-volumes.target
+  GEN      etc/systemd/system/zfs-zed.service
+  GEN      etc/systemd/system/zfs.target
+  GEN      udev/rules.d/69-vdev.rules
+  GEN      udev/rules.d/60-zvol.rules
+  GEN      udev/rules.d/90-zfs.rules
+  GEN      contrib/pyzfs/setup.py
+  CC       cmd/raidz_test/raidz_test-raidz_bench.o
+  GEN      scripts/common.sh
+  CC       cmd/raidz_test/raidz_test-raidz_test.o
+  CC       lib/libzpool/libzpool_la-abd_os.lo
+  CC       lib/libzpool/libzpool_la-arc_os.lo
+  CC       lib/libzpool/libzpool_la-kernel.lo
+  CC       lib/libzpool/libzpool_la-util.lo
+  CC       lib/libzpool/libzpool_la-vdev_label_os.lo
+  CC       lib/libzpool/libzpool_la-zfs_file_os.lo
+  CC       lib/libzpool/libzpool_la-zfs_racct.lo
+  CC       lib/libzpool/libzpool_la-zfs_debug.lo
+  CC       module/zcommon/libzpool_la-cityhash.lo
+  CC       module/zcommon/libzpool_la-simd_stat.lo
+  CC       module/zcommon/libzpool_la-zfeature_common.lo
+  CC       module/zcommon/libzpool_la-zfs_comutil.lo
+  CC       module/zcommon/libzpool_la-zfs_deleg.lo
+  CC       module/zcommon/libzpool_la-zfs_fletcher.lo
+  CC       module/zcommon/libzpool_la-zfs_fletcher_aarch64_neon.lo
+  CC       module/zcommon/libzpool_la-zfs_fletcher_avx512.lo
+  CC       module/zcommon/libzpool_la-zfs_fletcher_intel.lo
+  CC       module/zcommon/libzpool_la-zfs_fletcher_sse.lo
+  CC       module/zcommon/libzpool_la-zfs_fletcher_superscalar.lo
+  CC       module/zcommon/libzpool_la-zfs_fletcher_superscalar4.lo
+  CC       module/zcommon/libzpool_la-zfs_namecheck.lo
+  CC       module/zcommon/libzpool_la-zfs_prop.lo
+  CC       module/zcommon/libzpool_la-zfs_valstr.lo
+  CC       module/zcommon/libzpool_la-zpool_prop.lo
+  CC       module/zcommon/libzpool_la-zprop_common.lo
+  CC       module/zfs/libzpool_la-abd.lo
+  CC       module/zfs/libzpool_la-aggsum.lo
+  CC       module/zfs/libzpool_la-arc.lo
+  CC       module/zfs/libzpool_la-blake3_zfs.lo
+  CC       module/zfs/libzpool_la-blkptr.lo
+  CC       module/zfs/libzpool_la-bplist.lo
+  CC       module/zfs/libzpool_la-bpobj.lo
+  CC       module/zfs/libzpool_la-bptree.lo
+  CC       module/zfs/libzpool_la-bqueue.lo
+  CC       module/zfs/libzpool_la-brt.lo
+  CC       module/zfs/libzpool_la-dbuf.lo
+  CC       module/zfs/libzpool_la-dbuf_stats.lo
+  CC       module/zfs/libzpool_la-ddt.lo
+  CC       module/zfs/libzpool_la-ddt_log.lo
+  CC       module/zfs/libzpool_la-ddt_stats.lo
+  CC       module/zfs/libzpool_la-ddt_zap.lo
+  CC       module/zfs/libzpool_la-dmu.lo
+  CC       module/zfs/libzpool_la-dmu_diff.lo
+  CC       module/zfs/libzpool_la-dmu_direct.lo
+  CC       module/zfs/libzpool_la-dmu_object.lo
+  CC       module/zfs/libzpool_la-dmu_objset.lo
+  CC       module/zfs/libzpool_la-dmu_recv.lo
+  CC       module/zfs/libzpool_la-dmu_redact.lo
+  CC       module/zfs/libzpool_la-dmu_send.lo
+  CC       module/zfs/libzpool_la-dmu_traverse.lo
+  CC       module/zfs/libzpool_la-dmu_tx.lo
+  CC       module/zfs/libzpool_la-dmu_zfetch.lo
+  CC       module/zfs/libzpool_la-dnode.lo
+  CC       module/zfs/libzpool_la-dnode_sync.lo
+  CC       module/zfs/libzpool_la-dsl_bookmark.lo
+  CC       module/zfs/libzpool_la-dsl_crypt.lo
+  CC       module/zfs/libzpool_la-dsl_dataset.lo
+  CC       module/zfs/libzpool_la-dsl_deadlist.lo
+  CC       module/zfs/libzpool_la-dsl_deleg.lo
+  CC       module/zfs/libzpool_la-dsl_destroy.lo
+  CC       module/zfs/libzpool_la-dsl_dir.lo
+  CC       module/zfs/libzpool_la-dsl_pool.lo
+  CC       module/zfs/libzpool_la-dsl_prop.lo
+  CC       module/zfs/libzpool_la-dsl_scan.lo
+  CC       module/zfs/libzpool_la-dsl_synctask.lo
+  CC       module/zfs/libzpool_la-dsl_userhold.lo
+  CC       module/zfs/libzpool_la-edonr_zfs.lo
+  CC       module/zfs/libzpool_la-fm.lo
+  CC       module/zfs/libzpool_la-gzip.lo
+  CC       module/zfs/libzpool_la-hkdf.lo
+  CC       module/zfs/libzpool_la-lz4.lo
+  CC       module/zfs/libzpool_la-lz4_zfs.lo
+  CC       module/zfs/libzpool_la-lzjb.lo
+  CC       module/zfs/libzpool_la-metaslab.lo
+  CC       module/zfs/libzpool_la-mmp.lo
+  CC       module/zfs/libzpool_la-multilist.lo
+  CC       module/zfs/libzpool_la-objlist.lo
+  CC       module/zfs/libzpool_la-pathname.lo
+  CC       module/zfs/libzpool_la-refcount.lo
+  CC       module/zfs/libzpool_la-rrwlock.lo
+  CC       module/zfs/libzpool_la-sa.lo
+  CC       module/zfs/libzpool_la-sha2_zfs.lo
+  CC       module/zfs/libzpool_la-skein_zfs.lo
+  CC       module/zfs/libzpool_la-spa.lo
+  CC       module/zfs/libzpool_la-spa_checkpoint.lo
+  CC       module/zfs/libzpool_la-spa_config.lo
+  CC       module/zfs/libzpool_la-spa_errlog.lo
+  CC       module/zfs/libzpool_la-spa_history.lo
+  CC       module/zfs/libzpool_la-spa_log_spacemap.lo
+  CC       module/zfs/libzpool_la-spa_misc.lo
+  CC       module/zfs/libzpool_la-spa_stats.lo
+  CC       module/zfs/libzpool_la-space_map.lo
+  CC       module/zfs/libzpool_la-space_reftree.lo
+  CC       module/zfs/libzpool_la-txg.lo
+  CC       module/zfs/libzpool_la-u8_textprep.lo
+  CC       module/zfs/libzpool_la-uberblock.lo
+  CC       module/zfs/libzpool_la-unique.lo
+  CC       module/zfs/libzpool_la-vdev.lo
+  CC       module/zfs/libzpool_la-vdev_draid.lo
+  CC       module/zfs/libzpool_la-vdev_draid_rand.lo
+  CC       module/zfs/libzpool_la-vdev_file.lo
+  CC       module/zfs/libzpool_la-vdev_indirect.lo
+  CC       module/zfs/libzpool_la-vdev_indirect_births.lo
+  CC       module/zfs/libzpool_la-vdev_indirect_mapping.lo
+  CC       module/zfs/libzpool_la-vdev_initialize.lo
+  CC       module/zfs/libzpool_la-vdev_label.lo
+  CC       module/zfs/libzpool_la-vdev_mirror.lo
+  CC       module/zfs/libzpool_la-vdev_missing.lo
+  CC       module/zfs/libzpool_la-vdev_queue.lo
+  CC       module/zfs/libzpool_la-vdev_raidz.lo
+  CC       module/zfs/libzpool_la-vdev_raidz_math.lo
+  CC       module/zfs/libzpool_la-vdev_raidz_math_aarch64_neon.lo
+  CC       module/zfs/libzpool_la-vdev_raidz_math_aarch64_neonx2.lo
+  CC       module/zfs/libzpool_la-vdev_raidz_math_avx2.lo
+  CC       module/zfs/libzpool_la-vdev_raidz_math_avx512bw.lo
+  CC       module/zfs/libzpool_la-vdev_raidz_math_avx512f.lo
+  CC       module/zfs/libzpool_la-vdev_raidz_math_powerpc_altivec.lo
+  CC       module/zfs/libzpool_la-vdev_raidz_math_scalar.lo
+  CC       module/zfs/libzpool_la-vdev_raidz_math_sse2.lo
+  CC       module/zfs/libzpool_la-vdev_raidz_math_ssse3.lo
+  CC       module/zfs/libzpool_la-vdev_raidz_mover.lo
+  CC       module/zfs/libzpool_la-vdev_rebuild.lo
+  CC       module/zfs/libzpool_la-vdev_removal.lo
+  CC       module/zfs/libzpool_la-vdev_root.lo
+  CC       module/zfs/libzpool_la-vdev_trim.lo
+  CC       module/zfs/libzpool_la-zap.lo
+  CC       module/zfs/libzpool_la-zap_fat.lo
+  CC       module/zfs/libzpool_la-zap_impl.lo
+  CC       module/zfs/libzpool_la-zap_leaf.lo
+  CC       module/zfs/libzpool_la-zap_micro.lo
+  CC       module/zfs/libzpool_la-zfeature.lo
+  CC       module/zfs/libzpool_la-zfs_byteswap.lo
+  CC       module/zfs/libzpool_la-zfs_chksum.lo
+  CC       module/zfs/libzpool_la-zfs_debug_common.lo
+  CC       module/zfs/libzpool_la-zfs_crrd.lo
+  CC       module/zfs/libzpool_la-zfs_fm.lo
+  CC       module/zfs/libzpool_la-zfs_fuid.lo
+  CC       module/zfs/libzpool_la-zfs_impl.lo
+  CC       module/zfs/libzpool_la-zfs_ratelimit.lo
+  CC       module/zfs/libzpool_la-zfs_rlock.lo
+  CC       module/zfs/libzpool_la-zfs_sa.lo
+  CC       module/zfs/libzpool_la-zfs_znode.lo
+  CC       module/zfs/libzpool_la-zil.lo
+  CC       module/zfs/libzpool_la-zio.lo
+  CC       module/zfs/libzpool_la-zio_checksum.lo
+  CC       module/zfs/libzpool_la-zio_compress.lo
+  CC       module/zfs/libzpool_la-zio_crypt.lo
+  CC       module/zfs/libzpool_la-zio_crypt_os_icp.lo
+  CC       module/zfs/libzpool_la-zio_inject.lo
+  CC       module/zfs/libzpool_la-zle.lo
+  CC       module/zfs/libzpool_la-zrlock.lo
+  CC       module/zfs/libzpool_la-zthr.lo
+  CC       module/lua/libzpool_la-lapi.lo
+  CC       module/lua/libzpool_la-lauxlib.lo
+  CC       module/lua/libzpool_la-lbaselib.lo
+  CC       module/lua/libzpool_la-lcode.lo
+  CC       module/lua/libzpool_la-lcompat.lo
+  CC       module/lua/libzpool_la-lcorolib.lo
+  CC       module/lua/libzpool_la-lctype.lo
+  CC       module/lua/libzpool_la-ldebug.lo
+  CC       module/lua/libzpool_la-ldo.lo
+  CC       module/lua/libzpool_la-lfunc.lo
+  CC       module/lua/libzpool_la-lgc.lo
+  CC       module/lua/libzpool_la-llex.lo
+  CC       module/lua/libzpool_la-lmem.lo
+  CC       module/lua/libzpool_la-lobject.lo
+  CC       module/lua/libzpool_la-lopcodes.lo
+  CC       module/lua/libzpool_la-lparser.lo
+  CC       module/lua/libzpool_la-lstate.lo
+  CC       module/lua/libzpool_la-lstring.lo
+  CC       module/lua/libzpool_la-lstrlib.lo
+  CC       module/lua/libzpool_la-ltable.lo
+  CC       module/lua/libzpool_la-ltablib.lo
+  CC       module/lua/libzpool_la-ltm.lo
+  CC       module/lua/libzpool_la-lvm.lo
+  CC       module/lua/libzpool_la-lzio.lo
+  CC       module/zfs/libzpool_la-zcp.lo
+  CC       module/zfs/libzpool_la-zcp_get.lo
+  CC       module/zfs/libzpool_la-zcp_global.lo
+  CC       module/zfs/libzpool_la-zcp_iter.lo
+  CC       module/zfs/libzpool_la-zcp_set.lo
+  CC       module/zfs/libzpool_la-zcp_synctask.lo
+  CC       module/zfs/libzpool_la-btree.lo
+  CC       module/zfs/libzpool_la-range_tree.lo
+  CC       module/icp/spi/libicp_la-kcf_spi.lo
+  CC       module/icp/api/libicp_la-kcf_ctxops.lo
+  CC       module/icp/api/libicp_la-kcf_cipher.lo
+  CC       module/icp/api/libicp_la-kcf_mac.lo
+  CC       module/icp/algs/aes/libicp_la-aes_impl_aesni.lo
+  CC       module/icp/algs/aes/libicp_la-aes_impl_generic.lo
+  CC       module/icp/algs/aes/libicp_la-aes_impl_x86-64.lo
+  CC       module/icp/algs/aes/libicp_la-aes_impl.lo
+  CC       module/icp/algs/aes/libicp_la-aes_modes.lo
+  CC       module/icp/algs/blake3/libicp_la-blake3.lo
+  CC       module/icp/algs/blake3/libicp_la-blake3_generic.lo
+  CC       module/icp/algs/blake3/libicp_la-blake3_impl.lo
+  CC       module/icp/algs/edonr/libicp_la-edonr.lo
+  CC       module/icp/algs/modes/libicp_la-modes.lo
+  CC       module/icp/algs/modes/libicp_la-gcm_generic.lo
+  CC       module/icp/algs/modes/libicp_la-gcm_pclmulqdq.lo
+  CC       module/icp/algs/modes/libicp_la-gcm.lo
+  CC       module/icp/algs/modes/libicp_la-ccm.lo
+  CC       module/icp/algs/sha2/libicp_la-sha2_generic.lo
+  CC       module/icp/algs/sha2/libicp_la-sha256_impl.lo
+  CC       module/icp/algs/sha2/libicp_la-sha512_impl.lo
+  CC       module/icp/algs/skein/libicp_la-skein.lo
+  CC       module/icp/algs/skein/libicp_la-skein_block.lo
+  CC       module/icp/algs/skein/libicp_la-skein_iv.lo
+  CC       module/icp/libicp_la-illumos-crypto.lo
+  CC       module/icp/io/libicp_la-aes.lo
+  CC       module/icp/io/libicp_la-sha2_mod.lo
+  CC       module/icp/core/libicp_la-kcf_sched.lo
+  CC       module/icp/core/libicp_la-kcf_prov_lib.lo
+  CC       module/icp/core/libicp_la-kcf_callprov.lo
+  CC       module/icp/core/libicp_la-kcf_mech_tabs.lo
+  CC       module/icp/core/libicp_la-kcf_prov_tabs.lo
+  CC       module/icp/asm-x86_64/aes/libicp_la-aeskey.lo
+  CPPAS    module/icp/asm-x86_64/aes/libicp_la-aes_amd64.lo
+  CPPAS    module/icp/asm-x86_64/aes/libicp_la-aes_aesni.lo
+  CPPAS    module/icp/asm-x86_64/modes/libicp_la-gcm_pclmulqdq.lo
+  CPPAS    module/icp/asm-x86_64/modes/libicp_la-aesni-gcm-x86_64.lo
+  CPPAS    module/icp/asm-x86_64/modes/libicp_la-aesni-gcm-avx2-vaes.lo
+  CPPAS    module/icp/asm-x86_64/modes/libicp_la-ghash-x86_64.lo
+  CPPAS    module/icp/asm-x86_64/sha2/libicp_la-sha256-x86_64.lo
+  CPPAS    module/icp/asm-x86_64/sha2/libicp_la-sha512-x86_64.lo
+  CPPAS    module/icp/asm-x86_64/blake3/libicp_la-blake3_avx2.lo
+  CPPAS    module/icp/asm-x86_64/blake3/libicp_la-blake3_avx512.lo
+  CPPAS    module/icp/asm-x86_64/blake3/libicp_la-blake3_sse2.lo
+  CPPAS    module/icp/asm-x86_64/blake3/libicp_la-blake3_sse41.lo
+  CC       lib/libnvpair/libnvpair_la-libnvpair.lo
+  CC       lib/libnvpair/libnvpair_la-libnvpair_json.lo
+  CC       lib/libnvpair/libnvpair_la-nvpair_alloc_system.lo
+  CC       module/nvpair/libnvpair_la-nvpair_alloc_fixed.lo
+  CC       module/nvpair/libnvpair_la-nvpair.lo
+  CC       module/nvpair/libnvpair_la-fnvpair.lo
+  CC       lib/libspl/libspl_la-atomic.lo
+  CC       lib/libspl/libspl_la-condvar.lo
+  CC       lib/libspl/libspl_la-cred.lo
+  CC       lib/libspl/libspl_la-getexecname.lo
+  CC       lib/libspl/libspl_la-kmem.lo
+  CC       lib/libspl/libspl_la-kmem_cache.lo
+  CC       lib/libspl/libspl_la-kstat.lo
+  CC       lib/libspl/libspl_la-libspl.lo
+  CC       lib/libspl/libspl_la-list.lo
+  CC       lib/libspl/libspl_la-mkdirp.lo
+  CC       lib/libspl/libspl_la-mutex.lo
+  CC       lib/libspl/libspl_la-page.lo
+  CC       lib/libspl/libspl_la-procfs_list.lo
+  CC       lib/libspl/libspl_la-random.lo
+  CC       lib/libspl/libspl_la-rwlock.lo
+  CC       lib/libspl/libspl_la-sid.lo
+  CC       lib/libspl/libspl_la-strlcat.lo
+  CC       lib/libspl/libspl_la-strlcpy.lo
+  CC       lib/libspl/libspl_la-taskq.lo
+  CC       lib/libspl/libspl_la-thread.lo
+  CC       lib/libspl/libspl_la-timestamp.lo
+  CC       lib/libspl/libspl_la-tunables.lo
+  CC       lib/libspl/os/linux/libspl_la-getexecname.lo
+  CC       lib/libspl/os/linux/libspl_la-gethostid.lo
+  CC       lib/libspl/os/linux/libspl_la-mnttab.lo
+  CC       lib/libspl/os/linux/libspl_la-zone.lo
+  CC       lib/libspl/libspl_assert_la-assert.lo
+  CC       lib/libspl/libspl_assert_la-backtrace.lo
+  CC       module/zstd/lib/common/libzstd_la-entropy_common.lo
+  CC       module/zstd/lib/common/libzstd_la-error_private.lo
+  CC       module/zstd/lib/common/libzstd_la-fse_decompress.lo
+  CC       module/zstd/lib/common/libzstd_la-pool.lo
+  CC       module/zstd/lib/common/libzstd_la-zstd_common.lo
+  CC       module/zstd/lib/compress/libzstd_la-fse_compress.lo
+  CC       module/zstd/lib/compress/libzstd_la-hist.lo
+  CC       module/zstd/lib/compress/libzstd_la-huf_compress.lo
+  CC       module/zstd/lib/compress/libzstd_la-zstd_compress_literals.lo
+  CC       module/zstd/lib/compress/libzstd_la-zstd_compress_sequences.lo
+  CC       module/zstd/lib/compress/libzstd_la-zstd_compress_superblock.lo
+  CC       module/zstd/lib/compress/libzstd_la-zstd_compress.lo
+  CC       module/zstd/lib/compress/libzstd_la-zstd_double_fast.lo
+  CC       module/zstd/lib/compress/libzstd_la-zstd_fast.lo
+  CC       module/zstd/lib/compress/libzstd_la-zstd_lazy.lo
+  CC       module/zstd/lib/compress/libzstd_la-zstd_ldm.lo
+  CC       module/zstd/lib/compress/libzstd_la-zstd_opt.lo
+  CC       module/zstd/lib/compress/libzstd_la-zstd_preSplit.lo
+  CC       module/zstd/lib/decompress/libzstd_la-huf_decompress.lo
+  CC       module/zstd/lib/decompress/libzstd_la-zstd_ddict.lo
+  CC       module/zstd/lib/decompress/libzstd_la-zstd_decompress.lo
+  CC       module/zstd/lib/decompress/libzstd_la-zstd_decompress_block.lo
+  CC       module/zstd/libzstd_la-zfs_zstd.lo
+  CPPAS    module/zstd/lib/decompress/libzstd_la-huf_decompress_amd64.lo
+  CC       lib/libzutil/libzutil_la-zutil_device_path.lo
+  CC       lib/libzutil/libzutil_la-zutil_import.lo
+  CC       lib/libzutil/libzutil_la-zutil_nicenum.lo
+  CC       lib/libzutil/libzutil_la-zutil_pool.lo
+  CC       lib/libzutil/os/linux/libzutil_la-zutil_setproctitle.lo
+  CC       lib/libzutil/os/linux/libzutil_la-zutil_device_path_os.lo
+  CC       lib/libzutil/os/linux/libzutil_la-zutil_import_os.lo
+  CC       module/avl/libavl_la-avl.lo
+  CC       lib/libefi/libefi_la-rdwr_efi.lo
+  CC       lib/libzfs_core/libzfs_core_la-libzfs_core.lo
+  CC       lib/libzfs_core/os/linux/libzfs_core_la-libzfs_core_ioctl.lo
+  CC       cmd/mount_zfs.o
+  CC       lib/libzfs/libzfs_la-libzfs_changelist.lo
+  CC       lib/libzfs/libzfs_la-libzfs_config.lo
+  CC       lib/libzfs/libzfs_la-libzfs_crypto.lo
+  CC       lib/libzfs/libzfs_la-libzfs_dataset.lo
+  CC       lib/libzfs/libzfs_la-libzfs_diff.lo
+  CC       lib/libzfs/libzfs_la-libzfs_import.lo
+  CC       lib/libzfs/libzfs_la-libzfs_iter.lo
+  CC       lib/libzfs/libzfs_la-libzfs_mnttab.lo
+  CC       lib/libzfs/libzfs_la-libzfs_mount.lo
+  CC       lib/libzfs/libzfs_la-libzfs_pool.lo
+  CC       lib/libzfs/libzfs_la-libzfs_share.lo
+  CC       lib/libzfs/libzfs_la-libzfs_share_nfs.lo
+  CC       lib/libzfs/libzfs_la-libzfs_sendrecv.lo
+  CC       lib/libzfs/libzfs_la-libzfs_status.lo
+  CC       lib/libzfs/libzfs_la-libzfs_util.lo
+  CC       lib/libzfs/os/linux/libzfs_la-libzfs_mount_os.lo
+  CC       lib/libzfs/os/linux/libzfs_la-libzfs_pool_os.lo
+  CC       lib/libzfs/os/linux/libzfs_la-libzfs_share_nfs.lo
+  CC       lib/libzfs/os/linux/libzfs_la-libzfs_share_smb.lo
+  CC       lib/libzfs/os/linux/libzfs_la-libzfs_util_os.lo
+  CC       tests/unit/test_zap-test_zap.o
+  CCLD     libbtree.la
+  CCLD     libunit.la
+  CCLD     librange_tree.la
+  CC       cmd/zdb/zdb-zdb.o
+  CC       cmd/zdb/zdb-zdb_il.o
+  CC       lib/libzdb/libzdb_la-libzdb.lo
+  CC       cmd/zfs/zfs_iter.o
+  CC       cmd/zfs/zfs_main.o
+  CC       cmd/zfs/zfs_project.o
+  CC       cmd/zinject/translate.o
+  CC       cmd/zinject/zinject.o
+  CC       cmd/zpool/zpool-zpool_iter.o
+  CC       cmd/zpool/zpool-zpool_main.o
+  CC       cmd/zpool/zpool-zpool_util.o
+  CC       cmd/zpool/zpool-zpool_vdev.o
+  CC       cmd/zpool/os/linux/zpool-zpool_vdev_os.o
+  CC       cmd/zstream/zstream-zstream.o
+  CC       cmd/zstream/zstream-zstream_backtrace.o
+  CC       cmd/zstream/zstream-zstream_byteswap.o
+  CC       cmd/zstream/zstream-zstream_chain.o
+  CC       cmd/zstream/zstream-zstream_decompress.o
+  CC       cmd/zstream/zstream-zstream_drop_records.o
+  CC       cmd/zstream/zstream-zstream_dump.o
+  CC       cmd/zstream/zstream-zstream_fletcher4.o
+  CC       cmd/zstream/zstream-zstream_io.o
+  CC       cmd/zstream/zstream-zstream_raw.o
+  CC       cmd/zstream/zstream-zstream_recompress.o
+  CC       cmd/zstream/zstream-zstream_redup.o
+  CC       cmd/zstream/zstream-zstream_selftest.o
+  CC       cmd/zstream/zstream-zstream_selftest_queue.o
+  CC       cmd/zstream/zstream-zstream_token.o
+  CC       cmd/zstream/zstream-zstream_queue.o
+  CC       cmd/zstream/zstream-zstream_util.o
+  CC       cmd/zstream/zstream-zstream_validate.o
+  CCLD     zgenhostid
+  CC       cmd/zed/zed-zed.o
+  CC       cmd/zed/zed-zed_conf.o
+  CC       cmd/zed/zed-zed_disk_event.o
+  CC       cmd/zed/zed-zed_event.o
+  CC       cmd/zed/zed-zed_exec.o
+  CC       cmd/zed/zed-zed_file.o
+  CC       cmd/zed/zed-zed_log.o
+  CC       cmd/zed/zed-zed_strings.o
+  CC       cmd/zed/agents/zed-fmd_api.o
+  CC       cmd/zed/agents/zed-fmd_serd.o
+  CC       cmd/zed/agents/zed-zfs_agents.o
+  CC       cmd/zed/agents/zed-zfs_diagnosis.o
+  CC       cmd/zed/agents/zed-zfs_mod.o
+  CC       cmd/zed/agents/zed-zfs_retire.o
+  CC       tests/zfs-tests/cmd/chg_usr_exec.o
+  CC       tests/zfs-tests/cmd/clonefile.o
+  CC       tests/zfs-tests/cmd/clone_mmap_cached.o
+  CC       tests/zfs-tests/cmd/clone_mmap_write.o
+  CC       tests/zfs-tests/cmd/cp_files.o
+  CC       tests/zfs-tests/cmd/ctime.o
+  CC       tests/zfs-tests/cmd/dir_rd_update.o
+  CC       tests/zfs-tests/cmd/dosmode_readonly_write.o
+  CC       tests/zfs-tests/cmd/get_diff.o
+  CC       tests/zfs-tests/cmd/rename_dir.o
+  CC       tests/zfs-tests/cmd/suid_write_to_file.o
+  CC       tests/zfs-tests/cmd/truncate_test.o
+  CC       tests/zfs-tests/cmd/zfs_diff-socket.o
+  CC       tests/zfs-tests/cmd/badsend.o
+  CC       tests/zfs-tests/cmd/btree_test-btree_test.o
+  CC       tests/zfs-tests/cmd/crypto_test.o
+  CC       tests/zfs-tests/cmd/clone_after_trunc.o
+  CC       tests/zfs-tests/cmd/devname2devid-devname2devid.o
+  CC       tests/zfs-tests/cmd/draid-draid.o
+  CC       tests/zfs-tests/cmd/raidz_epoch_test-raidz_epoch_test.o
+  CC       tests/zfs-tests/cmd/file/file_append.o
+  CC       tests/zfs-tests/cmd/file/file_check.o
+  CC       tests/zfs-tests/cmd/file/file_trunc.o
+  CC       tests/zfs-tests/cmd/file/file_write.o
+  CC       tests/zfs-tests/cmd/file/largest_file.o
+  CC       tests/zfs-tests/cmd/file/randfree_file.o
+  CC       tests/zfs-tests/cmd/file/randwritecomp.o
+  CCLD     tests/zfs-tests/cmd/manipulate_user_buffer
+  CCLD     tests/zfs-tests/cmd/mkbusy
+  CCLD     tests/zfs-tests/cmd/mkfile
+  CCLD     tests/zfs-tests/cmd/mkfiles
+  CCLD     tests/zfs-tests/cmd/mktree
+  CCLD     tests/zfs-tests/cmd/mmap_exec
+  CCLD     tests/zfs-tests/cmd/mmap_ftruncate
+  CCLD     tests/zfs-tests/cmd/mmap_seek
+  CCLD     tests/zfs-tests/cmd/mmap_sync
+  CCLD     tests/zfs-tests/cmd/mmapwrite
+  CCLD     tests/zfs-tests/cmd/readmmap
+  CCLD     tests/zfs-tests/cmd/mmap_write_sync
+  CCLD     tests/zfs-tests/cmd/mmap_read_truncate
+  CCLD     tests/zfs-tests/cmd/mmap_libaio
+  CCLD     tests/zfs-tests/cmd/rm_lnkcnt_zero_file
+  CCLD     tests/zfs-tests/cmd/stride_dd
+  CCLD     tests/zfs-tests/cmd/threadsappend
+  CC       tests/zfs-tests/cmd/checksum/edonr_test.o
+  CC       tests/zfs-tests/cmd/checksum/skein_test.o
+  CC       tests/zfs-tests/cmd/checksum/sha2_test.o
+  CC       tests/zfs-tests/cmd/checksum/blake3_test.o
+  CCLD     tests/zfs-tests/cmd/getfsuuid
+  CCLD     tests/zfs-tests/cmd/getversion
+  CCLD     tests/zfs-tests/cmd/user_ns_exec
+  CCLD     tests/zfs-tests/cmd/makedir
+  CCLD     tests/zfs-tests/cmd/mount_null_source
+  CCLD     tests/zfs-tests/cmd/renameat2
+  CCLD     tests/zfs-tests/cmd/statx
+  CCLD     tests/zfs-tests/cmd/statfs_nomount
+  CCLD     tests/zfs-tests/cmd/xattrtest
+  CC       tests/zfs-tests/cmd/linux_dos_attributes/read_dos_attributes.o
+  CCLD     tests/zfs-tests/cmd/zed_fd_spill-zedlet
+  CCLD     tests/zfs-tests/cmd/setlease
+  CC       tests/zfs-tests/cmd/linux_dos_attributes/write_dos_attributes.o
+  CCLD     tests/zfs-tests/cmd/file_fadvise
+  CCLD     tests/zfs-tests/cmd/file_uncached
+  CCLD     tests/zfs-tests/cmd/file_unlink_fh
+  CC       tests/zfs-tests/tests/functional/cp_files/seekflood.o
+  CC       tests/zfs-tests/tests/functional/hkdf/hkdf_test.o
+  CC       tests/zfs-tests/tests/functional/libzfs/many_fds.o
+  CC       tests/zfs-tests/tests/functional/tmpfile/tmpfile_001_pos.o
+  CC       tests/zfs-tests/tests/functional/tmpfile/tmpfile_002_pos.o
+  CC       tests/zfs-tests/tests/functional/tmpfile/tmpfile_003_pos.o
+  CC       tests/zfs-tests/tests/functional/tmpfile/tmpfile_stat_mode.o
+  CC       tests/zfs-tests/tests/functional/tmpfile/tmpfile_test.o
+  CC       tests/zfs-tests/tests/functional/vdev_disk/page_alignment.o
+  CC       etc/systemd/system-generators/zfs-mount-generator.o
+  CC       udev/zvol_id.o
+  CC       cmd/zpool_influxdb/zpool_influxdb.o
+  CC       lib/libzfsbootenv/libzfsbootenv_la-lzbe_device.lo
+  CC       lib/libzfsbootenv/libzfsbootenv_la-lzbe_pair.lo
+  CC       lib/libzfsbootenv/libzfsbootenv_la-lzbe_util.lo
+  CC       contrib/pam_zfs_key/pam_zfs_key_la-pam_zfs_key.lo
+ln -s -f zfs contrib/bash_completion.d/zpool
+cd contrib/pyzfs && /usr/bin/python3.13 setup.py -q  egg_info -e . build
+  CCLD     libicp.la
+  CCLD     libspl_assert.la
+  CCLD     libavl.la
+  CCLD     libefi.la
+/usr/lib/python3/dist-packages/setuptools/__init__.py:94: _DeprecatedInstaller: setuptools.installer and fetch_build_eggs are deprecated.
+!!
+
+        ********************************************************************************
+        Requirements should be satisfied by a PEP 517 installer.
+        If you are using pip, you can try `pip install --use-pep517`.
+        ********************************************************************************
+
+!!
+  dist.fetch_build_eggs(dist.setup_requires)
+/usr/lib/python3/dist-packages/setuptools/_distutils/dist.py:289: UserWarning: Unknown distribution option: 'test_suite'
+  warnings.warn(msg)
+  CCLD     libzdb.la
+  CCLD     tests/zfs-tests/cmd/chg_usr_exec
+  CCLD     tests/zfs-tests/cmd/clonefile
+  CCLD     tests/zfs-tests/cmd/clone_mmap_cached
+  CCLD     tests/zfs-tests/cmd/clone_mmap_write
+  CCLD     tests/zfs-tests/cmd/cp_files
+  CCLD     tests/zfs-tests/cmd/ctime
+  CCLD     tests/zfs-tests/cmd/dir_rd_update
+  CCLD     tests/zfs-tests/cmd/dosmode_readonly_write
+  CCLD     tests/zfs-tests/cmd/get_diff
+copying selected object files to avoid basename conflicts...
+  CCLD     tests/zfs-tests/cmd/rename_dir
+  CCLD     tests/zfs-tests/cmd/suid_write_to_file
+  CCLD     tests/zfs-tests/cmd/truncate_test
+  CCLD     tests/zfs-tests/cmd/zfs_diff-socket
+  CCLD     tests/zfs-tests/cmd/clone_after_trunc
+  CCLD     tests/zfs-tests/cmd/devname2devid
+  CCLD     tests/zfs-tests/cmd/file_append
+  CCLD     tests/zfs-tests/cmd/file_check
+  CCLD     tests/zfs-tests/cmd/file_trunc
+  CCLD     tests/zfs-tests/cmd/file_write
+  CCLD     tests/zfs-tests/cmd/largest_file
+  CCLD     tests/zfs-tests/cmd/randfree_file
+  CCLD     tests/zfs-tests/cmd/randwritecomp
+  CCLD     tests/zfs-tests/cmd/read_dos_attributes
+  CCLD     tests/zfs-tests/cmd/write_dos_attributes
+  CCLD     tests/zfs-tests/tests/functional/cp_files/seekflood
+  CCLD     tests/zfs-tests/tests/functional/tmpfile/tmpfile_001_pos
+  CCLD     tests/zfs-tests/tests/functional/tmpfile/tmpfile_002_pos
+  CCLD     tests/zfs-tests/tests/functional/tmpfile/tmpfile_003_pos
+  CCLD     tests/zfs-tests/tests/functional/tmpfile/tmpfile_stat_mode
+  CCLD     tests/zfs-tests/tests/functional/tmpfile/tmpfile_test
+  CCLD     tests/zfs-tests/tests/functional/vdev_disk/page_alignment
+  CCLD     udev/zvol_id
+  CCLD     libspl.la
+copying selected object files to avoid basename conflicts...
+  CCLD     libnvpair.la
+  CCLD     tests/unit/test_zap
+  CCLD     tests/unit/test_namecheck
+  CCLD     tests/unit/test_fletcher
+  CCLD     tests/unit/test_sha2
+  CCLD     tests/unit/test_btree
+  CCLD     tests/unit/test_cityhash
+  CCLD     tests/unit/test_nvpair
+  CCLD     tests/zfs-tests/cmd/idmap_util
+  CCLD     libzutil.la
+  CCLD     libzfs_core.la
+  CCLD     tests/zfs-tests/cmd/libzfs_input_check
+  CCLD     tests/zfs-tests/cmd/nvlist_to_lua
+  CCLD     libzfs.la
+copying selected object files to avoid basename conflicts...
+  CCLD     mount.zfs
+  CCLD     zfs_ids_to_path
+  CCLD     zfs
+  CCLD     zinject
+  CCLD     zed
+  CCLD     zpool
+  CCLD     tests/zfs-tests/cmd/badsend
+  CCLD     tests/zfs-tests/cmd/libzfs_mnttab_cache_check
+  CCLD     tests/zfs-tests/cmd/zcp_support
+  CCLD     tests/zfs-tests/cmd/send_doall
+  CCLD     tests/zfs-tests/cmd/ereports
+  CCLD     tests/zfs-tests/tests/functional/libzfs/many_fds
+  CCLD     etc/systemd/system-generators/zfs-mount-generator
+  CCLD     zpool_influxdb
+  CCLD     libzfsbootenv.la
+  CCLD     contrib/pam_zfs_key/pam_zfs_key.la
+  CCLD     libzstd.la
+  CCLD     libzpool.la
+  CCLD     raidz_test
+  CCLD     ztest
+  CCLD     zhack
+  CCLD     zdb
+  CCLD     tests/zfs-tests/cmd/btree_test
+  CCLD     zstream
+  CCLD     tests/zfs-tests/cmd/crypto_test
+  CCLD     tests/zfs-tests/cmd/draid
+  CCLD     tests/zfs-tests/cmd/raidz_epoch_test
+  CCLD     tests/zfs-tests/cmd/edonr_test
+  CCLD     tests/zfs-tests/cmd/skein_test
+  CCLD     tests/zfs-tests/cmd/sha2_test
+  CCLD     tests/zfs-tests/cmd/blake3_test
+  CCLD     tests/zfs-tests/tests/functional/hkdf/hkdf_test
+SCRIPT_COMMON=scripts/common.sh ./scripts/zfs-tests.sh -c
+make[2]: Leaving directory '/root/kh/zfs'
+make[1]: Leaving directory '/root/kh/zfs'

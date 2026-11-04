@@ -1,0 +1,2 @@
+rev-parse HEAD: 91df27c68d49809eba85f1167f7a8c958f7a24dd
+status --porcelain | wc -l: 0

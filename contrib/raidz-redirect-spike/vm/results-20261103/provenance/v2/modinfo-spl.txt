@@ -1,0 +1,27 @@
+filename:       /root/kh/zfs/module/spl.ko
+version:        2.4.99-1
+license:        GPL
+author:         OpenZFS
+description:    Solaris Porting Layer
+srcversion:     416A9EC5515380D6BDC3382
+depends:        
+name:           spl
+retpoline:      Y
+vermagic:       6.12.113+deb13-cloud-amd64 SMP preempt mod_unload modversions 
+parm:           spl_taskq_thread_bind:Bind taskq thread to CPU by default (int)
+parm:           spl_taskq_thread_timeout_ms:Minimum idle threads exit interval for dynamic taskqs (uint)
+parm:           spl_taskq_thread_dynamic:Allow dynamic taskq threads (int)
+parm:           spl_taskq_thread_priority:Allow non-default priority for taskq threads (int)
+parm:           spl_taskq_thread_sequential:Create new taskq threads after N sequential tasks (uint)
+parm:           spl_taskq_kick:Write nonzero to kick stuck taskqs to spawn more threads
+parm:           spl_kmem_alloc_warn:Warning threshold in bytes for a kmem_alloc() (uint)
+parm:           spl_kmem_alloc_max:Maximum size in bytes for a kmem_alloc() (uint)
+parm:           spl_kmem_cache_magazine_size:Default magazine size (2-256), set automatically (0) (uint)
+parm:           spl_kmem_cache_obj_per_slab:Number of objects per slab (uint)
+parm:           spl_kmem_cache_max_size:Maximum size of slab in MB (uint)
+parm:           spl_kmem_cache_slab_limit:Objects less than N bytes use the Linux slab (uint)
+parm:           spl_kmem_cache_kmem_threads:Number of spl_kmem_cache threads (uint)
+parm:           spl_hostid:The system hostid. (ulong)
+parm:           spl_hostid_path:The system hostid file (/etc/hostid) (charp)
+parm:           spl_panic_halt:Cause kernel panic on assertion failures (uint)
+parm:           spl_schedule_hrtimeout_slack_us:schedule_hrtimeout_range() delta/slack value in us, default(0)

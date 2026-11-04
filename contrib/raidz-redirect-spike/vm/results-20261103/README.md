@@ -31,3 +31,19 @@ kernel `6.12.113+deb13-cloud-amd64`, modules built with `--enable-debug`.
   no host name, domain, IP or MAC address.
 
 Nothing else was edited.
+
+## Provenance
+
+`provenance/v2/` and `provenance/v1/` hold, for each tree: `git.txt` (HEAD
+and a clean `git status`), `build.log` (configure and make), the full
+`modinfo` of `zfs.ko` and `spl.ko`, their sha256 and size
+(`modules-sha256-size.txt`), and the `inputs.sha256` that `kh.sh setup`
+wrote for the run's inputs.
+
+- The loaded srcversion was compared with the built `zfs.ko`'s at every
+  load (`CHECK load srcversion` in `kh.log`); `spl.ko` was not compared.
+- `spl.ko` has the same srcversion in both trees but a different sha256.
+- v1's `modinfo` shows `/root/kh/zfs-v1`: the worktree was moved there
+  after the v1 runs, which loaded the same files from `/root/kh/zfs`.
+- The v1 and v2 inputs were created separately, so their `inputs.sha256`
+  differ.
