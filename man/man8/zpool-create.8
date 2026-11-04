@@ -18,7 +18,7 @@
 .\" Copyright (c) 2017 Open-E, Inc. All Rights Reserved.
 .\" Copyright (c) 2021, Colm Buckley <colm@tuatha.org>
 .\"
-.Dd July 11, 2022
+.Dd November 4, 2026
 .Dt ZPOOL-CREATE 8
 .Os
 .
@@ -57,9 +57,13 @@ The pool names
 .Sy mirror ,
 .Sy raidz ,
 .Sy draid ,
-.Sy spare
+.Sy spare ,
+.Sy log ,
+.Sy fgroup ,
+.Sy fdomain ,
+.Sy failure_group
 and
-.Sy log
+.Sy failure_domain
 are reserved, as are names beginning with
 .Sy mirror ,
 .Sy raidz ,
