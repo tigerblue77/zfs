@@ -1047,7 +1047,9 @@ Limits of this run:
   `destroy-sync-zil-leak-v3`.
 - The counts above are copied from `kh.sh summary`; the text logs of
   both runs are published with
-  [the run logs at `28f2f17707`](https://github.com/tigerblue77/zfs/tree/28f2f177074e99934bdadb8c8120277cdaeef93a/contrib/raidz-redirect-spike/vm/results-20261103).
+  [the run logs at `ab14c4c315`](https://github.com/tigerblue77/zfs/tree/ab14c4c3157f6823bcd5ca1a1cfd9237a539b09a/contrib/raidz-redirect-spike/vm/results-20261103),
+  whose `provenance/` holds each tree's build log, the `modinfo` and
+  sha256 of its modules and the inputs' `inputs.sha256`.
 
 Source: [the procedure and script at `d07e30bdb3`](https://github.com/tigerblue77/zfs/tree/d07e30bdb3929c9f303d065de47af0987b362634/contrib/raidz-redirect-spike/vm).
 
