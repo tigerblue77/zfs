@@ -994,7 +994,8 @@ old DVAs.
 
 The census counts ZIL DVAs apart: in (e) it reached 0 while `zil_old` stayed
 at 31 until the key was loaded, so a completeness gate that counted ZIL
-blocks would still refuse there (point 11).
+blocks would still refuse there (point 11), and this census 0 is not the
+allocation-backed zero-weak gate either.
 
 The first tree differed in three cases, each reproduced and fixed in
 userspace with `kmover_user` before the second run:
@@ -1041,6 +1042,9 @@ Limits of this run:
   read-only imports.
 - The mover is still the probe's, without a feature flag for the table or
   a reservation during a move.
+- The result belongs to `d07e30bdb3` (code `ae8dc980e9`) and the destroy
+  fix it carries (`57fbbb65bd`); it does not validate the revised fix on
+  `destroy-sync-zil-leak-v3`.
 - The counts above are copied from `kh.sh summary`; the text logs of
   both runs are published with
   [the run logs at `28f2f17707`](https://github.com/tigerblue77/zfs/tree/28f2f177074e99934bdadb8c8120277cdaeef93a/contrib/raidz-redirect-spike/vm/results-20261103).
