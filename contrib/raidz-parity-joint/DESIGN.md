@@ -148,7 +148,7 @@ proof that every allocated old-layout extent has been covered.
 | Rewind | No floor: -F stays inside the defer window; -X and -T may find a tail reused, and the block then fails its checksum, as after any free. Gap: txgs that defer no frees. A move is refused while a checkpoint exists | Durable floor refuses roots older than released backing; current prototype also retains native checkpoint roots and pins reclaim |
 | Space | Pre-flight built: ENOSPC unless the end state and the packed new extents fit above the slop. Pool-level charge from the table, subtracted in `spa_update_dspace()`, so the DMU refuses on it; dsize unchanged. No reservation during a move | Physical credits and standing growth reserve drive admission; public quota/reservation/AVAIL promises still need agreement and qualification |
 | Completeness | Walk census is test code and does not change reported tolerance; an allocation-based inventory must cover pending frees and async destruction | Owner/identity inventory reconciled with native allocation state; durable zero-weak census gates the stronger certificate |
-| Implementation status | Userspace libzpool on file vdevs, debug build, scale runs also with a release libzpool (`LIBZPOOL_CPPFLAGS` overridden); never kernel-built; no ZTS, no real disks; mover driven by probes; no feature flag; vdev_raidz.c +2,866 lines net, 823 more in 12 other files, on 94407d4003. Hybrid fixture: one unencrypted head plus one snapshot, plain-file objects; under the hybrid, no gang, dedup or clone case (the all-redirect probes move gang headers and children) | Userspace and a Linux kernel experiment; finite fixtures and exact-source checks, with remaining activation/repair/resource gaps |
+| Implementation status | Userspace libzpool on file vdevs, debug build, scale runs also with a release libzpool (`LIBZPOOL_CPPFLAGS` overridden); never kernel-built at that commit; its movers, built into the module on `spike/kernel-hybrid-v2` and started from a test-only parameter, ran once in a Linux 6.12 kernel (section 4, *Kernel run of the hybrid prototype*); no ZTS, no real disks; mover driven by probes; no feature flag; vdev_raidz.c +2,866 lines net, 823 more in 12 other files, on 94407d4003. Hybrid fixture: one unencrypted head plus one snapshot, plain-file objects; under the hybrid, no gang, dedup or clone case at that commit (the all-redirect probes move gang headers and children; the kernel branch adds a hybrid gang and `copies=2` case, section 4) | Userspace and a Linux kernel experiment; finite fixtures and exact-source checks, with remaining activation/repair/resource gaps |
 
 Proposed convergence to measure: normal rewrite for exclusively owned,
 key-loaded heads, redirects for snapshot/clone-held, dedup/BRT-shared and
@@ -900,6 +900,151 @@ The core adapter and measurement reports are published on the separate
 The mixed shared extensions and complete resource/failure collectors
 remain open. Large author-local raw fixtures are not embedded in this
 document.
+
+### Kernel run of the hybrid prototype
+
+Draft by tigerblue77, 4 November. Kernel evidence for the redirect
+prototype only, kept apart from the userspace table above and from the
+virtual/backing kernel observations: it is no common kernel run and no
+performance comparison with them.
+
+The probes' hybrid and all-redirect movers, built into the module and
+started from a test-only module parameter, ran on one disposable VM, on the
+common generator unchanged. A first tree passed most checks and found
+three problems; a second tree fixes them and passed every check, the six
+crash cuts included: 734 PASS, 0 FAIL. Both are debug builds, and each
+case ran once.
+
+| Identity | Value |
+| --- | --- |
+| Second tree (all results below) | `spike/kernel-hybrid-v2` `d07e30bdb3`, code at `ae8dc980e9` |
+| First tree | `spike/kernel-hybrid` `91df27c68d` |
+| Procedure | `contrib/raidz-redirect-spike/vm/VM-kernel-hybrid.md` and `kh.sh` (sha256 `2984adb7ac76…bd9215`) in the second tree |
+| Generator | `6319a29f86`, unchanged, built against each tree with `build.py --profile debug`; inputs created on the VM |
+| Kernel and VM | Debian 13, `6.12.113+deb13-cloud-amd64` at every module load, 16 vCPU, 11.6 GiB RAM, ARC at its default |
+| Modules | `./configure --enable-debug`, `make -j8`: rc 0, no modpost `undefined!`, 83 objtool `__noreturn` warnings; loaded with the tree's `scripts/zfs.sh`, loaded srcversion equal to the built `zfs.ko`'s at every load |
+
+Inputs and feature state. The generator's pools, as in the table above:
+five 256 MiB sparse file vdevs, raidz1, ashift 12, compression off,
+copies=1, only `raidz_parity_epochs` enabled explicitly; the eight 100-unit
+inputs for (a), and 1000-unit (125 MiB) inputs at 16 KiB, 30 % retained
+for (b) and (f) and 100 % retained for (c). `feature@physical_rewrite` is
+enabled with `zpool set` before either mover in (a), (b) and (f), as in the
+1 November rerun. The epoch adds `{0, 5, 1, T, 5, 2}` to vdev 0. Cases (d)
+and (e) use a pool the kernel creates: raidz1 of five 256 MiB files,
+ashift 12, compression off, every feature enabled. Payload checks are the
+generator's `verify` in userspace on the exported files; (d) and (e)
+compare files through the kernel's mount; zdb runs `-bcc`.
+
+(a) Each input through each mover, on a fresh copy: kernel import, epoch,
+move, export, `verify`, read-only import and census, `drop-retained`,
+read-only census, `verify`, scrub, zdb; then the same input through
+`kmover_user`, the same mover code in userspace, with the file
+information callback the kernel's ZPL registers. All 16 runs pass. Each
+entry is a cold read-only count after the move, then after
+`drop-retained`; the counts equal the 1 November columns above in every
+cell, and the userspace leg's on the same VM. Mover times are one kernel
+run against one userspace run on the same VM, for orientation only.
+
+| Input | Hybrid entries | All-redirect entries | Mover ms, kernel / userspace: hybrid; all-redirect |
+| --- | --- | --- | --- |
+| 128 KiB, 0% retained | 0 → 0 | 116 → 116 | 93 / 116; 371 / 393 |
+| 128 KiB, 10% retained | 26 → 0 | 132 → 106 | 148 / 189; 391 / 435 |
+| 128 KiB, 30% retained | 46 → 0 | 132 → 86 | 190 / 239; 393 / 458 |
+| 128 KiB, 100% retained | 130 → 14 | 130 → 14 | 404 / 422; 366 / 412 |
+| 16 KiB, 0% retained | 0 → 0 | 816 → 816 | 153 / 219; 2413 / 2446 |
+| 16 KiB, 10% retained | 96 → 0 | 832 → 736 | 383 / 462; 2410 / 2538 |
+| 16 KiB, 30% retained | 256 → 0 | 832 → 576 | 835 / 909; 2440 / 2436 |
+| 16 KiB, 100% retained | 830 → 14 | 830 → 14 | 2263 / 2299; 2271 / 2259 |
+
+Kept sectors equal the userspace leg in every run, and the 1 November
+debug tree in all but 16 KiB, 0 % all-redirect: 9688 KiB in kernel and
+userspace against 9696, the two-sector variation noted above. At 100 %
+retained the hybrid redirects the head's 14 metadata blocks in its first
+census round, in the kernel as in userspace (`round1=14`).
+
+(b) Dry runs on the 125 MiB input: hybrid 7557 ms, redirect 25251 ms.
+Then, for each mover, a fresh copy is prepared and synced, the move
+started, and `echo b > /proc/sysrq-trigger` written after 20, 50 and 80 %
+of the dry run's time, with no sync in between. After each reboot,
+`b-check` imports, censuses, exports, verifies and runs zdb on the cut
+state, then moves again to the end, scrubs, verifies, drops the retained
+snapshot, verifies and runs zdb: 18 checks.
+
+| Mover | Cut at | Left at import | Entries | Checks |
+| --- | --- | --- | --- | --- |
+| Hybrid | 1.51 s (20 %) | 7536 | 512 | 18/18 |
+| Hybrid | 3.78 s (50 %) | 6768 | 1280 | 18/18 |
+| Hybrid | 6.05 s (80 %) | 6000 | 2048 | 18/18 |
+| All-redirect | 5.05 s (20 %) | 6640 | 1408 | 18/18 |
+| All-redirect | 12.63 s (50 %) | 4336 | 3712 | 18/18 |
+| All-redirect | 20.20 s (80 %) | 2032 | 6016 | 18/18 |
+
+Every cut came during the move; at import, `damaged` was 0 and the
+entries reached from block pointers equalled the entries, each a
+multiple of the mover's 128-DVA batch, and left plus entries made the 8048
+old DVAs.
+
+| Case | Input | Result |
+| --- | --- | --- |
+| (c) Too full | 100 % retained input, 8046 old DVAs, plus 450 MiB written at parity 2 into a sparse volume | Refused by the pre-flight (`rc=28`), nothing moved; free 276.5 MB, new extents 296.9 MB, of which 274.7 MB pack (the procedure's userspace figures: 277, 297, 275). Forced: 7283 moved, the other 763 refused with ENOSPC in each of 4 passes, pool not suspended (userspace: 7249 to 7280 moved, 766 to 797 left). After the volume's destroy: census 0, scrub, `verify` and zdb pass |
+| (d) Gang | `copies=2` dataset, 8 files of 1 MiB written with forced ganging, snapshot, 4 overwritten; hybrid with the dataset as head | 2078 old DVAs, 1936 gang, 256 headers of the old fixed size, 1642 redirected, 32 rewritten, census 0, head and snapshot data identical, scrub and zdb pass (userspace, on the pool `kh_gang.c` builds the same way: 2008, 1928, 256, 1597, 32). With `nogang`, 192 gang DVAs left, `rc=11`, as designed |
+| (e) Keyless ZIL | aes-256-gcm dataset, snapshot, pool frozen, then 12 files written with `dd conv=fsync`; imported without the key; hybrid | 141 old DVAs and 31 old ZIL DVAs. Census 0 after the move, cold census 0 and `damaged` 0, the 31 ZIL DVAs untouched. After `load-key` and mount the log replays; every acknowledged write, base file and snapshot file reads back; `zil_old` 0; scrub and zdb pass |
+| (f) Offline, replace | 125 MiB input, all-redirect move, a child offlined 3 s into it | Move ends DEGRADED with census 0; online, resilver (53.5M), then a scrub repairing 0B with no error on any vdev; replace of another child, then a scrub repairing 0B; `verify` and zdb pass |
+
+The census counts ZIL DVAs apart: in (e) it reached 0 while `zil_old` stayed
+at 31 until the key was loaded, so a completeness gate that counted ZIL
+blocks would still refuse there (point 11).
+
+The first tree differed in three cases, each reproduced and fixed in
+userspace with `kmover_user` before the second run:
+
+- (a) At 100 % retained the hybrid left 116 and 816 entries instead of 130
+  and 830, every correctness check passing. The kernel's ZPL registers a
+  file information callback for `DMU_OST_ZFS`, so the mover's read-write
+  ownership of the fixture root, created by libzpool without user
+  accounting, started its accounting upgrade, which rewrote the head's
+  dnodes at the new parity during the move. The mover now owns the head
+  with `dmu_objset_own_obj()`, and the userspace leg registers the same
+  callback.
+- (c) After the volume's destroy, zdb found 208896 bytes leaked. Not the
+  mover: on a pool without `async_destroy`, a synchronous destroy frees an
+  intent log only while it is claimed, and the volume's minor resets a
+  clean log at import except its first block. Reproduced in userspace with
+  and without a move and on master. The second tree carries a fix in
+  `dsl_destroy.c`, and its run logs that block before the destroy:
+  208896 bytes.
+- (d) The first census failed with ECKSUM: with
+  `feature@dynamic_gang_header` active, headers written before it became
+  active hold 512 bytes. The census and the liveness check now accept
+  either size, as `zio_checksum_error()` does.
+
+The first tree's hybrid 20 % and 50 % cuts gave the same counts and checks
+as the second's.
+
+Limits of this run:
+
+- One VM, one debug build, one run per case. File vdevs on the guest's
+  disk. A cut crashes the guest only: it loses what the guest had not
+  written to its disk, and the host keeps the rest, so a host power loss
+  is not covered.
+- The mover redirects before it rewrites, and no cut went past 2048 of the
+  hybrid's 2420 redirects or 6016 of the all-redirect's 8048: none reached
+  the rewrite, the census rounds, a final-reference free or the epoch's
+  activation, and none had a member missing or stale (section 4, item 7).
+- (f) ran the all-redirect mover only. The clones in (d) and (e) were
+  created after the move, to read the snapshots.
+- Not run: dedup or BRT sharing, a clone that exists before the move, an
+  ordinary read held across reuse, writes or destroys during a move,
+  several top-level vdevs, real disks, ZTS, a release build, table memory
+  or allocator charge, walk against scrub, and member hashes around
+  read-only imports.
+- The mover is still the probe's, without a feature flag for the table or
+  a reservation during a move.
+- The logs stay on the VM; the counts above are copied from `kh.sh
+  summary`.
+
+Source: [the procedure and script at `d07e30bdb3`](https://github.com/tigerblue77/zfs/tree/d07e30bdb3929c9f303d065de47af0987b362634/contrib/raidz-redirect-spike/vm).
 
 ## 5. Landing order
 
