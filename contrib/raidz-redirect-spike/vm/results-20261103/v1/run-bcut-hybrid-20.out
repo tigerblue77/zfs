@@ -1,0 +1,6 @@
+CHECK load srcversion PASS
+CHECK load trigger PASS
+INFO load tree=91df27c68d49809eba85f1167f7a8c958f7a24dd 6.12.113+deb13-cloud-amd64 mover=idle
+BEGIN b-cut-hybrid-20 2026-11-03T13:54:19+01:00
+MOVER b-cut-hybrid-20 cmd=epoch pool=jointfixture epoch_txg=35 width=5 parity=2 ms=24 rc=0
+CUT b-cut-hybrid-20: echo b > /proc/sysrq-trigger 1.52 s into the move (dry run 7583 ms)

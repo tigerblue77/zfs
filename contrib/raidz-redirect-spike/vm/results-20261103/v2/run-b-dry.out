@@ -1,0 +1,22 @@
+CHECK load srcversion PASS
+CHECK load trigger PASS
+INFO load tree=d07e30bdb3929c9f303d065de47af0987b362634 6.12.113+deb13-cloud-amd64 mover=cmd=census pool=jointfixture epoch_txg=32 census_err=0 census_left=0 gang_dvas=0 gang_left=0 gang_small=0 zil_old=0 live=14 kept=73728 entries=14 tombstones=0 damaged=0 extra=172032 ms=9 rc=0
+BEGIN b-dry-hybrid 2026-11-03T15:19:41+01:00
+CHECK b-dry-hybrid prep PASS
+CHECK b-dry-hybrid move PASS
+CHECK b-dry-hybrid census0 PASS
+CHECK b-dry-hybrid export PASS
+CHECK b-dry-hybrid verify PASS
+CHECK b-dry-hybrid zdb PASS
+CHECK b-dry-hybrid dmesg_clean PASS
+END b-dry-hybrid 2026-11-03T15:19:54+01:00
+BEGIN b-dry-redirect 2026-11-03T15:19:54+01:00
+CHECK b-dry-redirect prep PASS
+CHECK b-dry-redirect move PASS
+CHECK b-dry-redirect census0 PASS
+CHECK b-dry-redirect export PASS
+CHECK b-dry-redirect verify PASS
+CHECK b-dry-redirect zdb PASS
+CHECK b-dry-redirect dmesg_clean PASS
+END b-dry-redirect 2026-11-03T15:20:26+01:00
+DONE b-dry 2026-11-03T15:20:26+01:00: 0 checks failed

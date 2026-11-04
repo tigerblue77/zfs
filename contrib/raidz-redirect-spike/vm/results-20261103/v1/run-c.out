@@ -1,0 +1,43 @@
+CHECK load srcversion PASS
+CHECK load trigger PASS
+INFO load tree=91df27c68d49809eba85f1167f7a8c958f7a24dd 6.12.113+deb13-cloud-amd64 mover=cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=35 head_rw=0 census_dvas=8048 to_redirect=8048 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=1074823168 pf_slop=168018280 pf_need_end=213876736 pf_new=296927232 pf_packed=296927232 pf_left=777388032 pf_need_left=184500584 pf_keep=98549760 redirected=8048 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=25102 move_txgs=66 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=8048 kept=98549760 entries=8048 tombstones=0 damaged=0 extra=197394432 ms=25116 rc=0
+BEGIN c-refused 2026-11-03T11:09:33+01:00
+CHECK c-refused import PASS
+CHECK c-refused epoch PASS
+CHECK c-refused fill_zvol PASS
+CHECK c-refused fill_dev PASS
+INFO c-refused fill rc=0 size,alloc,free=1275068416,998555648,276512768
+MOVER c-refused cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=34 head_rw=0 census_dvas=8046 to_redirect=8046 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=28 pf_free=276512768 pf_slop=168018280 pf_need_end=213848064 pf_new=296902656 pf_packed=274968576 pf_left=983040 pf_need_left=184496488 pf_keep=98533376 why=refused_by_preflight ms=41 rc=28
+CHECK c-refused refused_enospc PASS
+CHECK c-refused by_preflight PASS
+MOVER c-refused cmd=census pool=jointfixture epoch_txg=34 census_err=0 census_left=8046 gang_dvas=0 gang_left=0 zil_old=0 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=19 rc=0
+CHECK c-refused nothing_moved PASS
+CHECK c-refused export PASS
+CHECK c-refused verify1 PASS
+CHECK c-refused zdb1 PASS
+CHECK c-refused dmesg_clean PASS
+END c-refused 2026-11-03T11:09:46+01:00
+BEGIN c-forced 2026-11-03T11:09:46+01:00
+CHECK c-forced import PASS
+MOVER c-forced cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=1 epoch_txg=34 head_rw=0 census_dvas=8046 to_redirect=8046 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=28 pf_free=276291584 pf_slop=168018280 pf_need_end=213848064 pf_new=296902656 pf_packed=274710528 pf_left=1044480 pf_need_left=184496488 pf_keep=98533376 redirected=7345 refused=2804 read_errs=0 errs=28:2804 rewritten=0 rewrite_err=0 round1=701 round2=701 round3=701 mover_ms=27653 move_txgs=84 census_err=0 census_left=701 gang_dvas=0 gang_left=0 zil_old=0 live=7345 kept=89919488 entries=7345 tombstones=0 damaged=0 extra=180142080 ms=27678 rc=11
+CHECK c-forced rc_eagain PASS
+CHECK c-forced only_enospc PASS
+CHECK c-forced partial PASS
+CHECK c-forced not_suspended PASS
+CHECK c-forced export PASS
+CHECK c-forced verify2 PASS
+CHECK c-forced zdb2 PASS
+CHECK c-forced dmesg_clean PASS
+END c-forced 2026-11-03T11:10:21+01:00
+BEGIN c-freed 2026-11-03T11:10:21+01:00
+CHECK c-freed import PASS
+CHECK c-freed destroy_fill PASS
+CHECK c-freed move PASS
+CHECK c-freed census0 PASS
+CHECK c-freed scrub0 PASS
+CHECK c-freed export PASS
+CHECK c-freed verify3 PASS
+CHECK c-freed zdb3 FAIL: zdbok /var/tmp/kh/c/full 3
+CHECK c-freed dmesg_clean PASS
+END c-freed 2026-11-03T11:10:30+01:00
+DONE c 2026-11-03T11:10:30+01:00: 1 checks failed

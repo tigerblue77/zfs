@@ -1,0 +1,15 @@
+  pool: khpool
+ state: ONLINE
+  scan: scrub repaired 0B in 00:00:00 with 0 errors on Tue Nov  3 15:21:30 2026
+config:
+
+	NAME                       STATE     READ WRITE CKSUM
+	khpool                     ONLINE       0     0     0
+	  raidz1-0                 ONLINE       0     0     0
+	    /var/tmp/kh/d/gang/v0  ONLINE       0     0     0
+	    /var/tmp/kh/d/gang/v1  ONLINE       0     0     0
+	    /var/tmp/kh/d/gang/v2  ONLINE       0     0     0
+	    /var/tmp/kh/d/gang/v3  ONLINE       0     0     0
+	    /var/tmp/kh/d/gang/v4  ONLINE       0     0     0
+
+errors: No known data errors

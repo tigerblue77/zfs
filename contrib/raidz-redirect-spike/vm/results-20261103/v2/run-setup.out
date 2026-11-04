@@ -1,0 +1,16 @@
+CHECK setup generator PASS
+CHECK setup kmover_user PASS
+CHECK load srcversion PASS
+CHECK load trigger PASS
+INFO load tree=d07e30bdb3929c9f303d065de47af0987b362634 6.12.113+deb13-cloud-amd64 mover=idle
+CHECK setup input-r128-p0 PASS
+CHECK setup input-r128-p10 PASS
+CHECK setup input-r128-p30 PASS
+CHECK setup input-r128-p100 PASS
+CHECK setup input-r16-p0 PASS
+CHECK setup input-r16-p10 PASS
+CHECK setup input-r16-p30 PASS
+CHECK setup input-r16-p100 PASS
+CHECK setup input-r16-p30-u1000 PASS
+CHECK setup input-r16-p100-u1000 PASS
+DONE setup 2026-11-03T15:15:51+01:00: 0 checks failed

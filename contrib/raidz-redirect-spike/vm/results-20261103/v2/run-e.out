@@ -1,0 +1,41 @@
+CHECK load srcversion PASS
+CHECK load trigger PASS
+INFO load tree=d07e30bdb3929c9f303d065de47af0987b362634 6.12.113+deb13-cloud-amd64 mover=cmd=move pool=khpool mode=hybrid head=khpool/g gang=0 force=0 epoch_txg=36 head_rw=1 census_dvas=136 to_redirect=97 to_rewrite=39 gang_dvas=288 gang_small=0 zil_old=1 preflight=0 pf_free=1228521472 pf_slop=168018280 pf_need_end=1550336 pf_new=1191936 pf_packed=1191936 pf_left=1226735616 pf_need_left=168376680 pf_keep=794624 redirected=97 refused=0 read_errs=0 errs= rewritten=32 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=153 move_txgs=7 census_err=0 census_left=192 gang_dvas=192 gang_left=192 gang_small=0 zil_old=1 live=97 kept=794624 entries=97 tombstones=0 damaged=0 extra=1191936 ms=169 rc=11
+BEGIN e-keyless-zil 2026-11-03T15:21:32+01:00
+CHECK e-keyless-zil create_pool PASS
+CHECK e-keyless-zil create PASS
+CHECK e-keyless-zil snapshot PASS
+CHECK e-keyless-zil freeze PASS
+CHECK e-keyless-zil unmount_frozen PASS
+CHECK e-keyless-zil export_frozen PASS
+INFO e-keyless-zil zdb -ivv: 50 TX_WRITE lines
+CHECK e-keyless-zil import_nokey PASS
+CHECK e-keyless-zil keyless PASS
+CHECK e-keyless-zil epoch PASS
+MOVER e-keyless-zil cmd=census pool=khpool epoch_txg=40 census_err=0 census_left=141 gang_dvas=0 gang_left=0 gang_small=0 zil_old=31 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=14 rc=0
+CHECK e-keyless-zil zil_old_before PASS
+MOVER e-keyless-zil cmd=move pool=khpool mode=hybrid head=khpool gang=1 force=0 epoch_txg=40 head_rw=1 census_dvas=141 to_redirect=117 to_rewrite=24 gang_dvas=0 gang_small=0 zil_old=31 preflight=0 pf_free=1262993408 pf_slop=168018280 pf_need_end=3913728 pf_new=10137600 pf_packed=10137600 pf_left=1252208640 pf_need_left=168356200 pf_keep=851968 redirected=141 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=24 round2=0 round3=0 mover_ms=168 move_txgs=8 census_err=0 census_left=0 gang_dvas=0 gang_left=0 gang_small=0 zil_old=31 live=141 kept=1048576 entries=141 tombstones=0 damaged=0 extra=3870720 ms=187 rc=0
+CHECK e-keyless-zil move_rc0 PASS
+CHECK e-keyless-zil census0 PASS
+CHECK e-keyless-zil zil_kept PASS
+CHECK e-keyless-zil export PASS
+CHECK e-keyless-zil cold_import PASS
+MOVER e-keyless-zil cmd=census pool=khpool epoch_txg=40 census_err=0 census_left=0 gang_dvas=0 gang_left=0 gang_small=0 zil_old=31 live=141 kept=1048576 entries=141 tombstones=0 damaged=0 extra=3870720 ms=19 rc=0
+CHECK e-keyless-zil cold_census0 PASS
+CHECK e-keyless-zil cold_damaged0 PASS
+CHECK e-keyless-zil load_key PASS
+CHECK e-keyless-zil mount_replays PASS
+CHECK e-keyless-zil acked_writes PASS
+CHECK e-keyless-zil base_files PASS
+CHECK e-keyless-zil clone PASS
+CHECK e-keyless-zil snapshot_files PASS
+CHECK e-keyless-zil clone_destroy PASS
+MOVER e-keyless-zil cmd=census pool=khpool epoch_txg=40 census_err=0 census_left=0 gang_dvas=0 gang_left=0 gang_small=0 zil_old=0 live=115 kept=811008 entries=115 tombstones=0 damaged=0 extra=3477504 ms=11 rc=0
+CHECK e-keyless-zil zil_replayed PASS
+CHECK e-keyless-zil census0_after PASS
+CHECK e-keyless-zil scrub0 PASS
+CHECK e-keyless-zil export2 PASS
+CHECK e-keyless-zil zdb PASS
+CHECK e-keyless-zil dmesg_clean PASS
+END e-keyless-zil 2026-11-03T15:21:35+01:00
+DONE e 2026-11-03T15:21:36+01:00: 0 checks failed

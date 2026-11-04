@@ -1,0 +1,35 @@
+CHECK load srcversion PASS
+CHECK load trigger PASS
+INFO load tree=91df27c68d49809eba85f1167f7a8c958f7a24dd 6.12.113+deb13-cloud-amd64 mover=cmd=census pool=khpool epoch_txg=40 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=103 kept=729088 entries=103 tombstones=0 damaged=0 extra=3379200 ms=10 rc=0
+BEGIN f-offline 2026-11-03T11:10:39+01:00
+CHECK f-offline import PASS
+CHECK f-offline feature PASS
+CHECK f-offline epoch PASS
+CHECK f-offline offline_during_move PASS
+CHECK f-offline offline PASS
+MOVER f-offline cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=35 head_rw=0 census_dvas=8048 to_redirect=8048 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=1074823168 pf_slop=168018280 pf_need_end=213876736 pf_new=296927232 pf_packed=296927232 pf_left=777412608 pf_need_left=184500584 pf_keep=98549760 redirected=8048 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=24732 move_txgs=68 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=8048 kept=98549760 entries=8048 tombstones=0 damaged=0 extra=197394432 ms=24748 rc=0
+CHECK f-offline move_rc0 PASS
+CHECK f-offline census0 PASS
+CHECK f-offline degraded PASS
+CHECK f-offline online PASS
+CHECK f-offline resilver PASS
+CHECK f-offline healthy PASS
+CHECK f-offline scrub0 PASS
+MOVER f-offline cmd=census pool=jointfixture epoch_txg=35 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=8048 kept=98549760 entries=8048 tombstones=0 damaged=0 extra=197394432 ms=16 rc=0
+CHECK f-offline census0_after PASS
+CHECK f-offline export PASS
+CHECK f-offline verify1 PASS
+CHECK f-offline zdb1 PASS
+CHECK f-offline dmesg_clean PASS
+END f-offline 2026-11-03T11:11:12+01:00
+BEGIN f-replace 2026-11-03T11:11:12+01:00
+CHECK f-replace import PASS
+CHECK f-replace replace PASS
+CHECK f-replace resilver PASS
+CHECK f-replace scrub0 PASS
+CHECK f-replace export PASS
+CHECK f-replace verify2 PASS
+CHECK f-replace zdb2 PASS
+CHECK f-replace dmesg_clean PASS
+END f-replace 2026-11-03T11:11:19+01:00
+DONE f 2026-11-03T11:11:19+01:00: 0 checks failed

@@ -1,0 +1,51 @@
+CHECK load srcversion PASS
+CHECK load trigger PASS
+INFO load tree=91df27c68d49809eba85f1167f7a8c958f7a24dd 6.12.113+deb13-cloud-amd64 mover=cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=34 head_rw=0 census_dvas=701 to_redirect=701 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=879632384 pf_slop=168018280 pf_need_end=18663424 pf_new=25841664 pf_packed=25841664 pf_left=853266432 pf_need_left=169453928 pf_keep=8613888 redirected=701 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=2255 move_txgs=9 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=8046 kept=98533376 entries=8046 tombstones=0 damaged=0 extra=197369856 ms=2284 rc=0
+BEGIN d-gang 2026-11-03T11:10:30+01:00
+CHECK d-gang create_pool PASS
+CHECK d-gang create PASS
+CHECK d-gang snapshot PASS
+CHECK d-gang unmount PASS
+CHECK d-gang export0 PASS
+CHECK d-gang gang_blocks PASS
+CHECK d-gang import2 PASS
+CHECK d-gang epoch PASS
+MOVER d-gang cmd=move pool=khpool mode=hybrid head=khpool/g gang=1 force=0 epoch_txg=36 head_rw=1 why=census_failed census_err=52 ms=42 rc=52
+CHECK d-gang gang_found FAIL: gt0 
+CHECK d-gang move_rc0 FAIL: eq 52 0
+CHECK d-gang census0 FAIL: eq  0
+CHECK d-gang mount PASS
+CHECK d-gang data_head PASS
+CHECK d-gang clone PASS
+CHECK d-gang data_snapshot PASS
+CHECK d-gang clone_destroy PASS
+CHECK d-gang scrub0 PASS
+CHECK d-gang export PASS
+CHECK d-gang zdb PASS
+CHECK d-gang dmesg_clean PASS
+END d-gang 2026-11-03T11:10:32+01:00
+BEGIN d-nogang 2026-11-03T11:10:32+01:00
+CHECK d-nogang create_pool PASS
+CHECK d-nogang create PASS
+CHECK d-nogang snapshot PASS
+CHECK d-nogang unmount PASS
+CHECK d-nogang export0 PASS
+CHECK d-nogang gang_blocks PASS
+CHECK d-nogang import2 PASS
+CHECK d-nogang epoch PASS
+MOVER d-nogang cmd=move pool=khpool mode=hybrid head=khpool/g gang=0 force=0 epoch_txg=36 head_rw=1 census_dvas=142 to_redirect=100 to_rewrite=42 gang_dvas=288 zil_old=1 preflight=0 pf_free=1228529664 pf_slop=168018280 pf_need_end=1605632 pf_new=1228800 pf_packed=1228800 pf_left=1226674176 pf_need_left=168395112 pf_keep=819200 redirected=100 refused=0 read_errs=0 errs= rewritten=32 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=152 move_txgs=7 census_err=0 census_left=192 gang_dvas=192 gang_left=192 zil_old=1 live=100 kept=819200 entries=100 tombstones=0 damaged=0 extra=1228800 ms=170 rc=11
+CHECK d-nogang gang_found PASS
+CHECK d-nogang move_rc_eagain PASS
+CHECK d-nogang gang_left PASS
+CHECK d-nogang gang_left_gt0 PASS
+CHECK d-nogang mount PASS
+CHECK d-nogang data_head PASS
+CHECK d-nogang clone PASS
+CHECK d-nogang data_snapshot PASS
+CHECK d-nogang clone_destroy PASS
+CHECK d-nogang scrub0 PASS
+CHECK d-nogang export PASS
+CHECK d-nogang zdb PASS
+CHECK d-nogang dmesg_clean PASS
+END d-nogang 2026-11-03T11:10:35+01:00
+DONE d 2026-11-03T11:10:35+01:00: 3 checks failed

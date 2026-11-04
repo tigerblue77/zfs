@@ -1,0 +1,20 @@
+  pool: jointfixture
+ state: ONLINE
+status: Some supported and requested features are not enabled on the pool.
+	The pool can still be used, but some features are unavailable.
+action: Enable all features using 'zpool upgrade'. Once this is done,
+	the pool may no longer be accessible by software that does not support
+	the features. See zpool-features(7) for details.
+  scan: scrub repaired 0B in 00:00:00 with 0 errors on Tue Nov  3 15:22:11 2026
+config:
+
+	NAME                      STATE     READ WRITE CKSUM
+	jointfixture              ONLINE       0     0     0
+	  raidz1-0                ONLINE       0     0     0
+	    /var/tmp/kh/f/run/v0  ONLINE       0     0     0
+	    /var/tmp/kh/f/run/v1  ONLINE       0     0     0
+	    /var/tmp/kh/f/run/v2  ONLINE       0     0     0
+	    /var/tmp/kh/f/run/v5  ONLINE       0     0     0
+	    /var/tmp/kh/f/run/v4  ONLINE       0     0     0
+
+errors: No known data errors

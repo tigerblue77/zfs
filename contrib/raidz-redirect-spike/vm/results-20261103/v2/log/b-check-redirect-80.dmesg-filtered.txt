@@ -1,0 +1,5 @@
+[ 3583.131534] spl: loading out-of-tree module taints kernel.
+[ 3583.132956] spl: module verification failed: signature and/or required key missing - tainting kernel
+[ 3583.468584] zfs: module license 'CDDL' taints kernel.
+[ 3583.471046] zfs: module license taints kernel.
+[ 3584.474358] ZFS: Loaded module v2.4.99-1 (DEBUG mode), ZFS pool version 5000, ZFS filesystem version 5

@@ -1,0 +1,52 @@
+CHECK load srcversion PASS
+CHECK load trigger PASS
+INFO load tree=d07e30bdb3929c9f303d065de47af0987b362634 6.12.113+deb13-cloud-amd64 mover=cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=34 head_rw=0 census_dvas=763 to_redirect=763 to_rewrite=0 gang_dvas=0 gang_small=0 zil_old=0 preflight=0 pf_free=880922624 pf_slop=168018280 pf_need_end=20314112 pf_new=28127232 pf_packed=28127232 pf_left=852381696 pf_need_left=169580904 pf_keep=9375744 redirected=763 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=2519 move_txgs=9 census_err=0 census_left=0 gang_dvas=0 gang_left=0 gang_small=0 zil_old=0 live=8046 kept=98533376 entries=8046 tombstones=0 damaged=0 extra=197369856 ms=2556 rc=0
+BEGIN d-gang 2026-11-03T15:21:26+01:00
+CHECK d-gang create_pool PASS
+CHECK d-gang create PASS
+CHECK d-gang snapshot PASS
+CHECK d-gang unmount PASS
+CHECK d-gang export0 PASS
+CHECK d-gang gang_blocks PASS
+CHECK d-gang import2 PASS
+CHECK d-gang epoch PASS
+MOVER d-gang cmd=move pool=khpool mode=hybrid head=khpool/g gang=1 force=0 epoch_txg=36 head_rw=1 census_dvas=2078 to_redirect=1642 to_rewrite=436 gang_dvas=1936 gang_small=256 zil_old=1 preflight=0 pf_free=1228365824 pf_slop=168018280 pf_need_end=31145984 pf_new=42147840 pf_packed=42147840 pf_left=1185497088 pf_need_left=174256488 pf_keep=13996032 redirected=1642 refused=0 read_errs=0 errs= rewritten=32 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=2159 move_txgs=19 census_err=0 census_left=0 gang_dvas=0 gang_left=0 gang_small=256 zil_old=1 live=1642 kept=13996032 entries=1642 tombstones=0 damaged=0 extra=24907776 ms=2183 rc=0
+CHECK d-gang gang_found PASS
+CHECK d-gang old_size_headers PASS
+CHECK d-gang move_rc0 PASS
+CHECK d-gang census0 PASS
+CHECK d-gang mount PASS
+CHECK d-gang data_head PASS
+CHECK d-gang clone PASS
+CHECK d-gang data_snapshot PASS
+CHECK d-gang clone_destroy PASS
+CHECK d-gang scrub0 PASS
+CHECK d-gang export PASS
+CHECK d-gang zdb PASS
+CHECK d-gang dmesg_clean PASS
+END d-gang 2026-11-03T15:21:30+01:00
+BEGIN d-nogang 2026-11-03T15:21:30+01:00
+CHECK d-nogang create_pool PASS
+CHECK d-nogang create PASS
+CHECK d-nogang snapshot PASS
+CHECK d-nogang unmount PASS
+CHECK d-nogang export0 PASS
+CHECK d-nogang gang_blocks PASS
+CHECK d-nogang import2 PASS
+CHECK d-nogang epoch PASS
+MOVER d-nogang cmd=move pool=khpool mode=hybrid head=khpool/g gang=0 force=0 epoch_txg=36 head_rw=1 census_dvas=136 to_redirect=97 to_rewrite=39 gang_dvas=288 gang_small=0 zil_old=1 preflight=0 pf_free=1228521472 pf_slop=168018280 pf_need_end=1550336 pf_new=1191936 pf_packed=1191936 pf_left=1226735616 pf_need_left=168376680 pf_keep=794624 redirected=97 refused=0 read_errs=0 errs= rewritten=32 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=153 move_txgs=7 census_err=0 census_left=192 gang_dvas=192 gang_left=192 gang_small=0 zil_old=1 live=97 kept=794624 entries=97 tombstones=0 damaged=0 extra=1191936 ms=169 rc=11
+CHECK d-nogang gang_found PASS
+CHECK d-nogang move_rc_eagain PASS
+CHECK d-nogang gang_left PASS
+CHECK d-nogang gang_left_gt0 PASS
+CHECK d-nogang mount PASS
+CHECK d-nogang data_head PASS
+CHECK d-nogang clone PASS
+CHECK d-nogang data_snapshot PASS
+CHECK d-nogang clone_destroy PASS
+CHECK d-nogang scrub0 PASS
+CHECK d-nogang export PASS
+CHECK d-nogang zdb PASS
+CHECK d-nogang dmesg_clean PASS
+END d-nogang 2026-11-03T15:21:32+01:00
+DONE d 2026-11-03T15:21:32+01:00: 0 checks failed

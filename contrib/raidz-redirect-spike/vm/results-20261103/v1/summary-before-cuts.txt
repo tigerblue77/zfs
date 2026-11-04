@@ -1,0 +1,102 @@
+INFO load tree=91df27c68d49809eba85f1167f7a8c958f7a24dd 6.12.113+deb13-cloud-amd64 mover=idle
+INFO load tree=91df27c68d49809eba85f1167f7a8c958f7a24dd 6.12.113+deb13-cloud-amd64 mover=idle
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=33 width=5 parity=2 ms=63 rc=0
+RESULT cmd=move pool=jointfixture mode=hybrid head=jointfixture gang=1 force=0 epoch_txg=33 head_rw=1 census_dvas=116 to_redirect=0 to_rewrite=116 gang_dvas=0 zil_old=0 preflight=0 pf_free=1256611840 pf_slop=168018280 pf_need_end=5849088 pf_new=0 pf_packed=0 pf_left=1256239104 pf_need_left=173867368 pf_keep=0 redirected=0 refused=0 read_errs=0 errs= rewritten=100 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=109 move_txgs=6 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=112 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=33 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=13 rc=0
+RESULT a-r128-p0-hybrid kernel: entries after_drop rewritten redirected kept_KiB = 0 0 100 0 0; 1 Nov: 0 0 100 0 0 (SAME); mover_ms=83 user_mover_ms=109
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=33 width=5 parity=2 ms=65 rc=0
+RESULT cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=33 head_rw=0 census_dvas=116 to_redirect=116 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=1256611840 pf_slop=168018280 pf_need_end=6578176 pf_new=22462464 pf_packed=22462464 pf_left=1233702912 pf_need_left=168255848 pf_keep=491520 redirected=116 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=421 move_txgs=4 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=116 kept=491520 entries=116 tombstones=0 damaged=0 extra=6340608 ms=424 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=33 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=116 kept=491520 entries=116 tombstones=0 damaged=0 extra=6340608 ms=19 rc=0
+RESULT a-r128-p0-redirect kernel: entries after_drop rewritten redirected kept_KiB = 116 116 0 116 480; 1 Nov: 116 116 0 116 480 (SAME); mover_ms=377 user_mover_ms=421
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=34 width=5 parity=2 ms=64 rc=0
+RESULT cmd=move pool=jointfixture mode=hybrid head=jointfixture gang=1 force=0 epoch_txg=34 head_rw=1 census_dvas=132 to_redirect=26 to_rewrite=106 gang_dvas=0 zil_old=0 preflight=0 pf_free=1256284160 pf_slop=168018280 pf_need_end=6139904 pf_new=2555904 pf_packed=2555904 pf_left=1253326848 pf_need_left=173347176 pf_keep=122880 redirected=26 refused=0 read_errs=0 errs= rewritten=90 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=202 move_txgs=7 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=26 kept=122880 entries=26 tombstones=0 damaged=0 extra=811008 ms=205 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=34 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=15 rc=0
+RESULT a-r128-p10-hybrid kernel: entries after_drop rewritten redirected kept_KiB = 26 0 90 26 120; 1 Nov: 26 0 90 26 120 (SAME); mover_ms=181 user_mover_ms=202
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=34 width=5 parity=2 ms=66 rc=0
+RESULT cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=34 head_rw=0 census_dvas=132 to_redirect=132 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=1256284160 pf_slop=168018280 pf_need_end=6807552 pf_new=22806528 pf_packed=22806528 pf_left=1233039360 pf_need_left=168288616 pf_keep=573440 redirected=132 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=449 move_txgs=5 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=132 kept=573440 entries=132 tombstones=0 damaged=0 extra=6537216 ms=452 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=34 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=106 kept=450560 entries=106 tombstones=0 damaged=0 extra=5726208 ms=13 rc=0
+RESULT a-r128-p10-redirect kernel: entries after_drop rewritten redirected kept_KiB = 132 106 0 132 560; 1 Nov: 132 106 0 132 560 (SAME); mover_ms=386 user_mover_ms=449
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=34 width=5 parity=2 ms=63 rc=0
+RESULT cmd=move pool=jointfixture mode=hybrid head=jointfixture gang=1 force=0 epoch_txg=34 head_rw=1 census_dvas=132 to_redirect=46 to_rewrite=86 gang_dvas=0 zil_old=0 preflight=0 pf_free=1256308736 pf_slop=168018280 pf_need_end=6262784 pf_new=6979584 pf_packed=6979584 pf_left=1248915456 pf_need_left=172241256 pf_keep=204800 redirected=46 refused=0 read_errs=0 errs= rewritten=70 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=257 move_txgs=7 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=46 kept=204800 entries=46 tombstones=0 damaged=0 extra=2039808 ms=261 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=34 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=13 rc=0
+RESULT a-r128-p30-hybrid kernel: entries after_drop rewritten redirected kept_KiB = 46 0 70 46 200; 1 Nov: 46 0 70 46 200 (SAME); mover_ms=217 user_mover_ms=257
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=34 width=5 parity=2 ms=62 rc=0
+RESULT cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=34 head_rw=0 census_dvas=132 to_redirect=132 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=1256284160 pf_slop=168018280 pf_need_end=6807552 pf_new=22806528 pf_packed=22806528 pf_left=1232977920 pf_need_left=168288616 pf_keep=573440 redirected=132 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=465 move_txgs=5 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=132 kept=573440 entries=132 tombstones=0 damaged=0 extra=6537216 ms=468 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=34 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=86 kept=368640 entries=86 tombstones=0 damaged=0 extra=4497408 ms=16 rc=0
+RESULT a-r128-p30-redirect kernel: entries after_drop rewritten redirected kept_KiB = 132 86 0 132 560; 1 Nov: 132 86 0 132 560 (SAME); mover_ms=386 user_mover_ms=465
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=34 width=5 parity=2 ms=64 rc=0
+RESULT cmd=move pool=jointfixture mode=hybrid head=jointfixture gang=1 force=0 epoch_txg=34 head_rw=1 census_dvas=130 to_redirect=116 to_rewrite=14 gang_dvas=0 zil_old=0 preflight=0 pf_free=1256366080 pf_slop=168018280 pf_need_end=6676480 pf_new=22462464 pf_packed=22462464 pf_left=1233371136 pf_need_left=168354152 pf_keep=491520 redirected=130 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=14 round2=0 round3=0 mover_ms=432 move_txgs=8 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=130 kept=565248 entries=130 tombstones=0 damaged=0 extra=6512640 ms=435 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=34 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=14 kept=73728 entries=14 tombstones=0 damaged=0 extra=172032 ms=16 rc=0
+CHECK a-r128-p100-hybrid as_user_entries FAIL: eq 116 130
+CHECK a-r128-p100-hybrid as_user_redirected FAIL: eq 116 130
+CHECK a-r128-p100-hybrid as_user_kept FAIL: eq 491520 565248
+CHECK a-r128-p100-hybrid as_user_after_drop FAIL: eq 0 14
+RESULT a-r128-p100-hybrid kernel: entries after_drop rewritten redirected kept_KiB = 116 0 0 116 480; 1 Nov: 130 14 0 130 552 (DIFFERENT); mover_ms=354 user_mover_ms=432
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=34 width=5 parity=2 ms=63 rc=0
+RESULT cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=34 head_rw=0 census_dvas=130 to_redirect=130 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=1256366080 pf_slop=168018280 pf_need_end=6778880 pf_new=22757376 pf_packed=22757376 pf_left=1233113088 pf_need_left=168284520 pf_keep=565248 redirected=130 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=431 move_txgs=5 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=130 kept=565248 entries=130 tombstones=0 damaged=0 extra=6512640 ms=434 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=34 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=14 kept=73728 entries=14 tombstones=0 damaged=0 extra=172032 ms=12 rc=0
+RESULT a-r128-p100-redirect kernel: entries after_drop rewritten redirected kept_KiB = 130 14 0 130 552; 1 Nov: 130 14 0 130 552 (SAME); mover_ms=359 user_mover_ms=431
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=33 width=5 parity=2 ms=62 rc=0
+RESULT cmd=move pool=jointfixture mode=hybrid head=jointfixture gang=1 force=0 epoch_txg=33 head_rw=1 census_dvas=816 to_redirect=0 to_rewrite=816 gang_dvas=0 zil_old=0 preflight=0 pf_free=1253244928 pf_slop=168018280 pf_need_end=9953280 pf_new=0 pf_packed=0 pf_left=1252798464 pf_need_left=177971560 pf_keep=0 redirected=0 refused=0 read_errs=0 errs= rewritten=800 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=217 move_txgs=6 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=221 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=33 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=16 rc=0
+RESULT a-r16-p0-hybrid kernel: entries after_drop rewritten redirected kept_KiB = 0 0 800 0 0; 1 Nov: 0 0 800 0 0 (SAME); mover_ms=134 user_mover_ms=217
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=30 width=5 parity=2 ms=60 rc=0
+RESULT cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=30 head_rw=0 census_dvas=816 to_redirect=816 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=1253318656 pf_slop=168018280 pf_need_end=21553152 pf_new=29908992 pf_packed=29908992 pf_left=1223024640 pf_need_left=169689448 pf_keep=9928704 redirected=816 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=2367 move_txgs=10 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=816 kept=9928704 entries=816 tombstones=0 damaged=0 extra=19881984 ms=2370 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=30 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=816 kept=9928704 entries=816 tombstones=0 damaged=0 extra=19881984 ms=19 rc=0
+RESULT a-r16-p0-redirect kernel: entries after_drop rewritten redirected kept_KiB = 816 816 0 816 9696; 1 Nov: 816 816 0 816 9696 (SAME); mover_ms=2363 user_mover_ms=2367
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=31 width=5 parity=2 ms=60 rc=0
+RESULT cmd=move pool=jointfixture mode=hybrid head=jointfixture gang=1 force=0 epoch_txg=31 head_rw=1 census_dvas=832 to_redirect=96 to_rewrite=736 gang_dvas=0 zil_old=0 preflight=0 pf_free=1253015552 pf_slop=168018280 pf_need_end=11329536 pf_new=3293184 pf_packed=3293184 pf_left=1249271808 pf_need_left=177185128 pf_keep=1064960 redirected=96 refused=0 read_errs=0 errs= rewritten=720 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=434 move_txgs=7 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=96 kept=1064960 entries=96 tombstones=0 damaged=0 extra=2162688 ms=438 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=31 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=13 rc=0
+RESULT a-r16-p10-hybrid kernel: entries after_drop rewritten redirected kept_KiB = 96 0 720 96 1040; 1 Nov: 96 0 720 96 1040 (SAME); mover_ms=380 user_mover_ms=434
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=34 width=5 parity=2 ms=63 rc=0
+RESULT cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=34 head_rw=0 census_dvas=832 to_redirect=832 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=1252966400 pf_slop=168018280 pf_need_end=21782528 pf_new=30253056 pf_packed=30253056 pf_left=1222299648 pf_need_left=169722216 pf_keep=10010624 redirected=832 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=2439 move_txgs=10 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=832 kept=10010624 entries=832 tombstones=0 damaged=0 extra=20078592 ms=2442 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=34 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=736 kept=8945664 entries=736 tombstones=0 damaged=0 extra=17915904 ms=19 rc=0
+RESULT a-r16-p10-redirect kernel: entries after_drop rewritten redirected kept_KiB = 832 736 0 832 9776; 1 Nov: 832 736 0 832 9776 (SAME); mover_ms=2324 user_mover_ms=2439
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=34 width=5 parity=2 ms=61 rc=0
+RESULT cmd=move pool=jointfixture mode=hybrid head=jointfixture gang=1 force=0 epoch_txg=34 head_rw=1 census_dvas=832 to_redirect=256 to_rewrite=576 gang_dvas=0 zil_old=0 preflight=0 pf_free=1252990976 pf_slop=168018280 pf_need_end=13664256 pf_new=9216000 pf_packed=9216000 pf_left=1243275264 pf_need_left=175563112 pf_keep=3047424 redirected=256 refused=0 read_errs=0 errs= rewritten=560 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=856 move_txgs=8 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=256 kept=3047424 entries=256 tombstones=0 damaged=0 extra=6119424 ms=860 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=34 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=20 rc=0
+RESULT a-r16-p30-hybrid kernel: entries after_drop rewritten redirected kept_KiB = 256 0 560 256 2976; 1 Nov: 256 0 560 256 2976 (SAME); mover_ms=796 user_mover_ms=856
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=34 width=5 parity=2 ms=57 rc=0
+RESULT cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=34 head_rw=0 census_dvas=832 to_redirect=832 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=1252990976 pf_slop=168018280 pf_need_end=21807104 pf_new=30277632 pf_packed=30277632 pf_left=1222250496 pf_need_left=169722216 pf_keep=10010624 redirected=832 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=2431 move_txgs=10 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=832 kept=10010624 entries=832 tombstones=0 damaged=0 extra=20103168 ms=2434 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=34 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=576 kept=6963200 entries=576 tombstones=0 damaged=0 extra=13983744 ms=18 rc=0
+RESULT a-r16-p30-redirect kernel: entries after_drop rewritten redirected kept_KiB = 832 576 0 832 9776; 1 Nov: 832 576 0 832 9776 (SAME); mover_ms=2369 user_mover_ms=2431
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=31 width=5 parity=2 ms=32 rc=0
+RESULT cmd=move pool=jointfixture mode=hybrid head=jointfixture gang=1 force=0 epoch_txg=31 head_rw=1 census_dvas=830 to_redirect=816 to_rewrite=14 gang_dvas=0 zil_old=0 preflight=0 pf_free=1252777984 pf_slop=168018280 pf_need_end=21651456 pf_new=29908992 pf_packed=29908992 pf_left=1222508544 pf_need_left=169787752 pf_keep=9928704 redirected=830 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=14 round2=0 round3=0 mover_ms=2358 move_txgs=14 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=830 kept=10002432 entries=830 tombstones=0 damaged=0 extra=20054016 ms=2361 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=31 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=14 kept=73728 entries=14 tombstones=0 damaged=0 extra=172032 ms=19 rc=0
+CHECK a-r16-p100-hybrid as_user_entries FAIL: eq 816 830
+CHECK a-r16-p100-hybrid as_user_redirected FAIL: eq 816 830
+CHECK a-r16-p100-hybrid as_user_kept FAIL: eq 9928704 10002432
+CHECK a-r16-p100-hybrid as_user_after_drop FAIL: eq 0 14
+RESULT a-r16-p100-hybrid kernel: entries after_drop rewritten redirected kept_KiB = 816 0 0 816 9696; 1 Nov: 830 14 0 830 9768 (DIFFERENT); mover_ms=2344 user_mover_ms=2358
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=31 width=5 parity=2 ms=65 rc=0
+RESULT cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=31 head_rw=0 census_dvas=830 to_redirect=830 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=1253048320 pf_slop=168018280 pf_need_end=21753856 pf_new=30203904 pf_packed=30203904 pf_left=1222447104 pf_need_left=169718120 pf_keep=10002432 redirected=830 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=2377 move_txgs=10 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=830 kept=10002432 entries=830 tombstones=0 damaged=0 extra=20054016 ms=2380 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=31 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=14 kept=73728 entries=14 tombstones=0 damaged=0 extra=172032 ms=19 rc=0
+RESULT a-r16-p100-redirect kernel: entries after_drop rewritten redirected kept_KiB = 830 14 0 830 9768; 1 Nov: 830 14 0 830 9768 (SAME); mover_ms=2350 user_mover_ms=2377
+INFO load tree=91df27c68d49809eba85f1167f7a8c958f7a24dd 6.12.113+deb13-cloud-amd64 mover=cmd=census pool=jointfixture epoch_txg=32 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=14 kept=73728 entries=14 tombstones=0 damaged=0 extra=172032 ms=10 rc=0
+INFO load tree=91df27c68d49809eba85f1167f7a8c958f7a24dd 6.12.113+deb13-cloud-amd64 mover=cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=35 head_rw=0 census_dvas=8048 to_redirect=8048 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=1074823168 pf_slop=168018280 pf_need_end=213876736 pf_new=296927232 pf_packed=296927232 pf_left=777388032 pf_need_left=184500584 pf_keep=98549760 redirected=8048 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=25102 move_txgs=66 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=8048 kept=98549760 entries=8048 tombstones=0 damaged=0 extra=197394432 ms=25116 rc=0
+INFO c-refused fill rc=0 size,alloc,free=1275068416,998555648,276512768
+CHECK c-freed zdb3 FAIL: zdbok /var/tmp/kh/c/full 3
+INFO load tree=91df27c68d49809eba85f1167f7a8c958f7a24dd 6.12.113+deb13-cloud-amd64 mover=cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=34 head_rw=0 census_dvas=701 to_redirect=701 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=879632384 pf_slop=168018280 pf_need_end=18663424 pf_new=25841664 pf_packed=25841664 pf_left=853266432 pf_need_left=169453928 pf_keep=8613888 redirected=701 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=2255 move_txgs=9 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=8046 kept=98533376 entries=8046 tombstones=0 damaged=0 extra=197369856 ms=2284 rc=0
+CHECK d-gang gang_found FAIL: gt0 
+CHECK d-gang move_rc0 FAIL: eq 52 0
+CHECK d-gang census0 FAIL: eq  0
+INFO load tree=91df27c68d49809eba85f1167f7a8c958f7a24dd 6.12.113+deb13-cloud-amd64 mover=cmd=move pool=khpool mode=hybrid head=khpool/g gang=0 force=0 epoch_txg=36 head_rw=1 census_dvas=142 to_redirect=100 to_rewrite=42 gang_dvas=288 zil_old=1 preflight=0 pf_free=1228529664 pf_slop=168018280 pf_need_end=1605632 pf_new=1228800 pf_packed=1228800 pf_left=1226674176 pf_need_left=168395112 pf_keep=819200 redirected=100 refused=0 read_errs=0 errs= rewritten=32 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=152 move_txgs=7 census_err=0 census_left=192 gang_dvas=192 gang_left=192 zil_old=1 live=100 kept=819200 entries=100 tombstones=0 damaged=0 extra=1228800 ms=170 rc=11
+INFO e-keyless-zil zdb -ivv: 50 TX_WRITE lines
+INFO load tree=91df27c68d49809eba85f1167f7a8c958f7a24dd 6.12.113+deb13-cloud-amd64 mover=cmd=census pool=khpool epoch_txg=40 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=103 kept=729088 entries=103 tombstones=0 damaged=0 extra=3379200 ms=10 rc=0
+checks: 601 PASS, 12 FAIL

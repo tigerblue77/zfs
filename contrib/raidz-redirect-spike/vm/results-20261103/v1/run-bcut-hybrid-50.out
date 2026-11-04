@@ -1,0 +1,6 @@
+CHECK load srcversion PASS
+CHECK load trigger PASS
+INFO load tree=91df27c68d49809eba85f1167f7a8c958f7a24dd 6.12.113+deb13-cloud-amd64 mover=cmd=move pool=jointfixture mode=hybrid head=jointfixture gang=1 force=0 epoch_txg=35 head_rw=1 census_dvas=7536 to_redirect=1908 to_rewrite=5628 gang_dvas=0 zil_old=0 preflight=0 pf_free=1060925440 pf_slop=168018280 pf_need_end=119939072 pf_new=70434816 pf_packed=70434816 pf_left=990056448 pf_need_left=241090920 pf_keep=23420928 redirected=1908 refused=0 read_errs=0 errs= rewritten=5600 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=6098 move_txgs=26 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=2420 kept=29597696 entries=2420 tombstones=0 damaged=0 extra=59277312 ms=6142 rc=0
+BEGIN b-cut-hybrid-50 2026-11-03T14:58:23+01:00
+MOVER b-cut-hybrid-50 cmd=epoch pool=jointfixture epoch_txg=35 width=5 parity=2 ms=23 rc=0
+CUT b-cut-hybrid-50: echo b > /proc/sysrq-trigger 3.79 s into the move (dry run 7583 ms)

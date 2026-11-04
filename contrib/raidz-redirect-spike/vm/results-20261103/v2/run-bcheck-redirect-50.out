@@ -1,0 +1,24 @@
+CHECK load srcversion PASS
+CHECK load trigger PASS
+INFO load tree=d07e30bdb3929c9f303d065de47af0987b362634 6.12.113+deb13-cloud-amd64 mover=idle
+BEGIN b-check-redirect-50 2026-11-04T01:59:32+01:00
+CHECK b-check-redirect-50 import PASS
+MOVER b-check-redirect-50 cmd=census pool=jointfixture epoch_txg=35 census_err=0 census_left=4336 gang_dvas=0 gang_left=0 gang_small=0 zil_old=0 live=3712 kept=45432832 entries=3712 tombstones=0 damaged=0 extra=91029504 ms=29 rc=0
+CHECK b-check-redirect-50 census_after_cut PASS
+CHECK b-check-redirect-50 damaged0 PASS
+RESULT b-check-redirect-50 cut 12.63 s in: census_left=4336 entries=3712 live=3712: the cut came during the move
+CHECK b-check-redirect-50 export PASS
+CHECK b-check-redirect-50 verify1 PASS
+CHECK b-check-redirect-50 zdb1 PASS
+CHECK b-check-redirect-50 import2 PASS
+CHECK b-check-redirect-50 move_again PASS
+CHECK b-check-redirect-50 census0 PASS
+CHECK b-check-redirect-50 scrub0 PASS
+CHECK b-check-redirect-50 export2 PASS
+CHECK b-check-redirect-50 verify2 PASS
+CHECK b-check-redirect-50 drop_retained PASS
+CHECK b-check-redirect-50 verify3 PASS
+CHECK b-check-redirect-50 zdb2 PASS
+CHECK b-check-redirect-50 dmesg_clean PASS
+END b-check-redirect-50 2026-11-04T02:00:07+01:00
+DONE b-check 2026-11-04T02:00:07+01:00: 0 checks failed
