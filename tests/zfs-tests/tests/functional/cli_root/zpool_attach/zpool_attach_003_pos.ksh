@@ -48,9 +48,16 @@ set_tunable64 ANYRAID_MIN_TILE_SIZE 67108864
 log_assert "'zpool attach' expands size correctly with anyraid vdevs"
 
 log_must create_pool $TESTPOOL2 anymirror1 $TEST_BASE_DIR/vdev_file.{0,1,2}
+zpool list -v -p $TESTPOOL2
+zdb -C $TESTPOOL2 | grep -E 'asize|ashift|children'
+zdb -v --anyraid-map $TESTPOOL2
+ls -l $TEST_BASE_DIR/vdev_file.*
+cat /sys/module/zfs/parameters/vdev_anyraid_min_tile_size /sys/module/zfs/parameters/vdev_anyraid_disk_shift
 
 cap=$(zpool get -Hp -o value size $TESTPOOL2)
 log_must zpool attach $TESTPOOL2 anymirror1-0 $TEST_BASE_DIR/vdev_file.4
+zpool list -v -p $TESTPOOL2
+zdb -v --anyraid-map $TESTPOOL2
 new_cap=$(zpool get -Hp -o value size $TESTPOOL2)
 new_cap=$((new_cap - cap))
 
