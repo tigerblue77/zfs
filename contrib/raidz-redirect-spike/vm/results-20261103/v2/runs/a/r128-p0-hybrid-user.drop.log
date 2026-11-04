@@ -1,0 +1,2 @@
+VERIFY dataset=jointfixture object=1 bytes=13107200 hole=0 sha256=94d01c3d8045c1047fa93b4130911e9b310f307c89f2dadb7b5493ca07e441c7
+FIXTURE record=131072 retained=0 head=13107200 native_alloc=26198016 dropped=0 PASS

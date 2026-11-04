@@ -1,0 +1,150 @@
+Dataset khpool/enc [ZPL], ID 274, cr_txg 6, 4.44M, 11 objects
+
+    ZIL header: claim_txg 0, claim_blk_seq 0, claim_lr_seq 0 replay_seq 0, flags 0x0
+
+		TX_CREATE           len    112, txg 20, seq 1
+			(encrypted)
+		TX_WRITE            len   4288, txg 20, seq 2
+			(encrypted)
+		TX_WRITE            len   4288, txg 20, seq 3
+			(encrypted)
+		TX_WRITE            len   4288, txg 20, seq 4
+			(encrypted)
+		TX_WRITE            len   4288, txg 20, seq 5
+			(encrypted)
+		TX_CREATE           len    112, txg 21, seq 6
+			(encrypted)
+		TX_WRITE            len   4288, txg 21, seq 7
+			(encrypted)
+		TX_WRITE            len   4288, txg 21, seq 8
+			(encrypted)
+		TX_WRITE            len   4288, txg 21, seq 9
+			(encrypted)
+		TX_WRITE            len   4288, txg 21, seq 10
+			(encrypted)
+		TX_CREATE           len    112, txg 22, seq 11
+			(encrypted)
+		TX_WRITE            len   4288, txg 22, seq 12
+			(encrypted)
+		TX_WRITE            len   4288, txg 22, seq 13
+			(encrypted)
+		TX_WRITE            len   4288, txg 22, seq 14
+			(encrypted)
+		TX_WRITE            len   4288, txg 22, seq 15
+			(encrypted)
+		TX_CREATE           len    112, txg 23, seq 16
+			(encrypted)
+		TX_WRITE            len   4288, txg 23, seq 17
+			(encrypted)
+		TX_WRITE            len   4288, txg 23, seq 18
+			(encrypted)
+		TX_WRITE            len   4288, txg 23, seq 19
+			(encrypted)
+		TX_WRITE            len   4288, txg 23, seq 20
+			(encrypted)
+		TX_CREATE           len    112, txg 24, seq 21
+			(encrypted)
+		TX_WRITE            len   4288, txg 24, seq 22
+			(encrypted)
+		TX_WRITE            len   4288, txg 24, seq 23
+			(encrypted)
+		TX_WRITE            len   4288, txg 24, seq 24
+			(encrypted)
+		TX_WRITE            len   4288, txg 24, seq 25
+			(encrypted)
+		TX_CREATE           len    112, txg 25, seq 26
+			(encrypted)
+		TX_WRITE            len   4288, txg 25, seq 27
+			(encrypted)
+		TX_WRITE            len   4288, txg 25, seq 28
+			(encrypted)
+		TX_WRITE            len   4288, txg 25, seq 29
+			(encrypted)
+		TX_WRITE            len   4288, txg 25, seq 30
+			(encrypted)
+		TX_CREATE           len    112, txg 26, seq 31
+			(encrypted)
+		TX_WRITE            len   4288, txg 26, seq 32
+			(encrypted)
+		TX_WRITE            len   4288, txg 26, seq 33
+			(encrypted)
+		TX_WRITE            len   4288, txg 26, seq 34
+			(encrypted)
+		TX_WRITE            len   4288, txg 26, seq 35
+			(encrypted)
+		TX_CREATE           len    112, txg 27, seq 36
+			(encrypted)
+		TX_WRITE            len   4288, txg 27, seq 37
+			(encrypted)
+		TX_WRITE            len   4288, txg 27, seq 38
+			(encrypted)
+		TX_WRITE            len   4288, txg 27, seq 39
+			(encrypted)
+		TX_WRITE            len   4288, txg 27, seq 40
+			(encrypted)
+		TX_CREATE           len    112, txg 28, seq 41
+			(encrypted)
+		TX_WRITE            len    192, txg 28, seq 42
+			(encrypted)
+		TX_WRITE            len    192, txg 28, seq 43
+			(encrypted)
+		TX_WRITE            len    192, txg 28, seq 44
+			(encrypted)
+		TX_WRITE            len    192, txg 28, seq 45
+			(encrypted)
+		TX_CREATE           len    112, txg 29, seq 46
+			(encrypted)
+		TX_WRITE            len    192, txg 29, seq 47
+			(encrypted)
+		TX_WRITE            len    192, txg 29, seq 48
+			(encrypted)
+		TX_WRITE            len    192, txg 29, seq 49
+			(encrypted)
+		TX_WRITE            len    192, txg 29, seq 50
+			(encrypted)
+		TX_CREATE           len    112, txg 30, seq 51
+			(encrypted)
+		TX_WRITE            len    192, txg 30, seq 52
+			(encrypted)
+		TX_WRITE            len    192, txg 30, seq 53
+			(encrypted)
+		TX_WRITE            len    192, txg 30, seq 54
+			(encrypted)
+		TX_WRITE            len    192, txg 30, seq 55
+			(encrypted)
+		TX_CREATE           len    112, txg 31, seq 56
+			(encrypted)
+		TX_WRITE            len    192, txg 31, seq 57
+			(encrypted)
+		TX_WRITE            len    192, txg 31, seq 58
+			(encrypted)
+		TX_WRITE            len    192, txg 31, seq 59
+			(encrypted)
+		TX_WRITE            len    192, txg 31, seq 60
+			(encrypted)
+		Total               60
+		TX_CREATE           12
+		TX_MKDIR             0
+		TX_MKXATTR           0
+		TX_SYMLINK           0
+		TX_REMOVE            0
+		TX_RMDIR             0
+		TX_LINK              0
+		TX_RENAME            0
+		TX_WRITE            48
+		TX_TRUNCATE          0
+		TX_SETATTR           0
+		TX_ACL_V0            0
+		TX_ACL_ACL           0
+		TX_CREATE_ACL        0
+		TX_CREATE_ATTR       0
+		TX_CREATE_ACL_ATTR   0
+		TX_MKDIR_ACL         0
+		TX_MKDIR_ATTR        0
+		TX_MKDIR_ACL_ATTR    0
+		TX_WRITE2            0
+		TX_SETSAXATTR        0
+		TX_RENAME_EXCHANGE   0
+		TX_RENAME_WHITEOUT   0
+		TX_CLONE_RANGE       0
+

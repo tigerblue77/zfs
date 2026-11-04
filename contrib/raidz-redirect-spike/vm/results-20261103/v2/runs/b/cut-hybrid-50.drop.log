@@ -1,0 +1,3 @@
+VERIFY dataset=jointfixture object=2 bytes=91750400 hole=0 sha256=0518de839c23f5f5c64f34f1ef8060aac175037ce0fadf937dce97b19a656133
+VERIFY dataset=jointfixture object=1 bytes=39321600 hole=1 sha256=ebfe5183c5ae21cb85fb3c7ae6317e42bb9efd933c4ea6607b5d3be9442bba37
+FIXTURE record=16384 retained=39321600 head=91750400 native_alloc=216379392 dropped=1 PASS

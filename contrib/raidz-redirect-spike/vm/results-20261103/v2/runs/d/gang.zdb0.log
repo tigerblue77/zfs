@@ -1,0 +1,105 @@
+loading concrete vdev 0, metaslab 0 of 19 ...loading concrete vdev 0, metaslab 1 of 19 ...loading concrete vdev 0, metaslab 2 of 19 ...loading concrete vdev 0, metaslab 3 of 19 ...loading concrete vdev 0, metaslab 4 of 19 ...loading concrete vdev 0, metaslab 5 of 19 ...loading concrete vdev 0, metaslab 6 of 19 ...loading concrete vdev 0, metaslab 7 of 19 ...loading concrete vdev 0, metaslab 8 of 19 ...loading concrete vdev 0, metaslab 9 of 19 ...loading concrete vdev 0, metaslab 10 of 19 ...loading concrete vdev 0, metaslab 11 of 19 ...loading concrete vdev 0, metaslab 12 of 19 ...loading concrete vdev 0, metaslab 13 of 19 ...loading concrete vdev 0, metaslab 14 of 19 ...loading concrete vdev 0, metaslab 15 of 19 ...loading concrete vdev 0, metaslab 16 of 19 ...loading concrete vdev 0, metaslab 17 of 19 ...loading concrete vdev 0, metaslab 18 of 19 ...
+
+Traversing all blocks to verify nothing leaked ...
+
+	SPIKE: moved raidz blocks: their claims add 0 bytes, the redirect tables charge 0 (deflated 0)
+
+	No leaks (block sum matches space maps exactly)
+
+	bp count:                   230
+	ganged count:               288
+	bp logical:            18701824      avg:  81312
+	bp physical:           12933120      avg:  56230     compression:   1.45
+	bp allocated:          46530560      avg: 202306     compression:   0.40
+	bp deduped:                   0    ref>1:      0   deduplication:   1.00
+	bp cloned:                    0    count:      0
+	Normal class:          46751744     used:  3.67%
+	Embedded log class              0     used:  -nan%
+
+	additional, non-pointer bps of type 0:         42
+	Dittoed blocks on same vdev: 187
+
+Blocks	LSIZE	PSIZE	ASIZE	  avg	 comp	%Total	Type
+     -	    -	    -	    -	    -	    -	     -	unallocated
+     3	  48K	  12K	  72K	  24K	 4.00	  0.16	object directory
+     -	    -	    -	    -	    -	    -	     -	object array
+     1	  16K	   4K	  24K	  24K	 4.00	  0.05	packed nvlist
+     -	    -	    -	    -	    -	    -	     -	packed nvlist size
+     1	 128K	   4K	  24K	  24K	32.00	  0.05	bpobj
+     -	    -	    -	    -	    -	    -	     -	bpobj header
+     -	    -	    -	    -	    -	    -	     -	SPA space map header
+    10	1.25M	  40K	 240K	  24K	32.00	  0.53	SPA space map
+     1	   4K	   4K	   8K	   8K	 1.00	  0.02	ZIL intent log
+    34	2.28M	 136K	 760K	22.4K	17.18	  1.67	DMU dnode
+     4	  16K	  16K	  88K	  22K	 1.00	  0.19	DMU objset
+     -	    -	    -	    -	    -	    -	     -	DSL directory
+     -	    -	    -	    -	    -	    -	     -	DSL directory child map
+     -	    -	    -	    -	    -	    -	     -	DSL dataset snap map
+     7	65.5K	  16K	  96K	13.7K	 4.09	  0.21	DSL props
+     -	    -	    -	    -	    -	    -	     -	DSL dataset
+     -	    -	    -	    -	    -	    -	     -	ZFS znode
+     -	    -	    -	    -	    -	    -	     -	ZFS V0 ACL
+   108	13.5M	12.0M	42.6M	 404K	 1.12	 96.00	ZFS plain file
+     2	1.50K	   1K	  24K	  12K	 1.50	  0.05	ZFS directory
+     2	   2K	   2K	  32K	  16K	 1.00	  0.07	ZFS master node
+     -	    -	    -	    -	    -	    -	     -	ZFS delete queue
+     -	    -	    -	    -	    -	    -	     -	zvol object
+     -	    -	    -	    -	    -	    -	     -	zvol prop
+     -	    -	    -	    -	    -	    -	     -	other uint8[]
+     -	    -	    -	    -	    -	    -	     -	other uint64[]
+     -	    -	    -	    -	    -	    -	     -	other ZAP
+     -	    -	    -	    -	    -	    -	     -	persistent error log
+     1	 128K	   4K	  24K	  24K	32.00	  0.05	SPA history
+     -	    -	    -	    -	    -	    -	     -	SPA history offsets
+     -	    -	    -	    -	    -	    -	     -	Pool properties
+     -	    -	    -	    -	    -	    -	     -	DSL permissions
+     -	    -	    -	    -	    -	    -	     -	ZFS ACL
+     -	    -	    -	    -	    -	    -	     -	ZFS SYSACL
+     -	    -	    -	    -	    -	    -	     -	FUID table
+     -	    -	    -	    -	    -	    -	     -	FUID table size
+     -	    -	    -	    -	    -	    -	     -	DSL dataset next clones
+     -	    -	    -	    -	    -	    -	     -	scan work queue
+     -	    -	    -	    -	    -	    -	     -	ZFS user/group/project used
+     -	    -	    -	    -	    -	    -	     -	ZFS user/group/project quota
+     -	    -	    -	    -	    -	    -	     -	snapshot refcount tags
+     -	    -	    -	    -	    -	    -	     -	DDT ZAP algorithm
+     -	    -	    -	    -	    -	    -	     -	DDT statistics
+     -	    -	    -	    -	    -	    -	     -	System attributes
+     -	    -	    -	    -	    -	    -	     -	SA master node
+     2	   3K	   3K	  32K	  16K	 1.00	  0.07	SA attr registration
+     4	  64K	  16K	  80K	  20K	 4.00	  0.18	SA attr layouts
+     -	    -	    -	    -	    -	    -	     -	scan translations
+     -	    -	    -	    -	    -	    -	     -	deduplicated block
+     -	    -	    -	    -	    -	    -	     -	DSL deadlist map
+     -	    -	    -	    -	    -	    -	     -	DSL deadlist map hdr
+     -	    -	    -	    -	    -	    -	     -	DSL dir clones
+     -	    -	    -	    -	    -	    -	     -	bpobj subobj
+     -	    -	    -	    -	    -	    -	     -	deferred free
+     -	    -	    -	    -	    -	    -	     -	dedup ditto
+     -	    -	    -	    -	    -	    -	     -	DDT pending free
+    20	 332K	  36K	 312K	15.6K	 9.24	  0.69	other
+   230	17.8M	12.3M	44.4M	 198K	 1.45	100.00	Total
+    84	5.50M	 306K	1.75M	21.3K	18.39	  3.94	Metadata Total
+
+Block Size Histogram
+(note: all categories are binned separately)
+
+  block   psize                lsize                asize
+   size   Count   Size   Cum.  Count   Size   Cum.  Count   Size   Cum.
+    512:      3  1.50K  1.50K      3  1.50K  1.50K      0      0      0
+     1K:      3     3K  4.50K      3     3K  4.50K      0      0      0
+     2K:      4  6.50K    11K      4  6.50K    11K      0      0      0
+     4K:     81   323K   334K      6    23K    34K      0      0      0
+     8K:      1     8K   342K      0      0    34K      1     8K     8K
+    16K:      0      0   342K     34   544K   578K     14   224K   232K
+    32K:      0      0   342K      0      0   578K     76  1.78M  2.01M
+    64K:      0      0   342K      0      0   578K      1    48K  2.05M
+   128K:     96    12M  12.3M    138  17.2M  17.8M      0      0  2.05M
+   256K:      0      0  12.3M      0      0  17.8M      0      0  2.05M
+   512K:      0      0  12.3M      0      0  17.8M     96  42.3M  44.4M
+     1M:      0      0  12.3M      0      0  17.8M      0      0  44.4M
+     2M:      0      0  12.3M      0      0  17.8M      0      0  44.4M
+     4M:      0      0  12.3M      0      0  17.8M      0      0  44.4M
+     8M:      0      0  12.3M      0      0  17.8M      0      0  44.4M
+    16M:      0      0  12.3M      0      0  17.8M      0      0  44.4M
+

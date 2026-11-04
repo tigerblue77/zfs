@@ -1,0 +1,908 @@
+CHECK setup generator PASS
+CHECK setup kmover_user PASS
+CHECK load srcversion PASS
+CHECK load trigger PASS
+INFO load tree=91df27c68d49809eba85f1167f7a8c958f7a24dd 6.12.113+deb13-cloud-amd64 mover=idle
+CHECK setup input-r128-p0 PASS
+CHECK setup input-r128-p10 PASS
+CHECK setup input-r128-p30 PASS
+CHECK setup input-r128-p100 PASS
+CHECK setup input-r16-p0 PASS
+CHECK setup input-r16-p10 PASS
+CHECK setup input-r16-p30 PASS
+CHECK setup input-r16-p100 PASS
+CHECK setup input-r16-p30-u1000 PASS
+CHECK setup input-r16-p100-u1000 PASS
+DONE setup 2026-11-03T11:05:03+01:00: 0 checks failed
+CHECK load srcversion PASS
+CHECK load trigger PASS
+INFO load tree=91df27c68d49809eba85f1167f7a8c958f7a24dd 6.12.113+deb13-cloud-amd64 mover=idle
+BEGIN a-r128-p0-hybrid 2026-11-03T11:05:11+01:00
+CHECK a-r128-p0-hybrid import PASS
+CHECK a-r128-p0-hybrid feature PASS
+MOVER a-r128-p0-hybrid cmd=epoch pool=jointfixture epoch_txg=31 width=5 parity=2 ms=22 rc=0
+CHECK a-r128-p0-hybrid epoch PASS
+MOVER a-r128-p0-hybrid cmd=move pool=jointfixture mode=hybrid head=jointfixture gang=1 force=0 epoch_txg=31 head_rw=1 census_dvas=116 to_redirect=0 to_rewrite=116 gang_dvas=0 zil_old=0 preflight=0 pf_free=1256415232 pf_slop=168018280 pf_need_end=5849088 pf_new=0 pf_packed=0 pf_left=1256030208 pf_need_left=173867368 pf_keep=0 redirected=0 refused=0 read_errs=0 errs= rewritten=100 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=83 move_txgs=12 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=126 rc=0
+CHECK a-r128-p0-hybrid move_rc0 PASS
+CHECK a-r128-p0-hybrid census0 PASS
+CHECK a-r128-p0-hybrid export PASS
+CHECK a-r128-p0-hybrid verify1 PASS
+CHECK a-r128-p0-hybrid cold_import PASS
+MOVER a-r128-p0-hybrid cmd=census pool=jointfixture epoch_txg=31 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=11 rc=0
+CHECK a-r128-p0-hybrid cold_export PASS
+CHECK a-r128-p0-hybrid cold_census0 PASS
+CHECK a-r128-p0-hybrid cold_entries PASS
+CHECK a-r128-p0-hybrid cold_reached PASS
+CHECK a-r128-p0-hybrid cold_damaged0 PASS
+CHECK a-r128-p0-hybrid drop_retained PASS
+CHECK a-r128-p0-hybrid cold2_import PASS
+MOVER a-r128-p0-hybrid cmd=census pool=jointfixture epoch_txg=31 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=10 rc=0
+CHECK a-r128-p0-hybrid cold2_export PASS
+CHECK a-r128-p0-hybrid verify2 PASS
+CHECK a-r128-p0-hybrid rw_import PASS
+CHECK a-r128-p0-hybrid scrub0 PASS
+CHECK a-r128-p0-hybrid rw_export PASS
+CHECK a-r128-p0-hybrid zdb PASS
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=33 width=5 parity=2 ms=63 rc=0
+RESULT cmd=move pool=jointfixture mode=hybrid head=jointfixture gang=1 force=0 epoch_txg=33 head_rw=1 census_dvas=116 to_redirect=0 to_rewrite=116 gang_dvas=0 zil_old=0 preflight=0 pf_free=1256611840 pf_slop=168018280 pf_need_end=5849088 pf_new=0 pf_packed=0 pf_left=1256239104 pf_need_left=173867368 pf_keep=0 redirected=0 refused=0 read_errs=0 errs= rewritten=100 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=109 move_txgs=6 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=112 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=33 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=13 rc=0
+CHECK a-r128-p0-hybrid as_user_entries PASS
+CHECK a-r128-p0-hybrid as_user_rewritten PASS
+CHECK a-r128-p0-hybrid as_user_redirected PASS
+CHECK a-r128-p0-hybrid as_user_kept PASS
+CHECK a-r128-p0-hybrid as_user_census_left PASS
+CHECK a-r128-p0-hybrid as_user_after_drop PASS
+RESULT a-r128-p0-hybrid kernel: entries after_drop rewritten redirected kept_KiB = 0 0 100 0 0; 1 Nov: 0 0 100 0 0 (SAME); mover_ms=83 user_mover_ms=109
+CHECK a-r128-p0-hybrid dmesg_clean PASS
+END a-r128-p0-hybrid 2026-11-03T11:05:21+01:00
+BEGIN a-r128-p0-redirect 2026-11-03T11:05:21+01:00
+CHECK a-r128-p0-redirect import PASS
+CHECK a-r128-p0-redirect feature PASS
+MOVER a-r128-p0-redirect cmd=epoch pool=jointfixture epoch_txg=31 width=5 parity=2 ms=20 rc=0
+CHECK a-r128-p0-redirect epoch PASS
+MOVER a-r128-p0-redirect cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=31 head_rw=0 census_dvas=116 to_redirect=116 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=1256415232 pf_slop=168018280 pf_need_end=6578176 pf_new=22462464 pf_packed=22462464 pf_left=1233567744 pf_need_left=168255848 pf_keep=491520 redirected=116 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=377 move_txgs=4 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=116 kept=491520 entries=116 tombstones=0 damaged=0 extra=6340608 ms=392 rc=0
+CHECK a-r128-p0-redirect move_rc0 PASS
+CHECK a-r128-p0-redirect census0 PASS
+CHECK a-r128-p0-redirect export PASS
+CHECK a-r128-p0-redirect verify1 PASS
+CHECK a-r128-p0-redirect cold_import PASS
+MOVER a-r128-p0-redirect cmd=census pool=jointfixture epoch_txg=31 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=116 kept=491520 entries=116 tombstones=0 damaged=0 extra=6340608 ms=10 rc=0
+CHECK a-r128-p0-redirect cold_export PASS
+CHECK a-r128-p0-redirect cold_census0 PASS
+CHECK a-r128-p0-redirect cold_entries PASS
+CHECK a-r128-p0-redirect cold_reached PASS
+CHECK a-r128-p0-redirect cold_damaged0 PASS
+CHECK a-r128-p0-redirect drop_retained PASS
+CHECK a-r128-p0-redirect cold2_import PASS
+MOVER a-r128-p0-redirect cmd=census pool=jointfixture epoch_txg=31 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=116 kept=491520 entries=116 tombstones=0 damaged=0 extra=6340608 ms=9 rc=0
+CHECK a-r128-p0-redirect cold2_export PASS
+CHECK a-r128-p0-redirect verify2 PASS
+CHECK a-r128-p0-redirect rw_import PASS
+CHECK a-r128-p0-redirect scrub0 PASS
+CHECK a-r128-p0-redirect rw_export PASS
+CHECK a-r128-p0-redirect zdb PASS
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=33 width=5 parity=2 ms=65 rc=0
+RESULT cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=33 head_rw=0 census_dvas=116 to_redirect=116 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=1256611840 pf_slop=168018280 pf_need_end=6578176 pf_new=22462464 pf_packed=22462464 pf_left=1233702912 pf_need_left=168255848 pf_keep=491520 redirected=116 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=421 move_txgs=4 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=116 kept=491520 entries=116 tombstones=0 damaged=0 extra=6340608 ms=424 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=33 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=116 kept=491520 entries=116 tombstones=0 damaged=0 extra=6340608 ms=19 rc=0
+CHECK a-r128-p0-redirect as_user_entries PASS
+CHECK a-r128-p0-redirect as_user_rewritten PASS
+CHECK a-r128-p0-redirect as_user_redirected PASS
+CHECK a-r128-p0-redirect as_user_kept PASS
+CHECK a-r128-p0-redirect as_user_census_left PASS
+CHECK a-r128-p0-redirect as_user_after_drop PASS
+RESULT a-r128-p0-redirect kernel: entries after_drop rewritten redirected kept_KiB = 116 116 0 116 480; 1 Nov: 116 116 0 116 480 (SAME); mover_ms=377 user_mover_ms=421
+CHECK a-r128-p0-redirect dmesg_clean PASS
+END a-r128-p0-redirect 2026-11-03T11:05:32+01:00
+BEGIN a-r128-p10-hybrid 2026-11-03T11:05:32+01:00
+CHECK a-r128-p10-hybrid import PASS
+CHECK a-r128-p10-hybrid feature PASS
+MOVER a-r128-p10-hybrid cmd=epoch pool=jointfixture epoch_txg=32 width=5 parity=2 ms=21 rc=0
+CHECK a-r128-p10-hybrid epoch PASS
+MOVER a-r128-p10-hybrid cmd=move pool=jointfixture mode=hybrid head=jointfixture gang=1 force=0 epoch_txg=32 head_rw=1 census_dvas=132 to_redirect=26 to_rewrite=106 gang_dvas=0 zil_old=0 preflight=0 pf_free=1256136704 pf_slop=168018280 pf_need_end=6139904 pf_new=2555904 pf_packed=2555904 pf_left=1253167104 pf_need_left=173347176 pf_keep=122880 redirected=26 refused=0 read_errs=0 errs= rewritten=90 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=181 move_txgs=13 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=26 kept=122880 entries=26 tombstones=0 damaged=0 extra=811008 ms=211 rc=0
+CHECK a-r128-p10-hybrid move_rc0 PASS
+CHECK a-r128-p10-hybrid census0 PASS
+CHECK a-r128-p10-hybrid export PASS
+CHECK a-r128-p10-hybrid verify1 PASS
+CHECK a-r128-p10-hybrid cold_import PASS
+MOVER a-r128-p10-hybrid cmd=census pool=jointfixture epoch_txg=32 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=26 kept=122880 entries=26 tombstones=0 damaged=0 extra=811008 ms=19 rc=0
+CHECK a-r128-p10-hybrid cold_export PASS
+CHECK a-r128-p10-hybrid cold_census0 PASS
+CHECK a-r128-p10-hybrid cold_entries PASS
+CHECK a-r128-p10-hybrid cold_reached PASS
+CHECK a-r128-p10-hybrid cold_damaged0 PASS
+CHECK a-r128-p10-hybrid drop_retained PASS
+CHECK a-r128-p10-hybrid cold2_import PASS
+MOVER a-r128-p10-hybrid cmd=census pool=jointfixture epoch_txg=32 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=14 rc=0
+CHECK a-r128-p10-hybrid cold2_export PASS
+CHECK a-r128-p10-hybrid verify2 PASS
+CHECK a-r128-p10-hybrid rw_import PASS
+CHECK a-r128-p10-hybrid scrub0 PASS
+CHECK a-r128-p10-hybrid rw_export PASS
+CHECK a-r128-p10-hybrid zdb PASS
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=34 width=5 parity=2 ms=64 rc=0
+RESULT cmd=move pool=jointfixture mode=hybrid head=jointfixture gang=1 force=0 epoch_txg=34 head_rw=1 census_dvas=132 to_redirect=26 to_rewrite=106 gang_dvas=0 zil_old=0 preflight=0 pf_free=1256284160 pf_slop=168018280 pf_need_end=6139904 pf_new=2555904 pf_packed=2555904 pf_left=1253326848 pf_need_left=173347176 pf_keep=122880 redirected=26 refused=0 read_errs=0 errs= rewritten=90 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=202 move_txgs=7 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=26 kept=122880 entries=26 tombstones=0 damaged=0 extra=811008 ms=205 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=34 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=15 rc=0
+CHECK a-r128-p10-hybrid as_user_entries PASS
+CHECK a-r128-p10-hybrid as_user_rewritten PASS
+CHECK a-r128-p10-hybrid as_user_redirected PASS
+CHECK a-r128-p10-hybrid as_user_kept PASS
+CHECK a-r128-p10-hybrid as_user_census_left PASS
+CHECK a-r128-p10-hybrid as_user_after_drop PASS
+RESULT a-r128-p10-hybrid kernel: entries after_drop rewritten redirected kept_KiB = 26 0 90 26 120; 1 Nov: 26 0 90 26 120 (SAME); mover_ms=181 user_mover_ms=202
+CHECK a-r128-p10-hybrid dmesg_clean PASS
+END a-r128-p10-hybrid 2026-11-03T11:05:42+01:00
+BEGIN a-r128-p10-redirect 2026-11-03T11:05:42+01:00
+CHECK a-r128-p10-redirect import PASS
+CHECK a-r128-p10-redirect feature PASS
+MOVER a-r128-p10-redirect cmd=epoch pool=jointfixture epoch_txg=32 width=5 parity=2 ms=21 rc=0
+CHECK a-r128-p10-redirect epoch PASS
+MOVER a-r128-p10-redirect cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=32 head_rw=0 census_dvas=132 to_redirect=132 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=1255989248 pf_slop=168018280 pf_need_end=6807552 pf_new=22806528 pf_packed=22806528 pf_left=1232769024 pf_need_left=168288616 pf_keep=573440 redirected=132 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=386 move_txgs=5 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=132 kept=573440 entries=132 tombstones=0 damaged=0 extra=6537216 ms=404 rc=0
+CHECK a-r128-p10-redirect move_rc0 PASS
+CHECK a-r128-p10-redirect census0 PASS
+CHECK a-r128-p10-redirect export PASS
+CHECK a-r128-p10-redirect verify1 PASS
+CHECK a-r128-p10-redirect cold_import PASS
+MOVER a-r128-p10-redirect cmd=census pool=jointfixture epoch_txg=32 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=132 kept=573440 entries=132 tombstones=0 damaged=0 extra=6537216 ms=14 rc=0
+CHECK a-r128-p10-redirect cold_export PASS
+CHECK a-r128-p10-redirect cold_census0 PASS
+CHECK a-r128-p10-redirect cold_entries PASS
+CHECK a-r128-p10-redirect cold_reached PASS
+CHECK a-r128-p10-redirect cold_damaged0 PASS
+CHECK a-r128-p10-redirect drop_retained PASS
+CHECK a-r128-p10-redirect cold2_import PASS
+MOVER a-r128-p10-redirect cmd=census pool=jointfixture epoch_txg=32 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=106 kept=450560 entries=106 tombstones=0 damaged=0 extra=5726208 ms=10 rc=0
+CHECK a-r128-p10-redirect cold2_export PASS
+CHECK a-r128-p10-redirect verify2 PASS
+CHECK a-r128-p10-redirect rw_import PASS
+CHECK a-r128-p10-redirect scrub0 PASS
+CHECK a-r128-p10-redirect rw_export PASS
+CHECK a-r128-p10-redirect zdb PASS
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=34 width=5 parity=2 ms=66 rc=0
+RESULT cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=34 head_rw=0 census_dvas=132 to_redirect=132 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=1256284160 pf_slop=168018280 pf_need_end=6807552 pf_new=22806528 pf_packed=22806528 pf_left=1233039360 pf_need_left=168288616 pf_keep=573440 redirected=132 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=449 move_txgs=5 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=132 kept=573440 entries=132 tombstones=0 damaged=0 extra=6537216 ms=452 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=34 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=106 kept=450560 entries=106 tombstones=0 damaged=0 extra=5726208 ms=13 rc=0
+CHECK a-r128-p10-redirect as_user_entries PASS
+CHECK a-r128-p10-redirect as_user_rewritten PASS
+CHECK a-r128-p10-redirect as_user_redirected PASS
+CHECK a-r128-p10-redirect as_user_kept PASS
+CHECK a-r128-p10-redirect as_user_census_left PASS
+CHECK a-r128-p10-redirect as_user_after_drop PASS
+RESULT a-r128-p10-redirect kernel: entries after_drop rewritten redirected kept_KiB = 132 106 0 132 560; 1 Nov: 132 106 0 132 560 (SAME); mover_ms=386 user_mover_ms=449
+CHECK a-r128-p10-redirect dmesg_clean PASS
+END a-r128-p10-redirect 2026-11-03T11:05:53+01:00
+BEGIN a-r128-p30-hybrid 2026-11-03T11:05:53+01:00
+CHECK a-r128-p30-hybrid import PASS
+CHECK a-r128-p30-hybrid feature PASS
+MOVER a-r128-p30-hybrid cmd=epoch pool=jointfixture epoch_txg=32 width=5 parity=2 ms=22 rc=0
+CHECK a-r128-p30-hybrid epoch PASS
+MOVER a-r128-p30-hybrid cmd=move pool=jointfixture mode=hybrid head=jointfixture gang=1 force=0 epoch_txg=32 head_rw=1 census_dvas=132 to_redirect=46 to_rewrite=86 gang_dvas=0 zil_old=0 preflight=0 pf_free=1256112128 pf_slop=168018280 pf_need_end=6262784 pf_new=6979584 pf_packed=6979584 pf_left=1248681984 pf_need_left=172241256 pf_keep=204800 redirected=46 refused=0 read_errs=0 errs= rewritten=70 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=217 move_txgs=13 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=46 kept=204800 entries=46 tombstones=0 damaged=0 extra=2039808 ms=234 rc=0
+CHECK a-r128-p30-hybrid move_rc0 PASS
+CHECK a-r128-p30-hybrid census0 PASS
+CHECK a-r128-p30-hybrid export PASS
+CHECK a-r128-p30-hybrid verify1 PASS
+CHECK a-r128-p30-hybrid cold_import PASS
+MOVER a-r128-p30-hybrid cmd=census pool=jointfixture epoch_txg=32 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=46 kept=204800 entries=46 tombstones=0 damaged=0 extra=2039808 ms=13 rc=0
+CHECK a-r128-p30-hybrid cold_export PASS
+CHECK a-r128-p30-hybrid cold_census0 PASS
+CHECK a-r128-p30-hybrid cold_entries PASS
+CHECK a-r128-p30-hybrid cold_reached PASS
+CHECK a-r128-p30-hybrid cold_damaged0 PASS
+CHECK a-r128-p30-hybrid drop_retained PASS
+CHECK a-r128-p30-hybrid cold2_import PASS
+MOVER a-r128-p30-hybrid cmd=census pool=jointfixture epoch_txg=32 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=10 rc=0
+CHECK a-r128-p30-hybrid cold2_export PASS
+CHECK a-r128-p30-hybrid verify2 PASS
+CHECK a-r128-p30-hybrid rw_import PASS
+CHECK a-r128-p30-hybrid scrub0 PASS
+CHECK a-r128-p30-hybrid rw_export PASS
+CHECK a-r128-p30-hybrid zdb PASS
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=34 width=5 parity=2 ms=63 rc=0
+RESULT cmd=move pool=jointfixture mode=hybrid head=jointfixture gang=1 force=0 epoch_txg=34 head_rw=1 census_dvas=132 to_redirect=46 to_rewrite=86 gang_dvas=0 zil_old=0 preflight=0 pf_free=1256308736 pf_slop=168018280 pf_need_end=6262784 pf_new=6979584 pf_packed=6979584 pf_left=1248915456 pf_need_left=172241256 pf_keep=204800 redirected=46 refused=0 read_errs=0 errs= rewritten=70 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=257 move_txgs=7 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=46 kept=204800 entries=46 tombstones=0 damaged=0 extra=2039808 ms=261 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=34 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=13 rc=0
+CHECK a-r128-p30-hybrid as_user_entries PASS
+CHECK a-r128-p30-hybrid as_user_rewritten PASS
+CHECK a-r128-p30-hybrid as_user_redirected PASS
+CHECK a-r128-p30-hybrid as_user_kept PASS
+CHECK a-r128-p30-hybrid as_user_census_left PASS
+CHECK a-r128-p30-hybrid as_user_after_drop PASS
+RESULT a-r128-p30-hybrid kernel: entries after_drop rewritten redirected kept_KiB = 46 0 70 46 200; 1 Nov: 46 0 70 46 200 (SAME); mover_ms=217 user_mover_ms=257
+CHECK a-r128-p30-hybrid dmesg_clean PASS
+END a-r128-p30-hybrid 2026-11-03T11:06:03+01:00
+BEGIN a-r128-p30-redirect 2026-11-03T11:06:03+01:00
+CHECK a-r128-p30-redirect import PASS
+CHECK a-r128-p30-redirect feature PASS
+MOVER a-r128-p30-redirect cmd=epoch pool=jointfixture epoch_txg=32 width=5 parity=2 ms=22 rc=0
+CHECK a-r128-p30-redirect epoch PASS
+MOVER a-r128-p30-redirect cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=32 head_rw=0 census_dvas=132 to_redirect=132 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=1256112128 pf_slop=168018280 pf_need_end=6807552 pf_new=22806528 pf_packed=22806528 pf_left=1232842752 pf_need_left=168288616 pf_keep=573440 redirected=132 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=386 move_txgs=5 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=132 kept=573440 entries=132 tombstones=0 damaged=0 extra=6537216 ms=402 rc=0
+CHECK a-r128-p30-redirect move_rc0 PASS
+CHECK a-r128-p30-redirect census0 PASS
+CHECK a-r128-p30-redirect export PASS
+CHECK a-r128-p30-redirect verify1 PASS
+CHECK a-r128-p30-redirect cold_import PASS
+MOVER a-r128-p30-redirect cmd=census pool=jointfixture epoch_txg=32 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=132 kept=573440 entries=132 tombstones=0 damaged=0 extra=6537216 ms=14 rc=0
+CHECK a-r128-p30-redirect cold_export PASS
+CHECK a-r128-p30-redirect cold_census0 PASS
+CHECK a-r128-p30-redirect cold_entries PASS
+CHECK a-r128-p30-redirect cold_reached PASS
+CHECK a-r128-p30-redirect cold_damaged0 PASS
+CHECK a-r128-p30-redirect drop_retained PASS
+CHECK a-r128-p30-redirect cold2_import PASS
+MOVER a-r128-p30-redirect cmd=census pool=jointfixture epoch_txg=32 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=86 kept=368640 entries=86 tombstones=0 damaged=0 extra=4497408 ms=10 rc=0
+CHECK a-r128-p30-redirect cold2_export PASS
+CHECK a-r128-p30-redirect verify2 PASS
+CHECK a-r128-p30-redirect rw_import PASS
+CHECK a-r128-p30-redirect scrub0 PASS
+CHECK a-r128-p30-redirect rw_export PASS
+CHECK a-r128-p30-redirect zdb PASS
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=34 width=5 parity=2 ms=62 rc=0
+RESULT cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=34 head_rw=0 census_dvas=132 to_redirect=132 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=1256284160 pf_slop=168018280 pf_need_end=6807552 pf_new=22806528 pf_packed=22806528 pf_left=1232977920 pf_need_left=168288616 pf_keep=573440 redirected=132 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=465 move_txgs=5 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=132 kept=573440 entries=132 tombstones=0 damaged=0 extra=6537216 ms=468 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=34 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=86 kept=368640 entries=86 tombstones=0 damaged=0 extra=4497408 ms=16 rc=0
+CHECK a-r128-p30-redirect as_user_entries PASS
+CHECK a-r128-p30-redirect as_user_rewritten PASS
+CHECK a-r128-p30-redirect as_user_redirected PASS
+CHECK a-r128-p30-redirect as_user_kept PASS
+CHECK a-r128-p30-redirect as_user_census_left PASS
+CHECK a-r128-p30-redirect as_user_after_drop PASS
+RESULT a-r128-p30-redirect kernel: entries after_drop rewritten redirected kept_KiB = 132 86 0 132 560; 1 Nov: 132 86 0 132 560 (SAME); mover_ms=386 user_mover_ms=465
+CHECK a-r128-p30-redirect dmesg_clean PASS
+END a-r128-p30-redirect 2026-11-03T11:06:14+01:00
+BEGIN a-r128-p100-hybrid 2026-11-03T11:06:14+01:00
+CHECK a-r128-p100-hybrid import PASS
+CHECK a-r128-p100-hybrid feature PASS
+MOVER a-r128-p100-hybrid cmd=epoch pool=jointfixture epoch_txg=32 width=5 parity=2 ms=24 rc=0
+CHECK a-r128-p100-hybrid epoch PASS
+MOVER a-r128-p100-hybrid cmd=move pool=jointfixture mode=hybrid head=jointfixture gang=1 force=0 epoch_txg=32 head_rw=1 census_dvas=130 to_redirect=116 to_rewrite=14 gang_dvas=0 zil_old=0 preflight=0 pf_free=1256046592 pf_slop=168018280 pf_need_end=6676480 pf_new=22462464 pf_packed=22462464 pf_left=1233100800 pf_need_left=168354152 pf_keep=491520 redirected=116 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=354 move_txgs=13 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=116 kept=491520 entries=116 tombstones=0 damaged=0 extra=6340608 ms=369 rc=0
+CHECK a-r128-p100-hybrid move_rc0 PASS
+CHECK a-r128-p100-hybrid census0 PASS
+CHECK a-r128-p100-hybrid export PASS
+CHECK a-r128-p100-hybrid verify1 PASS
+CHECK a-r128-p100-hybrid cold_import PASS
+MOVER a-r128-p100-hybrid cmd=census pool=jointfixture epoch_txg=32 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=116 kept=491520 entries=116 tombstones=0 damaged=0 extra=6340608 ms=14 rc=0
+CHECK a-r128-p100-hybrid cold_export PASS
+CHECK a-r128-p100-hybrid cold_census0 PASS
+CHECK a-r128-p100-hybrid cold_entries PASS
+CHECK a-r128-p100-hybrid cold_reached PASS
+CHECK a-r128-p100-hybrid cold_damaged0 PASS
+CHECK a-r128-p100-hybrid drop_retained PASS
+CHECK a-r128-p100-hybrid cold2_import PASS
+MOVER a-r128-p100-hybrid cmd=census pool=jointfixture epoch_txg=32 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=9 rc=0
+CHECK a-r128-p100-hybrid cold2_export PASS
+CHECK a-r128-p100-hybrid verify2 PASS
+CHECK a-r128-p100-hybrid rw_import PASS
+CHECK a-r128-p100-hybrid scrub0 PASS
+CHECK a-r128-p100-hybrid rw_export PASS
+CHECK a-r128-p100-hybrid zdb PASS
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=34 width=5 parity=2 ms=64 rc=0
+RESULT cmd=move pool=jointfixture mode=hybrid head=jointfixture gang=1 force=0 epoch_txg=34 head_rw=1 census_dvas=130 to_redirect=116 to_rewrite=14 gang_dvas=0 zil_old=0 preflight=0 pf_free=1256366080 pf_slop=168018280 pf_need_end=6676480 pf_new=22462464 pf_packed=22462464 pf_left=1233371136 pf_need_left=168354152 pf_keep=491520 redirected=130 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=14 round2=0 round3=0 mover_ms=432 move_txgs=8 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=130 kept=565248 entries=130 tombstones=0 damaged=0 extra=6512640 ms=435 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=34 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=14 kept=73728 entries=14 tombstones=0 damaged=0 extra=172032 ms=16 rc=0
+CHECK a-r128-p100-hybrid as_user_entries FAIL: eq 116 130
+CHECK a-r128-p100-hybrid as_user_rewritten PASS
+CHECK a-r128-p100-hybrid as_user_redirected FAIL: eq 116 130
+CHECK a-r128-p100-hybrid as_user_kept FAIL: eq 491520 565248
+CHECK a-r128-p100-hybrid as_user_census_left PASS
+CHECK a-r128-p100-hybrid as_user_after_drop FAIL: eq 0 14
+RESULT a-r128-p100-hybrid kernel: entries after_drop rewritten redirected kept_KiB = 116 0 0 116 480; 1 Nov: 130 14 0 130 552 (DIFFERENT); mover_ms=354 user_mover_ms=432
+CHECK a-r128-p100-hybrid dmesg_clean PASS
+END a-r128-p100-hybrid 2026-11-03T11:06:24+01:00
+BEGIN a-r128-p100-redirect 2026-11-03T11:06:24+01:00
+CHECK a-r128-p100-redirect import PASS
+CHECK a-r128-p100-redirect feature PASS
+MOVER a-r128-p100-redirect cmd=epoch pool=jointfixture epoch_txg=32 width=5 parity=2 ms=23 rc=0
+CHECK a-r128-p100-redirect epoch PASS
+MOVER a-r128-p100-redirect cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=32 head_rw=0 census_dvas=130 to_redirect=130 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=1256194048 pf_slop=168018280 pf_need_end=6778880 pf_new=22757376 pf_packed=22757376 pf_left=1232965632 pf_need_left=168284520 pf_keep=565248 redirected=130 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=359 move_txgs=5 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=130 kept=565248 entries=130 tombstones=0 damaged=0 extra=6512640 ms=374 rc=0
+CHECK a-r128-p100-redirect move_rc0 PASS
+CHECK a-r128-p100-redirect census0 PASS
+CHECK a-r128-p100-redirect export PASS
+CHECK a-r128-p100-redirect verify1 PASS
+CHECK a-r128-p100-redirect cold_import PASS
+MOVER a-r128-p100-redirect cmd=census pool=jointfixture epoch_txg=32 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=130 kept=565248 entries=130 tombstones=0 damaged=0 extra=6512640 ms=13 rc=0
+CHECK a-r128-p100-redirect cold_export PASS
+CHECK a-r128-p100-redirect cold_census0 PASS
+CHECK a-r128-p100-redirect cold_entries PASS
+CHECK a-r128-p100-redirect cold_reached PASS
+CHECK a-r128-p100-redirect cold_damaged0 PASS
+CHECK a-r128-p100-redirect drop_retained PASS
+CHECK a-r128-p100-redirect cold2_import PASS
+MOVER a-r128-p100-redirect cmd=census pool=jointfixture epoch_txg=32 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=14 kept=73728 entries=14 tombstones=0 damaged=0 extra=172032 ms=9 rc=0
+CHECK a-r128-p100-redirect cold2_export PASS
+CHECK a-r128-p100-redirect verify2 PASS
+CHECK a-r128-p100-redirect rw_import PASS
+CHECK a-r128-p100-redirect scrub0 PASS
+CHECK a-r128-p100-redirect rw_export PASS
+CHECK a-r128-p100-redirect zdb PASS
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=34 width=5 parity=2 ms=63 rc=0
+RESULT cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=34 head_rw=0 census_dvas=130 to_redirect=130 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=1256366080 pf_slop=168018280 pf_need_end=6778880 pf_new=22757376 pf_packed=22757376 pf_left=1233113088 pf_need_left=168284520 pf_keep=565248 redirected=130 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=431 move_txgs=5 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=130 kept=565248 entries=130 tombstones=0 damaged=0 extra=6512640 ms=434 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=34 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=14 kept=73728 entries=14 tombstones=0 damaged=0 extra=172032 ms=12 rc=0
+CHECK a-r128-p100-redirect as_user_entries PASS
+CHECK a-r128-p100-redirect as_user_rewritten PASS
+CHECK a-r128-p100-redirect as_user_redirected PASS
+CHECK a-r128-p100-redirect as_user_kept PASS
+CHECK a-r128-p100-redirect as_user_census_left PASS
+CHECK a-r128-p100-redirect as_user_after_drop PASS
+RESULT a-r128-p100-redirect kernel: entries after_drop rewritten redirected kept_KiB = 130 14 0 130 552; 1 Nov: 130 14 0 130 552 (SAME); mover_ms=359 user_mover_ms=431
+CHECK a-r128-p100-redirect dmesg_clean PASS
+END a-r128-p100-redirect 2026-11-03T11:06:35+01:00
+BEGIN a-r16-p0-hybrid 2026-11-03T11:06:35+01:00
+CHECK a-r16-p0-hybrid import PASS
+CHECK a-r16-p0-hybrid feature PASS
+MOVER a-r16-p0-hybrid cmd=epoch pool=jointfixture epoch_txg=31 width=5 parity=2 ms=22 rc=0
+CHECK a-r16-p0-hybrid epoch PASS
+MOVER a-r16-p0-hybrid cmd=move pool=jointfixture mode=hybrid head=jointfixture gang=1 force=0 epoch_txg=31 head_rw=1 census_dvas=816 to_redirect=0 to_rewrite=816 gang_dvas=0 zil_old=0 preflight=0 pf_free=1253097472 pf_slop=168018280 pf_need_end=9953280 pf_new=0 pf_packed=0 pf_left=1252712448 pf_need_left=177971560 pf_keep=0 redirected=0 refused=0 read_errs=0 errs= rewritten=800 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=134 move_txgs=12 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=149 rc=0
+CHECK a-r16-p0-hybrid move_rc0 PASS
+CHECK a-r16-p0-hybrid census0 PASS
+CHECK a-r16-p0-hybrid export PASS
+CHECK a-r16-p0-hybrid verify1 PASS
+CHECK a-r16-p0-hybrid cold_import PASS
+MOVER a-r16-p0-hybrid cmd=census pool=jointfixture epoch_txg=31 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=11 rc=0
+CHECK a-r16-p0-hybrid cold_export PASS
+CHECK a-r16-p0-hybrid cold_census0 PASS
+CHECK a-r16-p0-hybrid cold_entries PASS
+CHECK a-r16-p0-hybrid cold_reached PASS
+CHECK a-r16-p0-hybrid cold_damaged0 PASS
+CHECK a-r16-p0-hybrid drop_retained PASS
+CHECK a-r16-p0-hybrid cold2_import PASS
+MOVER a-r16-p0-hybrid cmd=census pool=jointfixture epoch_txg=31 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=9 rc=0
+CHECK a-r16-p0-hybrid cold2_export PASS
+CHECK a-r16-p0-hybrid verify2 PASS
+CHECK a-r16-p0-hybrid rw_import PASS
+CHECK a-r16-p0-hybrid scrub0 PASS
+CHECK a-r16-p0-hybrid rw_export PASS
+CHECK a-r16-p0-hybrid zdb PASS
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=33 width=5 parity=2 ms=62 rc=0
+RESULT cmd=move pool=jointfixture mode=hybrid head=jointfixture gang=1 force=0 epoch_txg=33 head_rw=1 census_dvas=816 to_redirect=0 to_rewrite=816 gang_dvas=0 zil_old=0 preflight=0 pf_free=1253244928 pf_slop=168018280 pf_need_end=9953280 pf_new=0 pf_packed=0 pf_left=1252798464 pf_need_left=177971560 pf_keep=0 redirected=0 refused=0 read_errs=0 errs= rewritten=800 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=217 move_txgs=6 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=221 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=33 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=16 rc=0
+CHECK a-r16-p0-hybrid as_user_entries PASS
+CHECK a-r16-p0-hybrid as_user_rewritten PASS
+CHECK a-r16-p0-hybrid as_user_redirected PASS
+CHECK a-r16-p0-hybrid as_user_kept PASS
+CHECK a-r16-p0-hybrid as_user_census_left PASS
+CHECK a-r16-p0-hybrid as_user_after_drop PASS
+RESULT a-r16-p0-hybrid kernel: entries after_drop rewritten redirected kept_KiB = 0 0 800 0 0; 1 Nov: 0 0 800 0 0 (SAME); mover_ms=134 user_mover_ms=217
+CHECK a-r16-p0-hybrid dmesg_clean PASS
+END a-r16-p0-hybrid 2026-11-03T11:06:45+01:00
+BEGIN a-r16-p0-redirect 2026-11-03T11:06:45+01:00
+CHECK a-r16-p0-redirect import PASS
+CHECK a-r16-p0-redirect feature PASS
+MOVER a-r16-p0-redirect cmd=epoch pool=jointfixture epoch_txg=31 width=5 parity=2 ms=22 rc=0
+CHECK a-r16-p0-redirect epoch PASS
+MOVER a-r16-p0-redirect cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=31 head_rw=0 census_dvas=816 to_redirect=816 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=1253097472 pf_slop=168018280 pf_need_end=21553152 pf_new=29908992 pf_packed=29908992 pf_left=1222840320 pf_need_left=169689448 pf_keep=9928704 redirected=816 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=2363 move_txgs=10 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=816 kept=9928704 entries=816 tombstones=0 damaged=0 extra=19881984 ms=2376 rc=0
+CHECK a-r16-p0-redirect move_rc0 PASS
+CHECK a-r16-p0-redirect census0 PASS
+CHECK a-r16-p0-redirect export PASS
+CHECK a-r16-p0-redirect verify1 PASS
+CHECK a-r16-p0-redirect cold_import PASS
+MOVER a-r16-p0-redirect cmd=census pool=jointfixture epoch_txg=31 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=816 kept=9928704 entries=816 tombstones=0 damaged=0 extra=19881984 ms=11 rc=0
+CHECK a-r16-p0-redirect cold_export PASS
+CHECK a-r16-p0-redirect cold_census0 PASS
+CHECK a-r16-p0-redirect cold_entries PASS
+CHECK a-r16-p0-redirect cold_reached PASS
+CHECK a-r16-p0-redirect cold_damaged0 PASS
+CHECK a-r16-p0-redirect drop_retained PASS
+CHECK a-r16-p0-redirect cold2_import PASS
+MOVER a-r16-p0-redirect cmd=census pool=jointfixture epoch_txg=31 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=816 kept=9928704 entries=816 tombstones=0 damaged=0 extra=19881984 ms=11 rc=0
+CHECK a-r16-p0-redirect cold2_export PASS
+CHECK a-r16-p0-redirect verify2 PASS
+CHECK a-r16-p0-redirect rw_import PASS
+CHECK a-r16-p0-redirect scrub0 PASS
+CHECK a-r16-p0-redirect rw_export PASS
+CHECK a-r16-p0-redirect zdb PASS
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=30 width=5 parity=2 ms=60 rc=0
+RESULT cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=30 head_rw=0 census_dvas=816 to_redirect=816 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=1253318656 pf_slop=168018280 pf_need_end=21553152 pf_new=29908992 pf_packed=29908992 pf_left=1223024640 pf_need_left=169689448 pf_keep=9928704 redirected=816 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=2367 move_txgs=10 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=816 kept=9928704 entries=816 tombstones=0 damaged=0 extra=19881984 ms=2370 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=30 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=816 kept=9928704 entries=816 tombstones=0 damaged=0 extra=19881984 ms=19 rc=0
+CHECK a-r16-p0-redirect as_user_entries PASS
+CHECK a-r16-p0-redirect as_user_rewritten PASS
+CHECK a-r16-p0-redirect as_user_redirected PASS
+CHECK a-r16-p0-redirect as_user_kept PASS
+CHECK a-r16-p0-redirect as_user_census_left PASS
+CHECK a-r16-p0-redirect as_user_after_drop PASS
+RESULT a-r16-p0-redirect kernel: entries after_drop rewritten redirected kept_KiB = 816 816 0 816 9696; 1 Nov: 816 816 0 816 9696 (SAME); mover_ms=2363 user_mover_ms=2367
+CHECK a-r16-p0-redirect dmesg_clean PASS
+END a-r16-p0-redirect 2026-11-03T11:07:00+01:00
+BEGIN a-r16-p10-hybrid 2026-11-03T11:07:00+01:00
+CHECK a-r16-p10-hybrid import PASS
+CHECK a-r16-p10-hybrid feature PASS
+MOVER a-r16-p10-hybrid cmd=epoch pool=jointfixture epoch_txg=32 width=5 parity=2 ms=21 rc=0
+CHECK a-r16-p10-hybrid epoch PASS
+MOVER a-r16-p10-hybrid cmd=move pool=jointfixture mode=hybrid head=jointfixture gang=1 force=0 epoch_txg=32 head_rw=1 census_dvas=832 to_redirect=96 to_rewrite=736 gang_dvas=0 zil_old=0 preflight=0 pf_free=1252745216 pf_slop=168018280 pf_need_end=11329536 pf_new=3293184 pf_packed=3293184 pf_left=1249038336 pf_need_left=177185128 pf_keep=1064960 redirected=96 refused=0 read_errs=0 errs= rewritten=720 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=380 move_txgs=13 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=96 kept=1064960 entries=96 tombstones=0 damaged=0 extra=2162688 ms=394 rc=0
+CHECK a-r16-p10-hybrid move_rc0 PASS
+CHECK a-r16-p10-hybrid census0 PASS
+CHECK a-r16-p10-hybrid export PASS
+CHECK a-r16-p10-hybrid verify1 PASS
+CHECK a-r16-p10-hybrid cold_import PASS
+MOVER a-r16-p10-hybrid cmd=census pool=jointfixture epoch_txg=32 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=96 kept=1064960 entries=96 tombstones=0 damaged=0 extra=2162688 ms=13 rc=0
+CHECK a-r16-p10-hybrid cold_export PASS
+CHECK a-r16-p10-hybrid cold_census0 PASS
+CHECK a-r16-p10-hybrid cold_entries PASS
+CHECK a-r16-p10-hybrid cold_reached PASS
+CHECK a-r16-p10-hybrid cold_damaged0 PASS
+CHECK a-r16-p10-hybrid drop_retained PASS
+CHECK a-r16-p10-hybrid cold2_import PASS
+MOVER a-r16-p10-hybrid cmd=census pool=jointfixture epoch_txg=32 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=10 rc=0
+CHECK a-r16-p10-hybrid cold2_export PASS
+CHECK a-r16-p10-hybrid verify2 PASS
+CHECK a-r16-p10-hybrid rw_import PASS
+CHECK a-r16-p10-hybrid scrub0 PASS
+CHECK a-r16-p10-hybrid rw_export PASS
+CHECK a-r16-p10-hybrid zdb PASS
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=31 width=5 parity=2 ms=60 rc=0
+RESULT cmd=move pool=jointfixture mode=hybrid head=jointfixture gang=1 force=0 epoch_txg=31 head_rw=1 census_dvas=832 to_redirect=96 to_rewrite=736 gang_dvas=0 zil_old=0 preflight=0 pf_free=1253015552 pf_slop=168018280 pf_need_end=11329536 pf_new=3293184 pf_packed=3293184 pf_left=1249271808 pf_need_left=177185128 pf_keep=1064960 redirected=96 refused=0 read_errs=0 errs= rewritten=720 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=434 move_txgs=7 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=96 kept=1064960 entries=96 tombstones=0 damaged=0 extra=2162688 ms=438 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=31 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=13 rc=0
+CHECK a-r16-p10-hybrid as_user_entries PASS
+CHECK a-r16-p10-hybrid as_user_rewritten PASS
+CHECK a-r16-p10-hybrid as_user_redirected PASS
+CHECK a-r16-p10-hybrid as_user_kept PASS
+CHECK a-r16-p10-hybrid as_user_census_left PASS
+CHECK a-r16-p10-hybrid as_user_after_drop PASS
+RESULT a-r16-p10-hybrid kernel: entries after_drop rewritten redirected kept_KiB = 96 0 720 96 1040; 1 Nov: 96 0 720 96 1040 (SAME); mover_ms=380 user_mover_ms=434
+CHECK a-r16-p10-hybrid dmesg_clean PASS
+END a-r16-p10-hybrid 2026-11-03T11:07:12+01:00
+BEGIN a-r16-p10-redirect 2026-11-03T11:07:12+01:00
+CHECK a-r16-p10-redirect import PASS
+CHECK a-r16-p10-redirect feature PASS
+MOVER a-r16-p10-redirect cmd=epoch pool=jointfixture epoch_txg=32 width=5 parity=2 ms=22 rc=0
+CHECK a-r16-p10-redirect epoch PASS
+MOVER a-r16-p10-redirect cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=32 head_rw=0 census_dvas=832 to_redirect=832 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=1252745216 pf_slop=168018280 pf_need_end=21782528 pf_new=30253056 pf_packed=30253056 pf_left=1222041600 pf_need_left=169722216 pf_keep=10010624 redirected=832 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=2324 move_txgs=10 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=832 kept=10010624 entries=832 tombstones=0 damaged=0 extra=20078592 ms=2340 rc=0
+CHECK a-r16-p10-redirect move_rc0 PASS
+CHECK a-r16-p10-redirect census0 PASS
+CHECK a-r16-p10-redirect export PASS
+CHECK a-r16-p10-redirect verify1 PASS
+CHECK a-r16-p10-redirect cold_import PASS
+MOVER a-r16-p10-redirect cmd=census pool=jointfixture epoch_txg=32 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=832 kept=10010624 entries=832 tombstones=0 damaged=0 extra=20078592 ms=13 rc=0
+CHECK a-r16-p10-redirect cold_export PASS
+CHECK a-r16-p10-redirect cold_census0 PASS
+CHECK a-r16-p10-redirect cold_entries PASS
+CHECK a-r16-p10-redirect cold_reached PASS
+CHECK a-r16-p10-redirect cold_damaged0 PASS
+CHECK a-r16-p10-redirect drop_retained PASS
+CHECK a-r16-p10-redirect cold2_import PASS
+MOVER a-r16-p10-redirect cmd=census pool=jointfixture epoch_txg=32 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=736 kept=8945664 entries=736 tombstones=0 damaged=0 extra=17915904 ms=9 rc=0
+CHECK a-r16-p10-redirect cold2_export PASS
+CHECK a-r16-p10-redirect verify2 PASS
+CHECK a-r16-p10-redirect rw_import PASS
+CHECK a-r16-p10-redirect scrub0 PASS
+CHECK a-r16-p10-redirect rw_export PASS
+CHECK a-r16-p10-redirect zdb PASS
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=34 width=5 parity=2 ms=63 rc=0
+RESULT cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=34 head_rw=0 census_dvas=832 to_redirect=832 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=1252966400 pf_slop=168018280 pf_need_end=21782528 pf_new=30253056 pf_packed=30253056 pf_left=1222299648 pf_need_left=169722216 pf_keep=10010624 redirected=832 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=2439 move_txgs=10 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=832 kept=10010624 entries=832 tombstones=0 damaged=0 extra=20078592 ms=2442 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=34 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=736 kept=8945664 entries=736 tombstones=0 damaged=0 extra=17915904 ms=19 rc=0
+CHECK a-r16-p10-redirect as_user_entries PASS
+CHECK a-r16-p10-redirect as_user_rewritten PASS
+CHECK a-r16-p10-redirect as_user_redirected PASS
+CHECK a-r16-p10-redirect as_user_kept PASS
+CHECK a-r16-p10-redirect as_user_census_left PASS
+CHECK a-r16-p10-redirect as_user_after_drop PASS
+RESULT a-r16-p10-redirect kernel: entries after_drop rewritten redirected kept_KiB = 832 736 0 832 9776; 1 Nov: 832 736 0 832 9776 (SAME); mover_ms=2324 user_mover_ms=2439
+CHECK a-r16-p10-redirect dmesg_clean PASS
+END a-r16-p10-redirect 2026-11-03T11:07:27+01:00
+BEGIN a-r16-p30-hybrid 2026-11-03T11:07:27+01:00
+CHECK a-r16-p30-hybrid import PASS
+CHECK a-r16-p30-hybrid feature PASS
+MOVER a-r16-p30-hybrid cmd=epoch pool=jointfixture epoch_txg=32 width=5 parity=2 ms=23 rc=0
+CHECK a-r16-p30-hybrid epoch PASS
+MOVER a-r16-p30-hybrid cmd=move pool=jointfixture mode=hybrid head=jointfixture gang=1 force=0 epoch_txg=32 head_rw=1 census_dvas=832 to_redirect=256 to_rewrite=576 gang_dvas=0 zil_old=0 preflight=0 pf_free=1252794368 pf_slop=168018280 pf_need_end=13664256 pf_new=9216000 pf_packed=9216000 pf_left=1243127808 pf_need_left=175563112 pf_keep=3047424 redirected=256 refused=0 read_errs=0 errs= rewritten=560 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=796 move_txgs=14 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=256 kept=3047424 entries=256 tombstones=0 damaged=0 extra=6119424 ms=812 rc=0
+CHECK a-r16-p30-hybrid move_rc0 PASS
+CHECK a-r16-p30-hybrid census0 PASS
+CHECK a-r16-p30-hybrid export PASS
+CHECK a-r16-p30-hybrid verify1 PASS
+CHECK a-r16-p30-hybrid cold_import PASS
+MOVER a-r16-p30-hybrid cmd=census pool=jointfixture epoch_txg=32 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=256 kept=3047424 entries=256 tombstones=0 damaged=0 extra=6119424 ms=15 rc=0
+CHECK a-r16-p30-hybrid cold_export PASS
+CHECK a-r16-p30-hybrid cold_census0 PASS
+CHECK a-r16-p30-hybrid cold_entries PASS
+CHECK a-r16-p30-hybrid cold_reached PASS
+CHECK a-r16-p30-hybrid cold_damaged0 PASS
+CHECK a-r16-p30-hybrid drop_retained PASS
+CHECK a-r16-p30-hybrid cold2_import PASS
+MOVER a-r16-p30-hybrid cmd=census pool=jointfixture epoch_txg=32 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=10 rc=0
+CHECK a-r16-p30-hybrid cold2_export PASS
+CHECK a-r16-p30-hybrid verify2 PASS
+CHECK a-r16-p30-hybrid rw_import PASS
+CHECK a-r16-p30-hybrid scrub0 PASS
+CHECK a-r16-p30-hybrid rw_export PASS
+CHECK a-r16-p30-hybrid zdb PASS
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=34 width=5 parity=2 ms=61 rc=0
+RESULT cmd=move pool=jointfixture mode=hybrid head=jointfixture gang=1 force=0 epoch_txg=34 head_rw=1 census_dvas=832 to_redirect=256 to_rewrite=576 gang_dvas=0 zil_old=0 preflight=0 pf_free=1252990976 pf_slop=168018280 pf_need_end=13664256 pf_new=9216000 pf_packed=9216000 pf_left=1243275264 pf_need_left=175563112 pf_keep=3047424 redirected=256 refused=0 read_errs=0 errs= rewritten=560 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=856 move_txgs=8 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=256 kept=3047424 entries=256 tombstones=0 damaged=0 extra=6119424 ms=860 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=34 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=20 rc=0
+CHECK a-r16-p30-hybrid as_user_entries PASS
+CHECK a-r16-p30-hybrid as_user_rewritten PASS
+CHECK a-r16-p30-hybrid as_user_redirected PASS
+CHECK a-r16-p30-hybrid as_user_kept PASS
+CHECK a-r16-p30-hybrid as_user_census_left PASS
+CHECK a-r16-p30-hybrid as_user_after_drop PASS
+RESULT a-r16-p30-hybrid kernel: entries after_drop rewritten redirected kept_KiB = 256 0 560 256 2976; 1 Nov: 256 0 560 256 2976 (SAME); mover_ms=796 user_mover_ms=856
+CHECK a-r16-p30-hybrid dmesg_clean PASS
+END a-r16-p30-hybrid 2026-11-03T11:07:39+01:00
+BEGIN a-r16-p30-redirect 2026-11-03T11:07:39+01:00
+CHECK a-r16-p30-redirect import PASS
+CHECK a-r16-p30-redirect feature PASS
+MOVER a-r16-p30-redirect cmd=epoch pool=jointfixture epoch_txg=32 width=5 parity=2 ms=22 rc=0
+CHECK a-r16-p30-redirect epoch PASS
+MOVER a-r16-p30-redirect cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=32 head_rw=0 census_dvas=832 to_redirect=832 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=1252794368 pf_slop=168018280 pf_need_end=21807104 pf_new=30277632 pf_packed=30277632 pf_left=1222029312 pf_need_left=169722216 pf_keep=10010624 redirected=832 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=2369 move_txgs=10 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=832 kept=10010624 entries=832 tombstones=0 damaged=0 extra=20103168 ms=2393 rc=0
+CHECK a-r16-p30-redirect move_rc0 PASS
+CHECK a-r16-p30-redirect census0 PASS
+CHECK a-r16-p30-redirect export PASS
+CHECK a-r16-p30-redirect verify1 PASS
+CHECK a-r16-p30-redirect cold_import PASS
+MOVER a-r16-p30-redirect cmd=census pool=jointfixture epoch_txg=32 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=832 kept=10010624 entries=832 tombstones=0 damaged=0 extra=20103168 ms=17 rc=0
+CHECK a-r16-p30-redirect cold_export PASS
+CHECK a-r16-p30-redirect cold_census0 PASS
+CHECK a-r16-p30-redirect cold_entries PASS
+CHECK a-r16-p30-redirect cold_reached PASS
+CHECK a-r16-p30-redirect cold_damaged0 PASS
+CHECK a-r16-p30-redirect drop_retained PASS
+CHECK a-r16-p30-redirect cold2_import PASS
+MOVER a-r16-p30-redirect cmd=census pool=jointfixture epoch_txg=32 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=576 kept=6963200 entries=576 tombstones=0 damaged=0 extra=13983744 ms=13 rc=0
+CHECK a-r16-p30-redirect cold2_export PASS
+CHECK a-r16-p30-redirect verify2 PASS
+CHECK a-r16-p30-redirect rw_import PASS
+CHECK a-r16-p30-redirect scrub0 PASS
+CHECK a-r16-p30-redirect rw_export PASS
+CHECK a-r16-p30-redirect zdb PASS
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=34 width=5 parity=2 ms=57 rc=0
+RESULT cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=34 head_rw=0 census_dvas=832 to_redirect=832 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=1252990976 pf_slop=168018280 pf_need_end=21807104 pf_new=30277632 pf_packed=30277632 pf_left=1222250496 pf_need_left=169722216 pf_keep=10010624 redirected=832 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=2431 move_txgs=10 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=832 kept=10010624 entries=832 tombstones=0 damaged=0 extra=20103168 ms=2434 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=34 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=576 kept=6963200 entries=576 tombstones=0 damaged=0 extra=13983744 ms=18 rc=0
+CHECK a-r16-p30-redirect as_user_entries PASS
+CHECK a-r16-p30-redirect as_user_rewritten PASS
+CHECK a-r16-p30-redirect as_user_redirected PASS
+CHECK a-r16-p30-redirect as_user_kept PASS
+CHECK a-r16-p30-redirect as_user_census_left PASS
+CHECK a-r16-p30-redirect as_user_after_drop PASS
+RESULT a-r16-p30-redirect kernel: entries after_drop rewritten redirected kept_KiB = 832 576 0 832 9776; 1 Nov: 832 576 0 832 9776 (SAME); mover_ms=2369 user_mover_ms=2431
+CHECK a-r16-p30-redirect dmesg_clean PASS
+END a-r16-p30-redirect 2026-11-03T11:07:54+01:00
+BEGIN a-r16-p100-hybrid 2026-11-03T11:07:54+01:00
+CHECK a-r16-p100-hybrid import PASS
+CHECK a-r16-p100-hybrid feature PASS
+MOVER a-r16-p100-hybrid cmd=epoch pool=jointfixture epoch_txg=32 width=5 parity=2 ms=23 rc=0
+CHECK a-r16-p100-hybrid epoch PASS
+MOVER a-r16-p100-hybrid cmd=move pool=jointfixture mode=hybrid head=jointfixture gang=1 force=0 epoch_txg=32 head_rw=1 census_dvas=830 to_redirect=816 to_rewrite=14 gang_dvas=0 zil_old=0 preflight=0 pf_free=1252655104 pf_slop=168018280 pf_need_end=21651456 pf_new=29908992 pf_packed=29908992 pf_left=1222311936 pf_need_left=169787752 pf_keep=9928704 redirected=816 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=2344 move_txgs=19 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=816 kept=9928704 entries=816 tombstones=0 damaged=0 extra=19881984 ms=2362 rc=0
+CHECK a-r16-p100-hybrid move_rc0 PASS
+CHECK a-r16-p100-hybrid census0 PASS
+CHECK a-r16-p100-hybrid export PASS
+CHECK a-r16-p100-hybrid verify1 PASS
+CHECK a-r16-p100-hybrid cold_import PASS
+MOVER a-r16-p100-hybrid cmd=census pool=jointfixture epoch_txg=32 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=816 kept=9928704 entries=816 tombstones=0 damaged=0 extra=19881984 ms=13 rc=0
+CHECK a-r16-p100-hybrid cold_export PASS
+CHECK a-r16-p100-hybrid cold_census0 PASS
+CHECK a-r16-p100-hybrid cold_entries PASS
+CHECK a-r16-p100-hybrid cold_reached PASS
+CHECK a-r16-p100-hybrid cold_damaged0 PASS
+CHECK a-r16-p100-hybrid drop_retained PASS
+CHECK a-r16-p100-hybrid cold2_import PASS
+MOVER a-r16-p100-hybrid cmd=census pool=jointfixture epoch_txg=32 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=10 rc=0
+CHECK a-r16-p100-hybrid cold2_export PASS
+CHECK a-r16-p100-hybrid verify2 PASS
+CHECK a-r16-p100-hybrid rw_import PASS
+CHECK a-r16-p100-hybrid scrub0 PASS
+CHECK a-r16-p100-hybrid rw_export PASS
+CHECK a-r16-p100-hybrid zdb PASS
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=31 width=5 parity=2 ms=32 rc=0
+RESULT cmd=move pool=jointfixture mode=hybrid head=jointfixture gang=1 force=0 epoch_txg=31 head_rw=1 census_dvas=830 to_redirect=816 to_rewrite=14 gang_dvas=0 zil_old=0 preflight=0 pf_free=1252777984 pf_slop=168018280 pf_need_end=21651456 pf_new=29908992 pf_packed=29908992 pf_left=1222508544 pf_need_left=169787752 pf_keep=9928704 redirected=830 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=14 round2=0 round3=0 mover_ms=2358 move_txgs=14 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=830 kept=10002432 entries=830 tombstones=0 damaged=0 extra=20054016 ms=2361 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=31 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=14 kept=73728 entries=14 tombstones=0 damaged=0 extra=172032 ms=19 rc=0
+CHECK a-r16-p100-hybrid as_user_entries FAIL: eq 816 830
+CHECK a-r16-p100-hybrid as_user_rewritten PASS
+CHECK a-r16-p100-hybrid as_user_redirected FAIL: eq 816 830
+CHECK a-r16-p100-hybrid as_user_kept FAIL: eq 9928704 10002432
+CHECK a-r16-p100-hybrid as_user_census_left PASS
+CHECK a-r16-p100-hybrid as_user_after_drop FAIL: eq 0 14
+RESULT a-r16-p100-hybrid kernel: entries after_drop rewritten redirected kept_KiB = 816 0 0 816 9696; 1 Nov: 830 14 0 830 9768 (DIFFERENT); mover_ms=2344 user_mover_ms=2358
+CHECK a-r16-p100-hybrid dmesg_clean PASS
+END a-r16-p100-hybrid 2026-11-03T11:08:09+01:00
+BEGIN a-r16-p100-redirect 2026-11-03T11:08:09+01:00
+CHECK a-r16-p100-redirect import PASS
+CHECK a-r16-p100-redirect feature PASS
+MOVER a-r16-p100-redirect cmd=epoch pool=jointfixture epoch_txg=32 width=5 parity=2 ms=24 rc=0
+CHECK a-r16-p100-redirect epoch PASS
+MOVER a-r16-p100-redirect cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=32 head_rw=0 census_dvas=830 to_redirect=830 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=1252802560 pf_slop=168018280 pf_need_end=21753856 pf_new=30203904 pf_packed=30203904 pf_left=1222127616 pf_need_left=169718120 pf_keep=10002432 redirected=830 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=2350 move_txgs=10 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=830 kept=10002432 entries=830 tombstones=0 damaged=0 extra=20054016 ms=2373 rc=0
+CHECK a-r16-p100-redirect move_rc0 PASS
+CHECK a-r16-p100-redirect census0 PASS
+CHECK a-r16-p100-redirect export PASS
+CHECK a-r16-p100-redirect verify1 PASS
+CHECK a-r16-p100-redirect cold_import PASS
+MOVER a-r16-p100-redirect cmd=census pool=jointfixture epoch_txg=32 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=830 kept=10002432 entries=830 tombstones=0 damaged=0 extra=20054016 ms=13 rc=0
+CHECK a-r16-p100-redirect cold_export PASS
+CHECK a-r16-p100-redirect cold_census0 PASS
+CHECK a-r16-p100-redirect cold_entries PASS
+CHECK a-r16-p100-redirect cold_reached PASS
+CHECK a-r16-p100-redirect cold_damaged0 PASS
+CHECK a-r16-p100-redirect drop_retained PASS
+CHECK a-r16-p100-redirect cold2_import PASS
+MOVER a-r16-p100-redirect cmd=census pool=jointfixture epoch_txg=32 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=14 kept=73728 entries=14 tombstones=0 damaged=0 extra=172032 ms=10 rc=0
+CHECK a-r16-p100-redirect cold2_export PASS
+CHECK a-r16-p100-redirect verify2 PASS
+CHECK a-r16-p100-redirect rw_import PASS
+CHECK a-r16-p100-redirect scrub0 PASS
+CHECK a-r16-p100-redirect rw_export PASS
+CHECK a-r16-p100-redirect zdb PASS
+RESULT rewrite-feature rc=0
+RESULT cmd=epoch pool=jointfixture epoch_txg=31 width=5 parity=2 ms=65 rc=0
+RESULT cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=31 head_rw=0 census_dvas=830 to_redirect=830 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=1253048320 pf_slop=168018280 pf_need_end=21753856 pf_new=30203904 pf_packed=30203904 pf_left=1222447104 pf_need_left=169718120 pf_keep=10002432 redirected=830 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=2377 move_txgs=10 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=830 kept=10002432 entries=830 tombstones=0 damaged=0 extra=20054016 ms=2380 rc=0
+RESULT cmd=census pool=jointfixture epoch_txg=31 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=14 kept=73728 entries=14 tombstones=0 damaged=0 extra=172032 ms=19 rc=0
+CHECK a-r16-p100-redirect as_user_entries PASS
+CHECK a-r16-p100-redirect as_user_rewritten PASS
+CHECK a-r16-p100-redirect as_user_redirected PASS
+CHECK a-r16-p100-redirect as_user_kept PASS
+CHECK a-r16-p100-redirect as_user_census_left PASS
+CHECK a-r16-p100-redirect as_user_after_drop PASS
+RESULT a-r16-p100-redirect kernel: entries after_drop rewritten redirected kept_KiB = 830 14 0 830 9768; 1 Nov: 830 14 0 830 9768 (SAME); mover_ms=2350 user_mover_ms=2377
+CHECK a-r16-p100-redirect dmesg_clean PASS
+END a-r16-p100-redirect 2026-11-03T11:08:23+01:00
+DONE a 2026-11-03T11:08:23+01:00: 8 checks failed
+CHECK load srcversion PASS
+CHECK load trigger PASS
+INFO load tree=91df27c68d49809eba85f1167f7a8c958f7a24dd 6.12.113+deb13-cloud-amd64 mover=cmd=census pool=jointfixture epoch_txg=32 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=14 kept=73728 entries=14 tombstones=0 damaged=0 extra=172032 ms=10 rc=0
+BEGIN b-dry-hybrid 2026-11-03T11:08:39+01:00
+MOVER b-dry-hybrid cmd=epoch pool=jointfixture epoch_txg=35 width=5 parity=2 ms=22 rc=0
+CHECK b-dry-hybrid prep PASS
+MOVER b-dry-hybrid cmd=move pool=jointfixture mode=hybrid head=jointfixture gang=1 force=0 epoch_txg=35 head_rw=1 census_dvas=8048 to_redirect=2420 to_rewrite=5628 gang_dvas=0 zil_old=0 preflight=0 pf_free=1074823168 pf_slop=168018280 pf_need_end=133398528 pf_new=89186304 pf_packed=89186304 pf_left=985116672 pf_need_left=242139496 pf_keep=29597696 redirected=2420 refused=0 read_errs=0 errs= rewritten=5600 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=7568 move_txgs=30 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=2420 kept=29597696 entries=2420 tombstones=0 damaged=0 extra=59277312 ms=7583 rc=0
+CHECK b-dry-hybrid move PASS
+CHECK b-dry-hybrid census0 PASS
+CHECK b-dry-hybrid export PASS
+CHECK b-dry-hybrid verify PASS
+CHECK b-dry-hybrid zdb PASS
+CHECK b-dry-hybrid dmesg_clean PASS
+END b-dry-hybrid 2026-11-03T11:08:53+01:00
+BEGIN b-dry-redirect 2026-11-03T11:08:53+01:00
+MOVER b-dry-redirect cmd=epoch pool=jointfixture epoch_txg=35 width=5 parity=2 ms=21 rc=0
+CHECK b-dry-redirect prep PASS
+MOVER b-dry-redirect cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=35 head_rw=0 census_dvas=8048 to_redirect=8048 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=1074823168 pf_slop=168018280 pf_need_end=213876736 pf_new=296927232 pf_packed=296927232 pf_left=777388032 pf_need_left=184500584 pf_keep=98549760 redirected=8048 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=25102 move_txgs=66 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=8048 kept=98549760 entries=8048 tombstones=0 damaged=0 extra=197394432 ms=25116 rc=0
+CHECK b-dry-redirect move PASS
+CHECK b-dry-redirect census0 PASS
+CHECK b-dry-redirect export PASS
+CHECK b-dry-redirect verify PASS
+CHECK b-dry-redirect zdb PASS
+CHECK b-dry-redirect dmesg_clean PASS
+END b-dry-redirect 2026-11-03T11:09:26+01:00
+DONE b-dry 2026-11-03T11:09:26+01:00: 0 checks failed
+CHECK load srcversion PASS
+CHECK load trigger PASS
+INFO load tree=91df27c68d49809eba85f1167f7a8c958f7a24dd 6.12.113+deb13-cloud-amd64 mover=cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=35 head_rw=0 census_dvas=8048 to_redirect=8048 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=1074823168 pf_slop=168018280 pf_need_end=213876736 pf_new=296927232 pf_packed=296927232 pf_left=777388032 pf_need_left=184500584 pf_keep=98549760 redirected=8048 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=25102 move_txgs=66 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=8048 kept=98549760 entries=8048 tombstones=0 damaged=0 extra=197394432 ms=25116 rc=0
+BEGIN c-refused 2026-11-03T11:09:33+01:00
+CHECK c-refused import PASS
+MOVER c-refused cmd=epoch pool=jointfixture epoch_txg=34 width=5 parity=2 ms=25 rc=0
+CHECK c-refused epoch PASS
+CHECK c-refused fill_zvol PASS
+CHECK c-refused fill_dev PASS
+INFO c-refused fill rc=0 size,alloc,free=1275068416,998555648,276512768
+MOVER c-refused cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=34 head_rw=0 census_dvas=8046 to_redirect=8046 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=28 pf_free=276512768 pf_slop=168018280 pf_need_end=213848064 pf_new=296902656 pf_packed=274968576 pf_left=983040 pf_need_left=184496488 pf_keep=98533376 why=refused_by_preflight ms=41 rc=28
+CHECK c-refused refused_enospc PASS
+CHECK c-refused by_preflight PASS
+MOVER c-refused cmd=census pool=jointfixture epoch_txg=34 census_err=0 census_left=8046 gang_dvas=0 gang_left=0 zil_old=0 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=19 rc=0
+CHECK c-refused nothing_moved PASS
+CHECK c-refused export PASS
+CHECK c-refused verify1 PASS
+CHECK c-refused zdb1 PASS
+CHECK c-refused dmesg_clean PASS
+END c-refused 2026-11-03T11:09:46+01:00
+BEGIN c-forced 2026-11-03T11:09:46+01:00
+CHECK c-forced import PASS
+MOVER c-forced cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=1 epoch_txg=34 head_rw=0 census_dvas=8046 to_redirect=8046 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=28 pf_free=276291584 pf_slop=168018280 pf_need_end=213848064 pf_new=296902656 pf_packed=274710528 pf_left=1044480 pf_need_left=184496488 pf_keep=98533376 redirected=7345 refused=2804 read_errs=0 errs=28:2804 rewritten=0 rewrite_err=0 round1=701 round2=701 round3=701 mover_ms=27653 move_txgs=84 census_err=0 census_left=701 gang_dvas=0 gang_left=0 zil_old=0 live=7345 kept=89919488 entries=7345 tombstones=0 damaged=0 extra=180142080 ms=27678 rc=11
+CHECK c-forced rc_eagain PASS
+CHECK c-forced only_enospc PASS
+CHECK c-forced partial PASS
+CHECK c-forced not_suspended PASS
+CHECK c-forced export PASS
+CHECK c-forced verify2 PASS
+CHECK c-forced zdb2 PASS
+CHECK c-forced dmesg_clean PASS
+END c-forced 2026-11-03T11:10:21+01:00
+BEGIN c-freed 2026-11-03T11:10:21+01:00
+CHECK c-freed import PASS
+CHECK c-freed destroy_fill PASS
+MOVER c-freed cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=34 head_rw=0 census_dvas=701 to_redirect=701 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=879632384 pf_slop=168018280 pf_need_end=18663424 pf_new=25841664 pf_packed=25841664 pf_left=853266432 pf_need_left=169453928 pf_keep=8613888 redirected=701 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=2255 move_txgs=9 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=8046 kept=98533376 entries=8046 tombstones=0 damaged=0 extra=197369856 ms=2284 rc=0
+CHECK c-freed move PASS
+CHECK c-freed census0 PASS
+CHECK c-freed scrub0 PASS
+CHECK c-freed export PASS
+CHECK c-freed verify3 PASS
+CHECK c-freed zdb3 FAIL: zdbok /var/tmp/kh/c/full 3
+CHECK c-freed dmesg_clean PASS
+END c-freed 2026-11-03T11:10:30+01:00
+DONE c 2026-11-03T11:10:30+01:00: 1 checks failed
+CHECK load srcversion PASS
+CHECK load trigger PASS
+INFO load tree=91df27c68d49809eba85f1167f7a8c958f7a24dd 6.12.113+deb13-cloud-amd64 mover=cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=34 head_rw=0 census_dvas=701 to_redirect=701 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=879632384 pf_slop=168018280 pf_need_end=18663424 pf_new=25841664 pf_packed=25841664 pf_left=853266432 pf_need_left=169453928 pf_keep=8613888 redirected=701 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=2255 move_txgs=9 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=8046 kept=98533376 entries=8046 tombstones=0 damaged=0 extra=197369856 ms=2284 rc=0
+BEGIN d-gang 2026-11-03T11:10:30+01:00
+CHECK d-gang create_pool PASS
+CHECK d-gang create PASS
+CHECK d-gang snapshot PASS
+CHECK d-gang unmount PASS
+CHECK d-gang export0 PASS
+CHECK d-gang gang_blocks PASS
+CHECK d-gang import2 PASS
+MOVER d-gang cmd=epoch pool=khpool epoch_txg=36 width=5 parity=2 ms=20 rc=0
+CHECK d-gang epoch PASS
+MOVER d-gang cmd=move pool=khpool mode=hybrid head=khpool/g gang=1 force=0 epoch_txg=36 head_rw=1 why=census_failed census_err=52 ms=42 rc=52
+CHECK d-gang gang_found FAIL: gt0 
+CHECK d-gang move_rc0 FAIL: eq 52 0
+CHECK d-gang census0 FAIL: eq  0
+CHECK d-gang mount PASS
+CHECK d-gang data_head PASS
+CHECK d-gang clone PASS
+CHECK d-gang data_snapshot PASS
+CHECK d-gang clone_destroy PASS
+CHECK d-gang scrub0 PASS
+CHECK d-gang export PASS
+CHECK d-gang zdb PASS
+CHECK d-gang dmesg_clean PASS
+END d-gang 2026-11-03T11:10:32+01:00
+BEGIN d-nogang 2026-11-03T11:10:32+01:00
+CHECK d-nogang create_pool PASS
+CHECK d-nogang create PASS
+CHECK d-nogang snapshot PASS
+CHECK d-nogang unmount PASS
+CHECK d-nogang export0 PASS
+CHECK d-nogang gang_blocks PASS
+CHECK d-nogang import2 PASS
+MOVER d-nogang cmd=epoch pool=khpool epoch_txg=36 width=5 parity=2 ms=20 rc=0
+CHECK d-nogang epoch PASS
+MOVER d-nogang cmd=move pool=khpool mode=hybrid head=khpool/g gang=0 force=0 epoch_txg=36 head_rw=1 census_dvas=142 to_redirect=100 to_rewrite=42 gang_dvas=288 zil_old=1 preflight=0 pf_free=1228529664 pf_slop=168018280 pf_need_end=1605632 pf_new=1228800 pf_packed=1228800 pf_left=1226674176 pf_need_left=168395112 pf_keep=819200 redirected=100 refused=0 read_errs=0 errs= rewritten=32 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=152 move_txgs=7 census_err=0 census_left=192 gang_dvas=192 gang_left=192 zil_old=1 live=100 kept=819200 entries=100 tombstones=0 damaged=0 extra=1228800 ms=170 rc=11
+CHECK d-nogang gang_found PASS
+CHECK d-nogang move_rc_eagain PASS
+CHECK d-nogang gang_left PASS
+CHECK d-nogang gang_left_gt0 PASS
+CHECK d-nogang mount PASS
+CHECK d-nogang data_head PASS
+CHECK d-nogang clone PASS
+CHECK d-nogang data_snapshot PASS
+CHECK d-nogang clone_destroy PASS
+CHECK d-nogang scrub0 PASS
+CHECK d-nogang export PASS
+CHECK d-nogang zdb PASS
+CHECK d-nogang dmesg_clean PASS
+END d-nogang 2026-11-03T11:10:35+01:00
+DONE d 2026-11-03T11:10:35+01:00: 3 checks failed
+CHECK load srcversion PASS
+CHECK load trigger PASS
+INFO load tree=91df27c68d49809eba85f1167f7a8c958f7a24dd 6.12.113+deb13-cloud-amd64 mover=cmd=move pool=khpool mode=hybrid head=khpool/g gang=0 force=0 epoch_txg=36 head_rw=1 census_dvas=142 to_redirect=100 to_rewrite=42 gang_dvas=288 zil_old=1 preflight=0 pf_free=1228529664 pf_slop=168018280 pf_need_end=1605632 pf_new=1228800 pf_packed=1228800 pf_left=1226674176 pf_need_left=168395112 pf_keep=819200 redirected=100 refused=0 read_errs=0 errs= rewritten=32 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=152 move_txgs=7 census_err=0 census_left=192 gang_dvas=192 gang_left=192 zil_old=1 live=100 kept=819200 entries=100 tombstones=0 damaged=0 extra=1228800 ms=170 rc=11
+BEGIN e-keyless-zil 2026-11-03T11:10:35+01:00
+CHECK e-keyless-zil create_pool PASS
+CHECK e-keyless-zil create PASS
+CHECK e-keyless-zil snapshot PASS
+CHECK e-keyless-zil freeze PASS
+CHECK e-keyless-zil unmount_frozen PASS
+CHECK e-keyless-zil export_frozen PASS
+INFO e-keyless-zil zdb -ivv: 50 TX_WRITE lines
+CHECK e-keyless-zil import_nokey PASS
+CHECK e-keyless-zil keyless PASS
+MOVER e-keyless-zil cmd=epoch pool=khpool epoch_txg=40 width=5 parity=2 ms=19 rc=0
+CHECK e-keyless-zil epoch PASS
+MOVER e-keyless-zil cmd=census pool=khpool epoch_txg=40 census_err=0 census_left=143 gang_dvas=0 gang_left=0 zil_old=31 live=0 kept=0 entries=0 tombstones=0 damaged=0 extra=0 ms=15 rc=0
+CHECK e-keyless-zil zil_old_before PASS
+MOVER e-keyless-zil cmd=move pool=khpool mode=hybrid head=khpool gang=1 force=0 epoch_txg=40 head_rw=1 census_dvas=143 to_redirect=119 to_rewrite=24 gang_dvas=0 zil_old=31 preflight=0 pf_free=1263017984 pf_slop=168018280 pf_need_end=3966976 pf_new=10211328 pf_packed=10211328 pf_left=1252036608 pf_need_left=168360296 pf_keep=876544 redirected=127 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=8 round2=0 round3=0 mover_ms=160 move_txgs=11 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=31 live=127 kept=942080 entries=127 tombstones=0 damaged=0 extra=3723264 ms=174 rc=0
+CHECK e-keyless-zil move_rc0 PASS
+CHECK e-keyless-zil census0 PASS
+CHECK e-keyless-zil zil_kept PASS
+CHECK e-keyless-zil export PASS
+CHECK e-keyless-zil cold_import PASS
+MOVER e-keyless-zil cmd=census pool=khpool epoch_txg=40 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=31 live=127 kept=942080 entries=127 tombstones=0 damaged=0 extra=3723264 ms=16 rc=0
+CHECK e-keyless-zil cold_census0 PASS
+CHECK e-keyless-zil cold_damaged0 PASS
+CHECK e-keyless-zil load_key PASS
+CHECK e-keyless-zil mount_replays PASS
+CHECK e-keyless-zil acked_writes PASS
+CHECK e-keyless-zil base_files PASS
+CHECK e-keyless-zil clone PASS
+CHECK e-keyless-zil snapshot_files PASS
+CHECK e-keyless-zil clone_destroy PASS
+MOVER e-keyless-zil cmd=census pool=khpool epoch_txg=40 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=103 kept=729088 entries=103 tombstones=0 damaged=0 extra=3379200 ms=10 rc=0
+CHECK e-keyless-zil zil_replayed PASS
+CHECK e-keyless-zil census0_after PASS
+CHECK e-keyless-zil scrub0 PASS
+CHECK e-keyless-zil export2 PASS
+CHECK e-keyless-zil zdb PASS
+CHECK e-keyless-zil dmesg_clean PASS
+END e-keyless-zil 2026-11-03T11:10:39+01:00
+DONE e 2026-11-03T11:10:39+01:00: 0 checks failed
+CHECK load srcversion PASS
+CHECK load trigger PASS
+INFO load tree=91df27c68d49809eba85f1167f7a8c958f7a24dd 6.12.113+deb13-cloud-amd64 mover=cmd=census pool=khpool epoch_txg=40 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=103 kept=729088 entries=103 tombstones=0 damaged=0 extra=3379200 ms=10 rc=0
+BEGIN f-offline 2026-11-03T11:10:39+01:00
+CHECK f-offline import PASS
+CHECK f-offline feature PASS
+MOVER f-offline cmd=epoch pool=jointfixture epoch_txg=35 width=5 parity=2 ms=23 rc=0
+CHECK f-offline epoch PASS
+CHECK f-offline offline_during_move PASS
+CHECK f-offline offline PASS
+MOVER f-offline cmd=move pool=jointfixture mode=redirect head=jointfixture gang=1 force=0 epoch_txg=35 head_rw=0 census_dvas=8048 to_redirect=8048 to_rewrite=0 gang_dvas=0 zil_old=0 preflight=0 pf_free=1074823168 pf_slop=168018280 pf_need_end=213876736 pf_new=296927232 pf_packed=296927232 pf_left=777412608 pf_need_left=184500584 pf_keep=98549760 redirected=8048 refused=0 read_errs=0 errs= rewritten=0 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=24732 move_txgs=68 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=8048 kept=98549760 entries=8048 tombstones=0 damaged=0 extra=197394432 ms=24748 rc=0
+CHECK f-offline move_rc0 PASS
+CHECK f-offline census0 PASS
+CHECK f-offline degraded PASS
+CHECK f-offline online PASS
+CHECK f-offline resilver PASS
+CHECK f-offline healthy PASS
+CHECK f-offline scrub0 PASS
+MOVER f-offline cmd=census pool=jointfixture epoch_txg=35 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=8048 kept=98549760 entries=8048 tombstones=0 damaged=0 extra=197394432 ms=16 rc=0
+CHECK f-offline census0_after PASS
+CHECK f-offline export PASS
+CHECK f-offline verify1 PASS
+CHECK f-offline zdb1 PASS
+CHECK f-offline dmesg_clean PASS
+END f-offline 2026-11-03T11:11:12+01:00
+BEGIN f-replace 2026-11-03T11:11:12+01:00
+CHECK f-replace import PASS
+CHECK f-replace replace PASS
+CHECK f-replace resilver PASS
+CHECK f-replace scrub0 PASS
+CHECK f-replace export PASS
+CHECK f-replace verify2 PASS
+CHECK f-replace zdb2 PASS
+CHECK f-replace dmesg_clean PASS
+END f-replace 2026-11-03T11:11:19+01:00
+DONE f 2026-11-03T11:11:19+01:00: 0 checks failed
+CHECK load srcversion PASS
+CHECK load trigger PASS
+INFO load tree=91df27c68d49809eba85f1167f7a8c958f7a24dd 6.12.113+deb13-cloud-amd64 mover=idle
+BEGIN b-cut-hybrid-20 2026-11-03T13:54:19+01:00
+MOVER b-cut-hybrid-20 cmd=epoch pool=jointfixture epoch_txg=35 width=5 parity=2 ms=24 rc=0
+CUT b-cut-hybrid-20: echo b > /proc/sysrq-trigger 1.52 s into the move (dry run 7583 ms)
+CHECK load srcversion PASS
+CHECK load trigger PASS
+INFO load tree=91df27c68d49809eba85f1167f7a8c958f7a24dd 6.12.113+deb13-cloud-amd64 mover=idle
+BEGIN b-check-hybrid-20 2026-11-03T14:56:15+01:00
+CHECK b-check-hybrid-20 import PASS
+MOVER b-check-hybrid-20 cmd=census pool=jointfixture epoch_txg=35 census_err=0 census_left=7536 gang_dvas=0 gang_left=0 zil_old=0 live=512 kept=6176768 entries=512 tombstones=0 damaged=0 extra=12410880 ms=27 rc=0
+CHECK b-check-hybrid-20 census_after_cut PASS
+CHECK b-check-hybrid-20 damaged0 PASS
+RESULT b-check-hybrid-20 cut 1.52 s in: census_left=7536 entries=512 live=512: the cut came during the move
+CHECK b-check-hybrid-20 export PASS
+CHECK b-check-hybrid-20 verify1 PASS
+CHECK b-check-hybrid-20 zdb1 PASS
+CHECK b-check-hybrid-20 import2 PASS
+MOVER b-check-hybrid-20 cmd=move pool=jointfixture mode=hybrid head=jointfixture gang=1 force=0 epoch_txg=35 head_rw=1 census_dvas=7536 to_redirect=1908 to_rewrite=5628 gang_dvas=0 zil_old=0 preflight=0 pf_free=1060925440 pf_slop=168018280 pf_need_end=119939072 pf_new=70434816 pf_packed=70434816 pf_left=990056448 pf_need_left=241090920 pf_keep=23420928 redirected=1908 refused=0 read_errs=0 errs= rewritten=5600 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=6098 move_txgs=26 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=2420 kept=29597696 entries=2420 tombstones=0 damaged=0 extra=59277312 ms=6142 rc=0
+CHECK b-check-hybrid-20 move_again PASS
+CHECK b-check-hybrid-20 census0 PASS
+CHECK b-check-hybrid-20 scrub0 PASS
+CHECK b-check-hybrid-20 export2 PASS
+CHECK b-check-hybrid-20 verify2 PASS
+CHECK b-check-hybrid-20 drop_retained PASS
+CHECK b-check-hybrid-20 verify3 PASS
+CHECK b-check-hybrid-20 zdb2 PASS
+CHECK b-check-hybrid-20 dmesg_clean PASS
+END b-check-hybrid-20 2026-11-03T14:56:42+01:00
+DONE b-check 2026-11-03T14:56:42+01:00: 0 checks failed
+CHECK load srcversion PASS
+CHECK load trigger PASS
+INFO load tree=91df27c68d49809eba85f1167f7a8c958f7a24dd 6.12.113+deb13-cloud-amd64 mover=cmd=move pool=jointfixture mode=hybrid head=jointfixture gang=1 force=0 epoch_txg=35 head_rw=1 census_dvas=7536 to_redirect=1908 to_rewrite=5628 gang_dvas=0 zil_old=0 preflight=0 pf_free=1060925440 pf_slop=168018280 pf_need_end=119939072 pf_new=70434816 pf_packed=70434816 pf_left=990056448 pf_need_left=241090920 pf_keep=23420928 redirected=1908 refused=0 read_errs=0 errs= rewritten=5600 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=6098 move_txgs=26 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=2420 kept=29597696 entries=2420 tombstones=0 damaged=0 extra=59277312 ms=6142 rc=0
+BEGIN b-cut-hybrid-50 2026-11-03T14:58:23+01:00
+MOVER b-cut-hybrid-50 cmd=epoch pool=jointfixture epoch_txg=35 width=5 parity=2 ms=23 rc=0
+CUT b-cut-hybrid-50: echo b > /proc/sysrq-trigger 3.79 s into the move (dry run 7583 ms)
+CHECK load srcversion PASS
+CHECK load trigger PASS
+INFO load tree=91df27c68d49809eba85f1167f7a8c958f7a24dd 6.12.113+deb13-cloud-amd64 mover=idle
+BEGIN b-check-hybrid-50 2026-11-03T15:09:31+01:00
+CHECK b-check-hybrid-50 import PASS
+MOVER b-check-hybrid-50 cmd=census pool=jointfixture epoch_txg=35 census_err=0 census_left=6768 gang_dvas=0 gang_left=0 zil_old=0 live=1280 kept=15597568 entries=1280 tombstones=0 damaged=0 extra=31285248 ms=41 rc=0
+CHECK b-check-hybrid-50 census_after_cut PASS
+CHECK b-check-hybrid-50 damaged0 PASS
+RESULT b-check-hybrid-50 cut 3.79 s in: census_left=6768 entries=1280 live=1280: the cut came during the move
+CHECK b-check-hybrid-50 export PASS
+CHECK b-check-hybrid-50 verify1 PASS
+CHECK b-check-hybrid-50 zdb1 PASS
+CHECK b-check-hybrid-50 import2 PASS
+MOVER b-check-hybrid-50 cmd=move pool=jointfixture mode=hybrid head=jointfixture gang=1 force=0 epoch_txg=35 head_rw=1 census_dvas=6768 to_redirect=1140 to_rewrite=5628 gang_dvas=0 zil_old=0 preflight=0 pf_free=1040244736 pf_slop=168018280 pf_need_end=99491840 pf_new=42024960 pf_packed=42024960 pf_left=997773312 pf_need_left=239518056 pf_keep=14000128 redirected=1140 refused=0 read_errs=0 errs= rewritten=5600 rewrite_err=0 round1=0 round2=0 round3=0 mover_ms=4107 move_txgs=20 census_err=0 census_left=0 gang_dvas=0 gang_left=0 zil_old=0 live=2420 kept=29597696 entries=2420 tombstones=0 damaged=0 extra=59277312 ms=4158 rc=0
+CHECK b-check-hybrid-50 move_again PASS
+CHECK b-check-hybrid-50 census0 PASS
+CHECK b-check-hybrid-50 scrub0 PASS
+CHECK b-check-hybrid-50 export2 PASS
+CHECK b-check-hybrid-50 verify2 PASS
+CHECK b-check-hybrid-50 drop_retained PASS
+CHECK b-check-hybrid-50 verify3 PASS
+CHECK b-check-hybrid-50 zdb2 PASS
+CHECK b-check-hybrid-50 dmesg_clean PASS
+END b-check-hybrid-50 2026-11-03T15:09:55+01:00
+DONE b-check 2026-11-03T15:09:55+01:00: 0 checks failed
