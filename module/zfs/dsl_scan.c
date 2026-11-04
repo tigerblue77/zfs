@@ -664,10 +664,13 @@ dsl_scan_init(dsl_pool_t *dp, uint64_t txg)
 			}
 		}
 
-		if (err == ENOENT)
+		if (err == ENOENT) {
+			/* An error scrub may still need its pause restored. */
+			spa_scan_stat_init(spa);
 			return (0);
-		else if (err)
+		} else if (err) {
 			return (err);
+		}
 
 		/*
 		 * We might be restarting after a reboot, so jump the issued
