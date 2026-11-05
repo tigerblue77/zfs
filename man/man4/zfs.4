@@ -2957,6 +2957,16 @@ completions and user processes of other pools, at the cost of slower bulk
 I/O when user processes keep every CPU busy.
 Set value only applies to pools imported/created after that.
 .
+.It Sy zio_taskq_bulk_yield Ns = Ns Sy 1 Ns | Ns 0 Pq int
+Let the threads of the bulk queues described under
+.Sy zio_taskq_bulk_lowpri
+give their CPU to the threads waiting for it after each task, instead of
+running out their scheduler time slice first, which can delay a woken I/O
+completion or application thread by several milliseconds during a burst of
+compression.
+Only effective on Linux.
+Set value only applies to pools imported/created after that.
+.
 .It Sy zio_taskq_write_tpq Ns = Ns Sy 16 Pq uint
 Determines the minimum number of threads per write issue taskq.
 Higher values improve CPU utilization on high throughput,
