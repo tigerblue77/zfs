@@ -45,6 +45,7 @@
 #include <sys/vdev.h>
 #include <cityhash.h>
 #include <sys/spa_impl.h>
+#include <sys/aggsum.h>
 #include <sys/wmsum.h>
 #include <sys/vdev_impl.h>
 
@@ -213,7 +214,7 @@ static boolean_t dbuf_evict_thread_exit;
  */
 typedef struct dbuf_cache {
 	multilist_t cache;
-	zfs_refcount_t size ____cacheline_aligned;
+	aggsum_t size ____cacheline_aligned;
 } dbuf_cache_t;
 dbuf_cache_t dbuf_caches[DB_CACHE_MAX];
 
@@ -451,9 +452,8 @@ dbuf_include_in_metadata_cache(dmu_buf_impl_t *db)
 		 * Sanity check for small-memory systems: don't allocate too
 		 * much memory for this purpose.
 		 */
-		if (zfs_refcount_count(
-		    &dbuf_caches[DB_DBUF_METADATA_CACHE].size) >
-		    dbuf_metadata_cache_target_bytes()) {
+		if (aggsum_compare(&dbuf_caches[DB_DBUF_METADATA_CACHE].size,
+		    dbuf_metadata_cache_target_bytes()) > 0) {
 			DBUF_STAT_BUMP(metadata_cache_overflow);
 			return (B_FALSE);
 		}
@@ -570,8 +570,7 @@ dbuf_evict_user(dmu_buf_impl_t *db)
 		 * not exist anymore by the time the sync functions run.
 		 */
 		uint64_t size = dbu->dbu_size;
-		(void) zfs_refcount_remove_many(
-		    &dbuf_caches[db->db_caching_status].size, size, dbu);
+		aggsum_add(&dbuf_caches[db->db_caching_status].size, -size);
 		if (db->db_caching_status == DB_DBUF_CACHE)
 			DBUF_STAT_DECR(cache_levels_bytes[db->db_level], size);
 	}
@@ -756,8 +755,8 @@ dbuf_cache_lowater_bytes(void)
 static inline boolean_t
 dbuf_cache_above_lowater(void)
 {
-	return (zfs_refcount_count(&dbuf_caches[DB_DBUF_CACHE].size) >
-	    dbuf_cache_lowater_bytes());
+	return (aggsum_compare(&dbuf_caches[DB_DBUF_CACHE].size,
+	    dbuf_cache_lowater_bytes()) > 0);
 }
 
 /*
@@ -785,10 +784,7 @@ dbuf_evict_one(void)
 		multilist_sublist_unlock(mls);
 		uint64_t size = db->db.db_size;
 		uint64_t usize = dmu_buf_user_size(&db->db);
-		(void) zfs_refcount_remove_many(
-		    &dbuf_caches[DB_DBUF_CACHE].size, size, db);
-		(void) zfs_refcount_remove_many(
-		    &dbuf_caches[DB_DBUF_CACHE].size, usize, db->db_user);
+		aggsum_add(&dbuf_caches[DB_DBUF_CACHE].size, -(size + usize));
 		DBUF_STAT_BUMPDOWN(cache_levels[db->db_level]);
 		DBUF_STAT_BUMPDOWN(cache_count);
 		DBUF_STAT_DECR(cache_levels_bytes[db->db_level], size + usize);
@@ -879,9 +875,8 @@ dbuf_evict_notify(uint64_t size)
 void
 dbuf_cache_reduce_target_size(void)
 {
-	uint64_t size = zfs_refcount_count(&dbuf_caches[DB_DBUF_CACHE].size);
-
-	if (size > dbuf_cache_target_bytes())
+	if (aggsum_compare(&dbuf_caches[DB_DBUF_CACHE].size,
+	    dbuf_cache_target_bytes()) > 0)
 		cv_signal(&dbuf_evict_cv);
 }
 
@@ -897,7 +892,7 @@ dbuf_kstat_update(kstat_t *ksp, int rw)
 	ds->cache_count.value.ui64 =
 	    wmsum_value(&dbuf_sums.cache_count);
 	ds->cache_size_bytes.value.ui64 =
-	    zfs_refcount_count(&dbuf_caches[DB_DBUF_CACHE].size);
+	    aggsum_value(&dbuf_caches[DB_DBUF_CACHE].size);
 	ds->cache_target_bytes.value.ui64 = dbuf_cache_target_bytes();
 	ds->cache_hiwater_bytes.value.ui64 = dbuf_cache_hiwater_bytes();
 	ds->cache_lowater_bytes.value.ui64 = dbuf_cache_lowater_bytes();
@@ -925,8 +920,8 @@ dbuf_kstat_update(kstat_t *ksp, int rw)
 	ds->hash_mutex_count.value.ui64 = h->hash_mutex_mask + 1;
 	ds->metadata_cache_count.value.ui64 =
 	    wmsum_value(&dbuf_sums.metadata_cache_count);
-	ds->metadata_cache_size_bytes.value.ui64 = zfs_refcount_count(
-	    &dbuf_caches[DB_DBUF_METADATA_CACHE].size);
+	ds->metadata_cache_size_bytes.value.ui64 =
+	    aggsum_value(&dbuf_caches[DB_DBUF_METADATA_CACHE].size);
 	ds->metadata_cache_overflow.value.ui64 =
 	    wmsum_value(&dbuf_sums.metadata_cache_overflow);
 	return (0);
@@ -1000,7 +995,7 @@ dbuf_init(void)
 		    sizeof (dmu_buf_impl_t),
 		    offsetof(dmu_buf_impl_t, db_cache_link),
 		    dbuf_cache_multilist_index_func);
-		zfs_refcount_create(&dbuf_caches[dcs].size);
+		aggsum_init(&dbuf_caches[dcs].size, 0);
 	}
 
 	dbuf_evict_thread_exit = B_FALSE;
@@ -1074,7 +1069,8 @@ dbuf_fini(void)
 	cv_destroy(&dbuf_evict_cv);
 
 	for (dbuf_cached_state_t dcs = 0; dcs < DB_CACHE_MAX; dcs++) {
-		zfs_refcount_destroy(&dbuf_caches[dcs].size);
+		ASSERT0(aggsum_value(&dbuf_caches[dcs].size));
+		aggsum_fini(&dbuf_caches[dcs].size);
 		multilist_destroy(&dbuf_caches[dcs].cache);
 	}
 
@@ -3401,9 +3397,8 @@ dbuf_destroy(dmu_buf_impl_t *db)
 		multilist_remove(&dbuf_caches[db->db_caching_status].cache, db);
 
 		ASSERT0(dmu_buf_user_size(&db->db));
-		(void) zfs_refcount_remove_many(
-		    &dbuf_caches[db->db_caching_status].size,
-		    db->db.db_size, db);
+		aggsum_add(&dbuf_caches[db->db_caching_status].size,
+		    -db->db.db_size);
 
 		if (db->db_caching_status == DB_DBUF_METADATA_CACHE) {
 			DBUF_STAT_BUMPDOWN(metadata_cache_count);
@@ -4150,11 +4145,8 @@ dbuf_hold_impl(dnode_t *dn, uint8_t level, uint64_t blkid,
 
 		uint64_t size = db->db.db_size;
 		uint64_t usize = dmu_buf_user_size(&db->db);
-		(void) zfs_refcount_remove_many(
-		    &dbuf_caches[db->db_caching_status].size, size, db);
-		(void) zfs_refcount_remove_many(
-		    &dbuf_caches[db->db_caching_status].size, usize,
-		    db->db_user);
+		aggsum_add(&dbuf_caches[db->db_caching_status].size,
+		    -(size + usize));
 
 		if (db->db_caching_status == DB_DBUF_METADATA_CACHE) {
 			DBUF_STAT_BUMPDOWN(metadata_cache_count);
@@ -4388,10 +4380,14 @@ dbuf_rele_and_unlock(dmu_buf_impl_t *db, const void *tag, boolean_t evicting)
 			multilist_insert(&dbuf_caches[dcs].cache, db);
 			uint64_t db_size = db->db.db_size;
 			uint64_t dbu_size = dmu_buf_user_size(&db->db);
-			(void) zfs_refcount_add_many(
-			    &dbuf_caches[dcs].size, db_size, db);
-			size = zfs_refcount_add_many(
-			    &dbuf_caches[dcs].size, dbu_size, db->db_user);
+			aggsum_add(&dbuf_caches[dcs].size, db_size + dbu_size);
+			/*
+			 * This runs whenever a dbuf enters the cache, so the
+			 * statistics and dbuf_evict_notify() use the lower
+			 * bound of the aggsum, which needs no lock.
+			 */
+			size = MAX(aggsum_lower_bound(&dbuf_caches[dcs].size),
+			    0);
 			uint8_t db_level = db->db_level;
 			mutex_exit(&db->db_mtx);
 
