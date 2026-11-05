@@ -2935,7 +2935,7 @@ Higher values improve CPU utilization on high throughput,
 while lower reduce taskq locks contention on high IOPS.
 Set value only applies to pools imported/created after that.
 .
-.It Sy zio_taskq_read Ns = Ns Sy fixed,1,8 null scale null Pq charp
+.It Sy zio_taskq_read Ns = Ns Sy fixed,1,8 null scale scale Pq charp
 Set the queue and thread configuration for the IO read queues.
 This is an advanced debugging parameter.
 Don't change this unless you understand what it does.

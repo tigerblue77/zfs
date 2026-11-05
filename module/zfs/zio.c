@@ -2239,13 +2239,18 @@ zio_taskq_dispatch_func(zio_t *zio, zio_taskq_type_t q, boolean_t cutinline,
 
 	/*
 	 * If this is a high priority I/O, then use the high priority taskq if
-	 * available or cut the line otherwise.
+	 * available or cut the line otherwise.  Synchronous reads only take
+	 * the high priority taskq: a reader waits for each of them, while the
+	 * asynchronous reads around them (prefetch, scrub) are bulk work.
 	 */
 	if (zio->io_priority == ZIO_PRIORITY_SYNC_WRITE) {
 		if (spa->spa_zio_taskq[t][q + 1].stqs_count != 0)
 			q++;
 		else
 			cutinline = B_TRUE;
+	} else if (zio->io_priority == ZIO_PRIORITY_SYNC_READ &&
+	    spa->spa_zio_taskq[t][q + 1].stqs_count != 0) {
+		q++;
 	}
 
 	ASSERT3U(q, <, ZIO_TASKQ_TYPES);
@@ -2736,7 +2741,8 @@ zio_execute_stage(zio_t *zio)
 	 * disk promptly.
 	 */
 	if ((stage & ZIO_BLOCKING_STAGES) && zio->io_vd == NULL &&
-	    zio_taskq_member(zio, ZIO_TASKQ_INTERRUPT)) {
+	    (zio_taskq_member(zio, ZIO_TASKQ_INTERRUPT) ||
+	    zio_taskq_member(zio, ZIO_TASKQ_INTERRUPT_HIGH))) {
 		boolean_t cut = (stage == ZIO_STAGE_VDEV_IO_START) ?
 		    zio_requeue_io_start_cut_in_line : B_FALSE;
 		zio_taskq_dispatch(zio, ZIO_TASKQ_ISSUE, cut);
