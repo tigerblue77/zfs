@@ -1,0 +1,57 @@
+// SPDX-License-Identifier: CDDL-1.0
+//
+// Off-CPU time of the threads named "fiofast", summed by kernel stack and
+// by the state they left the CPU in (0 R, 1 S, 2 D, 256 preempted), and
+// run-queue latency summed by thread name.  Stop it with SIGINT.
+
+BEGIN
+{
+	@t0 = nsecs;
+}
+
+tracepoint:sched:sched_wakeup,
+tracepoint:sched:sched_wakeup_new
+{
+	@qt[args->pid] = nsecs;
+}
+
+tracepoint:sched:sched_switch
+{
+	if (args->prev_comm == "fiofast") {
+		@start[args->prev_pid] = nsecs;
+		@pstate[args->prev_pid] = args->prev_state;
+	}
+	if (args->prev_state == 0 || args->prev_state == 256) {
+		@qt[args->prev_pid] = nsecs;
+	}
+	$q = @qt[args->next_pid];
+	if ($q != 0) {
+		$d = (nsecs - $q) / 1000;
+		@rq_us[args->next_comm] = sum($d);
+		@rq_n[args->next_comm] = count();
+		@rq_max_us[args->next_comm] = max($d);
+		delete(@qt[args->next_pid]);
+	}
+}
+
+kprobe:finish_task_switch*
+{
+	$s = @start[tid];
+	if ($s != 0) {
+		$d = (nsecs - $s) / 1000;
+		@off_us[kstack(20), @pstate[tid]] = sum($d);
+		@off_n[kstack(20), @pstate[tid]] = count();
+		@off_hist_us = hist($d);
+		delete(@start[tid]);
+		delete(@pstate[tid]);
+	}
+}
+
+END
+{
+	printf("elapsed_ms %d\n", (nsecs - @t0) / 1000000);
+	clear(@t0);
+	clear(@start);
+	clear(@pstate);
+	clear(@qt);
+}

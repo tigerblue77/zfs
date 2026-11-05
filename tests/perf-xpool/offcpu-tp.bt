@@ -1,0 +1,33 @@
+// SPDX-License-Identifier: CDDL-1.0
+//
+// Fallback for offcpu.bt when finish_task_switch cannot be probed: counts
+// the kernel stacks the "fiofast" threads leave the CPU from, and sums
+// their off-CPU time by state, from the sched_switch tracepoint alone.
+
+BEGIN
+{
+	@t0 = nsecs;
+}
+
+tracepoint:sched:sched_switch
+{
+	if (args->prev_comm == "fiofast") {
+		@start[args->prev_pid] = nsecs;
+		@pstate[args->prev_pid] = args->prev_state;
+		@sw_n[kstack(20), args->prev_state] = count();
+	}
+	$s = @start[args->next_pid];
+	if ($s != 0) {
+		@off_state_us[@pstate[args->next_pid]] = sum((nsecs - $s) / 1000);
+		delete(@start[args->next_pid]);
+		delete(@pstate[args->next_pid]);
+	}
+}
+
+END
+{
+	printf("elapsed_ms %d\n", (nsecs - @t0) / 1000000);
+	clear(@t0);
+	clear(@start);
+	clear(@pstate);
+}
