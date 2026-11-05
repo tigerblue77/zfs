@@ -493,6 +493,9 @@ static arc_state_t ARC_mfu_ghost;
 static arc_state_t ARC_l2c_only;
 static arc_state_t ARC_uncached;
 
+/* Size of arc_anon, see arcs_size in arc_state_t. */
+static aggsum_t arc_anon_size[ARC_BUFC_NUMTYPES];
+
 arc_stats_t arc_stats = {
 	{ "hits",			KSTAT_DATA_UINT64 },
 	{ "iohits",			KSTAT_DATA_UINT64 },
@@ -2260,6 +2263,23 @@ arc_state_esize(arc_state_t *state, arc_buf_contents_t type)
 	return (MAX((int64_t)wmsum_value(&state->arcs_esize[type]), 0));
 }
 
+static inline void
+arc_state_size_add(arc_state_t *state, arc_buf_contents_t type, int64_t delta)
+{
+	if (state == arc_anon)
+		aggsum_add(&arc_anon_size[type], delta);
+	else
+		wmsum_add(&state->arcs_size[type], delta);
+}
+
+static uint64_t
+arc_state_size(arc_state_t *state, arc_buf_contents_t type)
+{
+	if (state == arc_anon)
+		return (aggsum_value(&arc_anon_size[type]));
+	return (MAX((int64_t)wmsum_value(&state->arcs_size[type]), 0));
+}
+
 /*
  * Increment the amount of evictable space in the arc_state_t.
  * We account for the space used by the hdr and the arc buf individually
@@ -2523,50 +2543,36 @@ arc_change_state(arc_state_t *new_state, arc_buf_hdr_t *hdr)
 
 			/*
 			 * When moving a header to a ghost state, we first
-			 * remove all arc buffers. Thus, we'll have no arc
-			 * buffer to use for the reference. As a result, we
-			 * use the arc header pointer for the reference.
+			 * remove all arc buffers, so a ghost state accounts
+			 * the logical size of the header instead.
 			 */
-			(void) zfs_refcount_add_many(
-			    &new_state->arcs_size[type],
-			    HDR_GET_LSIZE(hdr), hdr);
+			arc_state_size_add(new_state, type, HDR_GET_LSIZE(hdr));
 			ASSERT0P(hdr->b_l1hdr.b_pabd);
 			ASSERT(!HDR_HAS_RABD(hdr));
 		} else {
 
 			/*
-			 * Each individual buffer holds a unique reference,
-			 * thus we must remove each of these references one
-			 * at a time.
+			 * Each individual buffer is accounted on its own,
+			 * except one sharing the data block with the hdr,
+			 * which is accounted with the hdr.
 			 */
 			for (arc_buf_t *buf = hdr->b_l1hdr.b_buf; buf != NULL;
 			    buf = buf->b_next) {
-
-				/*
-				 * When the arc_buf_t is sharing the data
-				 * block with the hdr, the owner of the
-				 * reference belongs to the hdr. Only
-				 * add to the refcount if the arc_buf_t is
-				 * not shared.
-				 */
 				if (ARC_BUF_SHARED(buf))
 					continue;
 
-				(void) zfs_refcount_add_many(
-				    &new_state->arcs_size[type],
-				    arc_buf_size(buf), buf);
+				arc_state_size_add(new_state, type,
+				    arc_buf_size(buf));
 			}
 
 			if (hdr->b_l1hdr.b_pabd != NULL) {
-				(void) zfs_refcount_add_many(
-				    &new_state->arcs_size[type],
-				    arc_hdr_size(hdr), hdr);
+				arc_state_size_add(new_state, type,
+				    arc_hdr_size(hdr));
 			}
 
 			if (HDR_HAS_RABD(hdr)) {
-				(void) zfs_refcount_add_many(
-				    &new_state->arcs_size[type],
-				    HDR_GET_PSIZE(hdr), hdr);
+				arc_state_size_add(new_state, type,
+				    HDR_GET_PSIZE(hdr));
 			}
 		}
 	}
@@ -2580,51 +2586,38 @@ arc_change_state(arc_state_t *new_state, arc_buf_hdr_t *hdr)
 			/*
 			 * When moving a header off of a ghost state,
 			 * the header will not contain any arc buffers.
-			 * We use the arc header pointer for the reference
-			 * which is exactly what we did when we put the
-			 * header on the ghost state.
+			 * Remove the logical size we accounted when we put
+			 * the header on the ghost state.
 			 */
 
-			(void) zfs_refcount_remove_many(
-			    &old_state->arcs_size[type],
-			    HDR_GET_LSIZE(hdr), hdr);
+			arc_state_size_add(old_state, type,
+			    -HDR_GET_LSIZE(hdr));
 		} else {
 
 			/*
-			 * Each individual buffer holds a unique reference,
-			 * thus we must remove each of these references one
-			 * at a time.
+			 * Each individual buffer is accounted on its own,
+			 * except one sharing the data block with the hdr,
+			 * which is accounted with the hdr.
 			 */
 			for (arc_buf_t *buf = hdr->b_l1hdr.b_buf; buf != NULL;
 			    buf = buf->b_next) {
-
-				/*
-				 * When the arc_buf_t is sharing the data
-				 * block with the hdr, the owner of the
-				 * reference belongs to the hdr. Only
-				 * add to the refcount if the arc_buf_t is
-				 * not shared.
-				 */
 				if (ARC_BUF_SHARED(buf))
 					continue;
 
-				(void) zfs_refcount_remove_many(
-				    &old_state->arcs_size[type],
-				    arc_buf_size(buf), buf);
+				arc_state_size_add(old_state, type,
+				    -arc_buf_size(buf));
 			}
 			ASSERT(hdr->b_l1hdr.b_pabd != NULL ||
 			    HDR_HAS_RABD(hdr));
 
 			if (hdr->b_l1hdr.b_pabd != NULL) {
-				(void) zfs_refcount_remove_many(
-				    &old_state->arcs_size[type],
-				    arc_hdr_size(hdr), hdr);
+				arc_state_size_add(old_state, type,
+				    -arc_hdr_size(hdr));
 			}
 
 			if (HDR_HAS_RABD(hdr)) {
-				(void) zfs_refcount_remove_many(
-				    &old_state->arcs_size[type],
-				    HDR_GET_PSIZE(hdr), hdr);
+				arc_state_size_add(old_state, type,
+				    -HDR_GET_PSIZE(hdr));
 			}
 		}
 	}
@@ -2983,7 +2976,7 @@ arc_hdr_free_on_write(arc_buf_hdr_t *hdr, boolean_t free_rdata)
 
 		wmsum_add(&state->arcs_esize[type], -size);
 	}
-	(void) zfs_refcount_remove_many(&state->arcs_size[type], size, hdr);
+	arc_state_size_add(state, type, -size);
 	if (type == ARC_BUFC_METADATA) {
 		arc_space_return(size, ARC_SPACE_META);
 	} else {
@@ -3019,13 +3012,9 @@ arc_share_buf(arc_buf_hdr_t *hdr, arc_buf_t *buf)
 	ASSERT(HDR_EMPTY_OR_LOCKED(hdr));
 
 	/*
-	 * Start sharing the data buffer. We transfer the
-	 * refcount ownership to the hdr since it always owns
-	 * the refcount whenever an arc_buf_t is shared.
+	 * Start sharing the data buffer.  The hdr always owns it whenever an
+	 * arc_buf_t is shared; the state's size does not change.
 	 */
-	zfs_refcount_transfer_ownership_many(
-	    &hdr->b_l1hdr.b_state->arcs_size[arc_buf_type(hdr)],
-	    arc_hdr_size(hdr), buf, hdr);
 	hdr->b_l1hdr.b_pabd = abd_get_from_buf(buf->b_data, arc_buf_size(buf));
 	abd_take_ownership_of_buf(hdr->b_l1hdr.b_pabd,
 	    HDR_ISTYPE_METADATA(hdr));
@@ -3053,9 +3042,6 @@ arc_unshare_buf(arc_buf_hdr_t *hdr, arc_buf_t *buf)
 	 * We are no longer sharing this buffer so we need
 	 * to transfer its ownership to the rightful owner.
 	 */
-	zfs_refcount_transfer_ownership_many(
-	    &hdr->b_l1hdr.b_state->arcs_size[arc_buf_type(hdr)],
-	    arc_hdr_size(hdr), hdr, buf);
 	arc_hdr_clear_flags(hdr, ARC_FLAG_SHARED_DATA);
 	abd_release_ownership_of_buf(hdr->b_l1hdr.b_pabd);
 	abd_free(hdr->b_l1hdr.b_pabd);
@@ -4505,12 +4491,12 @@ arc_evict(void)
 	uint64_t ngrd, ngrm, ngfd, ngfm;
 
 	/* Get current size of ARC states we can evict from. */
-	mrud = zfs_refcount_count(&arc_mru->arcs_size[ARC_BUFC_DATA]) +
-	    zfs_refcount_count(&arc_anon->arcs_size[ARC_BUFC_DATA]);
-	mrum = zfs_refcount_count(&arc_mru->arcs_size[ARC_BUFC_METADATA]) +
-	    zfs_refcount_count(&arc_anon->arcs_size[ARC_BUFC_METADATA]);
-	mfud = zfs_refcount_count(&arc_mfu->arcs_size[ARC_BUFC_DATA]);
-	mfum = zfs_refcount_count(&arc_mfu->arcs_size[ARC_BUFC_METADATA]);
+	mrud = arc_state_size(arc_mru, ARC_BUFC_DATA) +
+	    arc_state_size(arc_anon, ARC_BUFC_DATA);
+	mrum = arc_state_size(arc_mru, ARC_BUFC_METADATA) +
+	    arc_state_size(arc_anon, ARC_BUFC_METADATA);
+	mfud = arc_state_size(arc_mfu, ARC_BUFC_DATA);
+	mfum = arc_state_size(arc_mfu, ARC_BUFC_METADATA);
 	uint64_t d = mrud + mfud;
 	uint64_t m = mrum + mfum;
 	uint64_t t = d + m;
@@ -4545,8 +4531,8 @@ arc_evict(void)
 	 */
 	int64_t prune = 0;
 	int64_t dn = aggsum_value(&arc_sums.arcstat_dnode_size);
-	int64_t nem = zfs_refcount_count(&arc_mru->arcs_size[ARC_BUFC_METADATA])
-	    + zfs_refcount_count(&arc_mfu->arcs_size[ARC_BUFC_METADATA])
+	int64_t nem = arc_state_size(arc_mru, ARC_BUFC_METADATA)
+	    + arc_state_size(arc_mfu, ARC_BUFC_METADATA)
 	    - arc_state_esize(arc_mru, ARC_BUFC_METADATA)
 	    - arc_state_esize(arc_mfu, ARC_BUFC_METADATA);
 	w = wt * (int64_t)(arc_meta >> 16) >> 16;
@@ -4606,23 +4592,19 @@ arc_evict(void)
 	 * So choose some arbitraty point of 1/2 of other state sizes.
 	 */
 	gsrd = (mrum + mfud + mfum) / 2;
-	e = zfs_refcount_count(&arc_mru_ghost->arcs_size[ARC_BUFC_DATA]) -
-	    gsrd;
+	e = arc_state_size(arc_mru_ghost, ARC_BUFC_DATA) - gsrd;
 	(void) arc_evict_impl(arc_mru_ghost, ARC_BUFC_DATA, e);
 
 	gsrm = (mrud + mfud + mfum) / 2;
-	e = zfs_refcount_count(&arc_mru_ghost->arcs_size[ARC_BUFC_METADATA]) -
-	    gsrm;
+	e = arc_state_size(arc_mru_ghost, ARC_BUFC_METADATA) - gsrm;
 	(void) arc_evict_impl(arc_mru_ghost, ARC_BUFC_METADATA, e);
 
 	gsfd = (mrud + mrum + mfum) / 2;
-	e = zfs_refcount_count(&arc_mfu_ghost->arcs_size[ARC_BUFC_DATA]) -
-	    gsfd;
+	e = arc_state_size(arc_mfu_ghost, ARC_BUFC_DATA) - gsfd;
 	(void) arc_evict_impl(arc_mfu_ghost, ARC_BUFC_DATA, e);
 
 	gsfm = (mrud + mrum + mfud) / 2;
-	e = zfs_refcount_count(&arc_mfu_ghost->arcs_size[ARC_BUFC_METADATA]) -
-	    gsfm;
+	e = arc_state_size(arc_mfu_ghost, ARC_BUFC_METADATA) - gsfm;
 	(void) arc_evict_impl(arc_mfu_ghost, ARC_BUFC_METADATA, e);
 
 	return (total_evicted);
@@ -5272,6 +5254,7 @@ static void
 arc_get_data_impl(arc_buf_hdr_t *hdr, uint64_t size, const void *tag,
     int alloc_flags)
 {
+	(void) tag;
 	arc_adapt(size);
 
 	/*
@@ -5304,8 +5287,7 @@ arc_get_data_impl(arc_buf_hdr_t *hdr, uint64_t size, const void *tag,
 	arc_state_t *state = hdr->b_l1hdr.b_state;
 	if (!GHOST_STATE(state)) {
 
-		(void) zfs_refcount_add_many(&state->arcs_size[type], size,
-		    tag);
+		arc_state_size_add(state, type, size);
 
 		/*
 		 * If this is reached via arc_read, the link is
@@ -5351,6 +5333,7 @@ arc_free_data_buf(arc_buf_hdr_t *hdr, void *buf, uint64_t size, const void *tag)
 static void
 arc_free_data_impl(arc_buf_hdr_t *hdr, uint64_t size, const void *tag)
 {
+	(void) tag;
 	arc_state_t *state = hdr->b_l1hdr.b_state;
 	arc_buf_contents_t type = arc_buf_type(hdr);
 
@@ -5361,7 +5344,7 @@ arc_free_data_impl(arc_buf_hdr_t *hdr, uint64_t size, const void *tag)
 
 		wmsum_add(&state->arcs_esize[type], -size);
 	}
-	(void) zfs_refcount_remove_many(&state->arcs_size[type], size, tag);
+	arc_state_size_add(state, type, -size);
 
 	VERIFY3U(hdr->b_type, ==, type);
 	if (type == ARC_BUFC_METADATA) {
@@ -6770,8 +6753,7 @@ arc_release(arc_buf_t *buf, const void *tag)
 
 		ASSERT(hdr->b_l1hdr.b_pabd != NULL || HDR_HAS_RABD(hdr));
 
-		(void) zfs_refcount_remove_many(&state->arcs_size[type],
-		    arc_buf_size(buf), buf);
+		arc_state_size_add(state, type, -arc_buf_size(buf));
 
 		arc_cksum_verify(buf);
 		arc_buf_unwatch(buf);
@@ -6798,8 +6780,7 @@ arc_release(arc_buf_t *buf, const void *tag)
 		(void) zfs_refcount_add(&nhdr->b_l1hdr.b_refcnt, tag);
 		buf->b_hdr = nhdr;
 
-		(void) zfs_refcount_add_many(&arc_anon->arcs_size[type],
-		    arc_buf_size(buf), buf);
+		arc_state_size_add(arc_anon, type, arc_buf_size(buf));
 	} else {
 		ASSERT(zfs_refcount_count(&hdr->b_l1hdr.b_refcnt) == 1);
 		/* protected by hash lock, or hdr is on arc_anon */
@@ -7237,10 +7218,16 @@ arc_tempreserve_space(spa_t *spa, uint64_t reserve, uint64_t txg)
 	/* assert that it has not wrapped around */
 	ASSERT3S(atomic_add_64_nv(&arc_loaned_bytes, 0), >=, 0);
 
-	anon_size = MAX((int64_t)
-	    (zfs_refcount_count(&arc_anon->arcs_size[ARC_BUFC_DATA]) +
-	    zfs_refcount_count(&arc_anon->arcs_size[ARC_BUFC_METADATA]) -
-	    arc_loaned_bytes), 0);
+	/*
+	 * This runs for every transaction, so read the lower bound of the
+	 * aggsum without taking its locks, as arc_is_overflowing() does.
+	 * It can trail the size by up to 2 * 16 * NUM_CPUS recent blocks,
+	 * which only delays this throttle; zfs_dirty_data_max still limits
+	 * the dirty data of each pool.
+	 */
+	anon_size = MAX(aggsum_lower_bound(&arc_anon_size[ARC_BUFC_DATA]) +
+	    aggsum_lower_bound(&arc_anon_size[ARC_BUFC_METADATA]) -
+	    (int64_t)arc_loaned_bytes, 0);
 
 	/*
 	 * Writes will, almost always, require additional memory allocations
@@ -7297,10 +7284,8 @@ arc_kstat_update_state(arc_state_t *state, kstat_named_t *size,
     kstat_named_t *data, kstat_named_t *metadata,
     kstat_named_t *evict_data, kstat_named_t *evict_metadata)
 {
-	data->value.ui64 =
-	    zfs_refcount_count(&state->arcs_size[ARC_BUFC_DATA]);
-	metadata->value.ui64 =
-	    zfs_refcount_count(&state->arcs_size[ARC_BUFC_METADATA]);
+	data->value.ui64 = arc_state_size(state, ARC_BUFC_DATA);
+	metadata->value.ui64 = arc_state_size(state, ARC_BUFC_METADATA);
 	size->value.ui64 = data->value.ui64 + metadata->value.ui64;
 	evict_data->value.ui64 = arc_state_esize(state, ARC_BUFC_DATA);
 	evict_metadata->value.ui64 = arc_state_esize(state, ARC_BUFC_METADATA);
@@ -7757,20 +7742,20 @@ arc_state_init(void)
 	wmsum_init(&arc_uncached->arcs_esize[ARC_BUFC_METADATA], 0);
 	wmsum_init(&arc_uncached->arcs_esize[ARC_BUFC_DATA], 0);
 
-	zfs_refcount_create(&arc_anon->arcs_size[ARC_BUFC_DATA]);
-	zfs_refcount_create(&arc_anon->arcs_size[ARC_BUFC_METADATA]);
-	zfs_refcount_create(&arc_mru->arcs_size[ARC_BUFC_DATA]);
-	zfs_refcount_create(&arc_mru->arcs_size[ARC_BUFC_METADATA]);
-	zfs_refcount_create(&arc_mru_ghost->arcs_size[ARC_BUFC_DATA]);
-	zfs_refcount_create(&arc_mru_ghost->arcs_size[ARC_BUFC_METADATA]);
-	zfs_refcount_create(&arc_mfu->arcs_size[ARC_BUFC_DATA]);
-	zfs_refcount_create(&arc_mfu->arcs_size[ARC_BUFC_METADATA]);
-	zfs_refcount_create(&arc_mfu_ghost->arcs_size[ARC_BUFC_DATA]);
-	zfs_refcount_create(&arc_mfu_ghost->arcs_size[ARC_BUFC_METADATA]);
-	zfs_refcount_create(&arc_l2c_only->arcs_size[ARC_BUFC_DATA]);
-	zfs_refcount_create(&arc_l2c_only->arcs_size[ARC_BUFC_METADATA]);
-	zfs_refcount_create(&arc_uncached->arcs_size[ARC_BUFC_DATA]);
-	zfs_refcount_create(&arc_uncached->arcs_size[ARC_BUFC_METADATA]);
+	aggsum_init(&arc_anon_size[ARC_BUFC_DATA], 0);
+	aggsum_init(&arc_anon_size[ARC_BUFC_METADATA], 0);
+	wmsum_init(&arc_mru->arcs_size[ARC_BUFC_DATA], 0);
+	wmsum_init(&arc_mru->arcs_size[ARC_BUFC_METADATA], 0);
+	wmsum_init(&arc_mru_ghost->arcs_size[ARC_BUFC_DATA], 0);
+	wmsum_init(&arc_mru_ghost->arcs_size[ARC_BUFC_METADATA], 0);
+	wmsum_init(&arc_mfu->arcs_size[ARC_BUFC_DATA], 0);
+	wmsum_init(&arc_mfu->arcs_size[ARC_BUFC_METADATA], 0);
+	wmsum_init(&arc_mfu_ghost->arcs_size[ARC_BUFC_DATA], 0);
+	wmsum_init(&arc_mfu_ghost->arcs_size[ARC_BUFC_METADATA], 0);
+	wmsum_init(&arc_l2c_only->arcs_size[ARC_BUFC_DATA], 0);
+	wmsum_init(&arc_l2c_only->arcs_size[ARC_BUFC_METADATA], 0);
+	wmsum_init(&arc_uncached->arcs_size[ARC_BUFC_DATA], 0);
+	wmsum_init(&arc_uncached->arcs_size[ARC_BUFC_METADATA], 0);
 
 	wmsum_init(&arc_mru_ghost->arcs_hits[ARC_BUFC_DATA], 0);
 	wmsum_init(&arc_mru_ghost->arcs_hits[ARC_BUFC_METADATA], 0);
@@ -7914,20 +7899,22 @@ arc_state_fini(void)
 	arc_state_sum_fini(&arc_uncached->arcs_esize[ARC_BUFC_METADATA]);
 	arc_state_sum_fini(&arc_uncached->arcs_esize[ARC_BUFC_DATA]);
 
-	zfs_refcount_destroy(&arc_anon->arcs_size[ARC_BUFC_DATA]);
-	zfs_refcount_destroy(&arc_anon->arcs_size[ARC_BUFC_METADATA]);
-	zfs_refcount_destroy(&arc_mru->arcs_size[ARC_BUFC_DATA]);
-	zfs_refcount_destroy(&arc_mru->arcs_size[ARC_BUFC_METADATA]);
-	zfs_refcount_destroy(&arc_mru_ghost->arcs_size[ARC_BUFC_DATA]);
-	zfs_refcount_destroy(&arc_mru_ghost->arcs_size[ARC_BUFC_METADATA]);
-	zfs_refcount_destroy(&arc_mfu->arcs_size[ARC_BUFC_DATA]);
-	zfs_refcount_destroy(&arc_mfu->arcs_size[ARC_BUFC_METADATA]);
-	zfs_refcount_destroy(&arc_mfu_ghost->arcs_size[ARC_BUFC_DATA]);
-	zfs_refcount_destroy(&arc_mfu_ghost->arcs_size[ARC_BUFC_METADATA]);
-	zfs_refcount_destroy(&arc_l2c_only->arcs_size[ARC_BUFC_DATA]);
-	zfs_refcount_destroy(&arc_l2c_only->arcs_size[ARC_BUFC_METADATA]);
-	zfs_refcount_destroy(&arc_uncached->arcs_size[ARC_BUFC_DATA]);
-	zfs_refcount_destroy(&arc_uncached->arcs_size[ARC_BUFC_METADATA]);
+	ASSERT0(aggsum_value(&arc_anon_size[ARC_BUFC_DATA]));
+	ASSERT0(aggsum_value(&arc_anon_size[ARC_BUFC_METADATA]));
+	aggsum_fini(&arc_anon_size[ARC_BUFC_DATA]);
+	aggsum_fini(&arc_anon_size[ARC_BUFC_METADATA]);
+	arc_state_sum_fini(&arc_mru->arcs_size[ARC_BUFC_DATA]);
+	arc_state_sum_fini(&arc_mru->arcs_size[ARC_BUFC_METADATA]);
+	arc_state_sum_fini(&arc_mru_ghost->arcs_size[ARC_BUFC_DATA]);
+	arc_state_sum_fini(&arc_mru_ghost->arcs_size[ARC_BUFC_METADATA]);
+	arc_state_sum_fini(&arc_mfu->arcs_size[ARC_BUFC_DATA]);
+	arc_state_sum_fini(&arc_mfu->arcs_size[ARC_BUFC_METADATA]);
+	arc_state_sum_fini(&arc_mfu_ghost->arcs_size[ARC_BUFC_DATA]);
+	arc_state_sum_fini(&arc_mfu_ghost->arcs_size[ARC_BUFC_METADATA]);
+	arc_state_sum_fini(&arc_l2c_only->arcs_size[ARC_BUFC_DATA]);
+	arc_state_sum_fini(&arc_l2c_only->arcs_size[ARC_BUFC_METADATA]);
+	arc_state_sum_fini(&arc_uncached->arcs_size[ARC_BUFC_DATA]);
+	arc_state_sum_fini(&arc_uncached->arcs_size[ARC_BUFC_METADATA]);
 
 	multilist_destroy(&arc_mru->arcs_list[ARC_BUFC_METADATA]);
 	multilist_destroy(&arc_mru_ghost->arcs_list[ARC_BUFC_METADATA]);
@@ -9927,17 +9914,13 @@ l2arc_get_state_size(int pass)
 {
 	switch (pass) {
 	case L2ARC_MFU_META:
-		return (zfs_refcount_count(
-		    &arc_mfu->arcs_size[ARC_BUFC_METADATA]));
+		return (arc_state_size(arc_mfu, ARC_BUFC_METADATA));
 	case L2ARC_MRU_META:
-		return (zfs_refcount_count(
-		    &arc_mru->arcs_size[ARC_BUFC_METADATA]));
+		return (arc_state_size(arc_mru, ARC_BUFC_METADATA));
 	case L2ARC_MFU_DATA:
-		return (zfs_refcount_count(
-		    &arc_mfu->arcs_size[ARC_BUFC_DATA]));
+		return (arc_state_size(arc_mfu, ARC_BUFC_DATA));
 	case L2ARC_MRU_DATA:
-		return (zfs_refcount_count(
-		    &arc_mru->arcs_size[ARC_BUFC_DATA]));
+		return (arc_state_size(arc_mru, ARC_BUFC_DATA));
 	default:
 		return (0);
 	}
