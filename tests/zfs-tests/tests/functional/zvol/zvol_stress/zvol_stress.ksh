@@ -161,14 +161,15 @@ do_zvol_stress
 destroy_zvols
 
 # O_DIRECT through io_uring on bio-based zvols, whose requests io_uring
-# issues from its workers, which process them inline unless
-# zvol_inline_io_uring is 0, or, with zvol_nowait, issues without blocking
-# to the zvol taskqs.  Only if fio and the kernel support io_uring.
+# issues from its workers, which process them inline when they are no
+# larger than zvol_inline_io_uring (1M here, the size of these writes),
+# or, with zvol_nowait, issues without blocking to the zvol taskqs.
+# Only if fio and the kernel support io_uring.
 if is_linux && fio --name=probe --ioengine=io_uring --size=64k --bs=4k \
     --rw=write --filename="$tmpdir/probe" > /dev/null 2>&1 ; then
 	rm -f "$tmpdir/probe"
 	set_blk_mq 0
-	for mode in 1:0 0:0 1:1 ; do
+	for mode in 1048576:0 0:0 1048576:1 ; do
 		log_must set_tunable32 VOL_INLINE_IO_URING ${mode%:*}
 		log_must set_tunable32 VOL_NOWAIT ${mode#*:}
 		create_zvols
