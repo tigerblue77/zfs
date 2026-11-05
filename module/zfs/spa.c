@@ -209,7 +209,13 @@ static const uint_t	zio_taskq_basedc = 80;	  /* base duty cycle */
 static const boolean_t spa_create_process = B_TRUE; /* no process => no sysdc */
 #endif
 
-static uint_t	zio_taskq_write_tpq = 16;
+/*
+ * Minimum number of threads per write issue taskq.  Syncing context writes
+ * all the blocks of one dnode through the taskq of its sync thread's
+ * allocator, so this also bounds what a single busy file or zvol gets, while
+ * more taskqs split the tq_lock traffic of many files.
+ */
+static uint_t	zio_taskq_write_tpq = 6;
 
 /*
  * Report any spa_load_verify errors found, but do not fail spa_load.

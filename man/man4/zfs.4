@@ -16,7 +16,7 @@
 .\" Copyright (c) 2026, Mateusz Piotrowski <0mp@FreeBSD.org>
 .\" Copyright (c) 2026, TrueNAS.
 .\"
-.Dd September 9, 2026
+.Dd November 5, 2026
 .Dt ZFS 4
 .Os
 .
@@ -2929,7 +2929,7 @@ If
 generate a system-dependent value close to 6 threads per taskq.
 Set value only applies to pools imported/created after that.
 .
-.It Sy zio_taskq_write_tpq Ns = Ns Sy 16 Pq uint
+.It Sy zio_taskq_write_tpq Ns = Ns Sy 6 Pq uint
 Determines the minimum number of threads per write issue taskq.
 Higher values improve CPU utilization on high throughput,
 while lower reduce taskq locks contention on high IOPS.
