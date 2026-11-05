@@ -6,6 +6,9 @@
 #
 #   q1  per-I/O cost of ZFS on zero-latency (memory-backed null_blk)
 #       devices against the raw device, plus perf profiles of ZFS runs.
+#   qz  zvol rows of q1 under several module-parameter variants
+#       (QZ_VARIANTS), interleaved on one runner, with context switches
+#       per I/O and perf profiles of selected variants.
 #   q2  a fast mirror pool on null_blk beside a slow raidz2 pool on
 #       dm-delay over bandwidth-limited null_blk: the fast pool's 4K
 #       latency alone, while the slow pool streams writes, then reads,
@@ -17,13 +20,23 @@
 
 set -u -o pipefail
 
-EXP=${1:?usage: run.sh q1|q2}
+EXP=${1:?usage: run.sh q1|q2|qz}
 HERE=$(cd "$(dirname "$0")" && pwd)
 OUT=${OUT:-/var/tmp/perf-xpool/$EXP}
 WORK=${WORK:-/var/tmp/perf-xpool-work/$EXP}
 REPS=${REPS:-3}
 Q1_RUNTIME=${Q1_RUNTIME:-15}
 Q2_RUNTIME=${Q2_RUNTIME:-30}
+QZ_RUNTIME=${QZ_RUNTIME:-8}
+QZ_REPS=${QZ_REPS:-2}
+# NAME[:PARAM=VALUE[,PARAM=VALUE...]]; every parameter named in any
+# variant is reset to its load-time value before each variant applies its
+# own.
+QZ_VARIANTS=${QZ_VARIANTS:-"def rs:zvol_request_sync=1 mq:zvol_use_blk_mq=1 \
+cti:zfs_vdev_disk_calling_thread_io=1 \
+rscti:zvol_request_sync=1,zfs_vdev_disk_calling_thread_io=1 \
+mqrscti:zvol_use_blk_mq=1,zvol_request_sync=1,zfs_vdev_disk_calling_thread_io=1"}
+QZ_PROFILE=${QZ_PROFILE:-"def rscti"}
 DIAG_RUNTIME=${DIAG_RUNTIME:-20}
 SIZE_MB=${SIZE_MB:-512}
 ARC_MAX=${ARC_MAX:-$((2 << 30))}
@@ -60,6 +73,7 @@ die() {
 
 snap() {
 	head -1 /proc/stat > "$1.stat"
+	grep '^ctxt ' /proc/stat > "$1.ctxt"
 	cat /proc/uptime > "$1.uptime"
 	cat /proc/spl/kstat/zfs/arcstats > "$1.arcstats" 2>/dev/null
 }
@@ -244,7 +258,8 @@ dump_params() {
 	    zfs_arc_eviction_pct zfs_arc_overflow_shift zfs_txg_timeout \
 	    zfs_vdev_aggregation_limit_non_rotational zio_taskq_batch_pct \
 	    zfs_arc_evict_threads zvol_request_sync zvol_use_blk_mq \
-	    zfs_txg_history; do
+	    zfs_vdev_disk_calling_thread_io zvol_threads zvol_num_taskqs \
+	    zvol_inline_io zfs_txg_history; do
 		[ -r "/sys/module/zfs/parameters/$p" ] &&
 		    echo "$p $(cat "/sys/module/zfs/parameters/$p")"
 	done
@@ -330,6 +345,141 @@ q1() {
 	q1_profile fmvol "$vm" dev randread 1 1
 	q1_profile fmvol "$vm" dev randread 32 4
 	cat /proc/spl/kstat/zfs/arcstats > "$OUT/arcstats.end"
+	zpool iostat -v > "$OUT/zpool-iostat.end"
+}
+
+# ------------------------------------------------------------------ qz --
+
+QZ_DEFAULTS=()
+
+qz_params() {
+	local v p
+	for v in $QZ_VARIANTS; do
+		[ "${v#*:}" = "$v" ] && continue
+		for p in ${v#*:}; do
+			echo "${p%%=*}"
+		done
+	done | tr ',' '\n' | sed 's/=.*//' | sort -u
+}
+
+# qz_apply VARIANT: reset every parameter the variants touch, apply this
+# variant's values, then export and import both pools so that a change
+# of zvol_use_blk_mq reaches the zvols' block devices.
+qz_apply() {
+	local v=$1 kv p d
+	for kv in "${QZ_DEFAULTS[@]}"; do
+		echo "${kv#*=}" > "/sys/module/zfs/parameters/${kv%%=*}"
+	done
+	if [ "${v#*:}" != "$v" ]; then
+		for kv in $(echo "${v#*:}" | tr ',' ' '); do
+			echo "${kv#*=}" > "/sys/module/zfs/parameters/${kv%%=*}" ||
+			    die "cannot set ${kv%%=*}"
+		done
+	fi
+	for p in fast1 fastm; do
+		pool_cycle "$p"
+	done
+	{
+		echo "variant ${v%%:*}:"
+		for p in $(qz_params); do
+			echo "  $p $(cat "/sys/module/zfs/parameters/$p")"
+		done
+		for p in fast1 fastm; do
+			d=$(basename "$(readlink -f "$(zvol_dev "$p/vol")")")
+			if [ -d "/sys/block/$d/mq" ]; then
+				echo "  $p/vol $d blk-mq"
+			else
+				echo "  $p/vol $d bio"
+			fi
+		done
+	} >> "$OUT/variants.txt"
+}
+
+qz_variant_runs() {
+	local v=$1 rep=$2 name=${1%%:*} p t rw qn qd nj
+	log "qz variant $name repetition $rep"
+	qz_apply "$v"
+	for p in fast1 fastm; do
+		t=f1vol
+		[ "$p" = fastm ] && t=fmvol
+		for rw in randwrite randread; do
+			[ "$rw" = randread ] && pool_cycle "$p"
+			for qn in 1:1 1:4 32:1 32:4; do
+				qd=${qn%:*}
+				nj=${qn#*:}
+				fio_args "$(zvol_dev "$p/vol")" dev "$rw" "$qd" \
+				    "$nj" "$QZ_RUNTIME"
+				run_fio "qz.$name.$t.$rw.qd$qd.nj$nj.r$rep" \
+				    "${FIO_ARGS[@]}"
+			done
+		done
+	done
+}
+
+qz() {
+	local rep v p list rev name qn
+	common_setup
+	nullb_add nullb0 0 1024 || die "nullb0"
+	nullb_add nullb1 1 "$FAST_DEV_MB" || die "nullb1"
+	nullb_add nullb2 2 "$FAST_DEV_MB" || die "nullb2"
+	nullb_add nullb3 3 "$FAST_DEV_MB" || die "nullb3"
+	zpool create -f -o ashift=12 -O atime=off -O primarycache=metadata \
+	    -O sync=always fast1 /dev/nullb1 || die "zpool create fast1"
+	zpool create -f -o ashift=12 -O atime=off -O primarycache=metadata \
+	    -O sync=always fastm mirror /dev/nullb2 /dev/nullb3 ||
+	    die "zpool create fastm"
+	for p in fast1 fastm; do
+		zfs create -V "${SIZE_MB}M" -o volblocksize=4K "$p/vol" ||
+		    die "zfs create $p/vol"
+	done
+	prefill /dev/nullb0 1
+	for p in fast1 fastm; do
+		prefill "$(zvol_dev "$p/vol")" 1
+	done
+	zpool sync
+	for p in $(qz_params); do
+		[ -w "/sys/module/zfs/parameters/$p" ] ||
+		    die "parameter $p is missing"
+		QZ_DEFAULTS+=("$p=$(cat "/sys/module/zfs/parameters/$p")")
+	done
+	dump_params > "$OUT/params.txt"
+	echo "$QZ_VARIANTS" > "$OUT/qz-variants.txt"
+	zpool status > "$OUT/zpool-status.txt"
+	idle_baseline
+	list=($QZ_VARIANTS)
+	for rep in $(seq 1 "$QZ_REPS"); do
+		for qn in randwrite randread; do
+			fio_args /dev/nullb0 dev "$qn" 1 1 "$QZ_RUNTIME"
+			run_fio "qz.raw.raw.$qn.qd1.nj1.r$rep" "${FIO_ARGS[@]}"
+		done
+		if [ $((rep % 2)) -eq 1 ]; then
+			for v in "${list[@]}"; do
+				qz_variant_runs "$v" "$rep"
+			done
+		else
+			for ((rev = ${#list[@]} - 1; rev >= 0; rev--)); do
+				qz_variant_runs "${list[$rev]}" "$rep"
+			done
+		fi
+	done
+	log "qz perf profiles"
+	for v in "${list[@]}"; do
+		name=${v%%:*}
+		case " $QZ_PROFILE " in
+		*" $name "*) ;;
+		*) continue ;;
+		esac
+		qz_apply "$v"
+		q1_profile "qz$name.fmvol" "$(zvol_dev fastm/vol)" dev \
+		    randwrite 1 1
+		pool_cycle fastm
+		q1_profile "qz$name.fmvol" "$(zvol_dev fastm/vol)" dev \
+		    randread 1 1
+		q1_profile "qz$name.fmvol" "$(zvol_dev fastm/vol)" dev \
+		    randread 32 1
+	done
+	qz_apply def
+	cat /proc/spl/taskq > "$OUT/taskq.end" 2>/dev/null
 	zpool iostat -v > "$OUT/zpool-iostat.end"
 }
 
@@ -571,6 +721,7 @@ q2() {
 case $EXP in
 q1) q1 ;;
 q2) q2 ;;
+qz) qz ;;
 *) die "unknown experiment $EXP" ;;
 esac
 log "done"

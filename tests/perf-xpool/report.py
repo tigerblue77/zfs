@@ -9,6 +9,7 @@
 #   report.py sample SECONDS INTERVAL COMM OUT_JSON
 #   report.py q1 OUT
 #   report.py q2 OUT
+#   report.py qz OUT
 
 import collections
 import json
@@ -143,6 +144,10 @@ def load_run(out, label, irate):
         busy = (b1[0] - b0[0]) - irate * (t1 - t0)
         r["cpu_us_io"] = busy * USER_HZ_US / r["ios"] if r["ios"] else None
         r["busy_pct"] = 100.0 * (b1[0] - b0[0]) / max(1, b1[1] - b0[1])
+    c0 = readf(os.path.join(d, "pre.ctxt"))
+    c1 = readf(os.path.join(d, "post.ctxt"))
+    if c0 and c1 and r["ios"]:
+        r["ctx_io"] = (int(c1.split()[1]) - int(c0.split()[1])) / r["ios"]
     a0 = kstat(os.path.join(d, "pre.arcstats"))
     a1 = kstat(os.path.join(d, "post.arcstats"))
     if a0 and a1 and r["ios"]:
@@ -615,6 +620,100 @@ def cmd_q1(out):
                          top=30 if full else 12)
 
 
+# ---------------------------------------------------------------- qz ----
+
+QZ_TARGETS = [("f1vol", "1 vdev"), ("fmvol", "mirror")]
+
+
+def cmd_qz(out):
+    irate = idle_rate(out)
+    variants = [v.split(":")[0] for v in
+                (readf(os.path.join(out, "qz-variants.txt"), "")).split()]
+    print("== QZ: zvol 4K I/O on null_blk, variants interleaved, medians "
+          "of repetitions ==")
+    print("idle CPU baseline: %.2f jiffies/s (subtracted)" % irate)
+    print(readf(os.path.join(out, "engine.txt"), "").strip())
+    print("variants: " + " ".join(
+        readf(os.path.join(out, "qz-variants.txt"), "").split()))
+    res = {}
+
+    def get(v, t, rw, qd, nj):
+        runs = []
+        for rep in range(1, 10):
+            r = load_run(out, "qz.%s.%s.%s.qd%d.nj%d.r%d" % (
+                v, t, rw, qd, nj, rep), irate)
+            if r:
+                runs.append(r)
+        if not runs:
+            return None
+        m = dict((k, median([r.get(k) for r in runs]))
+                 for k in ("iops", "mean", "p50", "p99", "p999",
+                           "cpu_us_io", "ctx_io"))
+        m["iops_min"] = min(r["iops"] for r in runs)
+        m["iops_max"] = max(r["iops"] for r in runs)
+        m["n"] = len(runs)
+        return m
+
+    for rw in ("randwrite", "randread"):
+        raw = get("raw", "raw", rw, 1, 1)
+        print("\n-- %s 4K (%s) --" % (rw, "sync=always, O_SYNC"
+                                     if rw == "randwrite" else
+                                     "primarycache=metadata, O_DIRECT"))
+        if raw:
+            print("raw nullb0 QD1/1: %.0f IOPS (%.0f..%.0f), p50 %s us, "
+                  "CPU %s us/IO, ctx %s/IO" % (
+                      raw["iops"], raw["iops_min"], raw["iops_max"],
+                      fmt(raw["p50"]), fmt(raw["cpu_us_io"], 2),
+                      fmt(raw["ctx_io"], 2)))
+        print("%-8s %-7s %-6s %8s %15s %8s %8s %8s %8s %6s %7s %7s" % (
+            "variant", "pool", "qd/nj", "IOPS", "min..max", "mean_us",
+            "p50_us", "p99_us", "CPUus/IO", "ctx/IO", "dIOPS%", "dp50"))
+        for t, tname in QZ_TARGETS:
+            for qd, nj in QDNJ:
+                for v in variants:
+                    m = get(v, t, rw, qd, nj)
+                    if m is None:
+                        continue
+                    res[(v, t, rw, qd, nj)] = m
+                    b = res.get((variants[0], t, rw, qd, nj))
+                    di = pct_change(m["iops"], b["iops"]) if b and \
+                        v != variants[0] else None
+                    dp = (m["p50"] - b["p50"]) if b and m["p50"] and \
+                        b["p50"] and v != variants[0] else None
+                    print("%-8s %-7s %-6s %8.0f %15s %8.1f %8s %8s %8s "
+                          "%6s %7s %7s" % (
+                              v, tname, "%d/%d" % (qd, nj), m["iops"],
+                              "%.0f..%.0f" % (m["iops_min"],
+                                              m["iops_max"]),
+                              m["mean"], fmt(m["p50"]), fmt(m["p99"]),
+                              fmt(m["cpu_us_io"], 2), fmt(m["ctx_io"], 2),
+                              fmt(di), fmt(dp)))
+    vt = readf(os.path.join(out, "variants.txt"))
+    if vt:
+        seen = []
+        for blk in vt.split("variant ")[1:]:
+            if blk not in seen:
+                seen.append(blk)
+        print("\nparameters as applied (distinct):")
+        for blk in seen:
+            print("  variant " + blk.rstrip().replace("\n", ";"))
+    pdir = os.path.join(out, "perf")
+    if os.path.isdir(pdir):
+        print("\n== QZ perf profiles (perf record -a -g, cpu-clock) ==")
+        labels = sorted(set(f.rsplit(".", 2)[0] for f in os.listdir(pdir)
+                            if f.endswith(".self.txt")))
+        for lb in labels:
+            r = load_run(out, lb, irate)
+            extra = ""
+            if r:
+                extra = " [iops %.0f, mean %.1fus, CPU %.2fus/IO, " \
+                    "ctx %.2f/IO]" % (r["iops"], r["mean"],
+                                      r.get("cpu_us_io") or 0,
+                                      r.get("ctx_io") or 0)
+            perf_summary(os.path.join(pdir, lb), lb + extra, top=14,
+                         comm=True)
+
+
 # ---------------------------------------------------------------- q2 ----
 
 Q2_WL = [("rr1", "4K randread QD1 nj1"), ("rr4", "4K randread QD1 nj4"),
@@ -815,7 +914,7 @@ def cmd_q2(out):
 
 def main():
     if len(sys.argv) < 3:
-        sys.exit("usage: report.py fioline|sample|q1|q2 ARGS")
+        sys.exit("usage: report.py fioline|sample|q1|q2|qz ARGS")
     cmd = sys.argv[1]
     if cmd == "fioline":
         cmd_fioline(sys.argv[2])
@@ -825,6 +924,8 @@ def main():
         cmd_q1(sys.argv[2])
     elif cmd == "q2":
         cmd_q2(sys.argv[2])
+    elif cmd == "qz":
+        cmd_qz(sys.argv[2])
     else:
         sys.exit("unknown command " + cmd)
 

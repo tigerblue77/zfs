@@ -3,11 +3,13 @@
 # raidz2 pool and a fast pool on the same host (q2, with a high and a low
 # zfs_dirty_data_max), measured on a GitHub-hosted runner with this
 # branch's modules loaded.  tests/perf-xpool/run.sh does the work.
+# On this branch: qz, the zvol rows of q1 under module-parameter variants,
+# on three runners.
 name: perf-xpool
 
 on:
   push:
-    branches: [perf-xpool-test]
+    branches: [perf-zvol-test]
   workflow_dispatch:
 
 permissions:
@@ -26,15 +28,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: q1
-            exp: q1
+          - name: qz-a
+            exp: qz
             dirty: ""
-          - name: q2
-            exp: q2
-            dirty: "1610612736"
-          - name: q2-lowdirty
-            exp: q2
-            dirty: "268435456"
+          - name: qz-b
+            exp: qz
+            dirty: ""
+          - name: qz-c
+            exp: qz
+            dirty: ""
     steps:
       - uses: actions/checkout@v6
         with:
