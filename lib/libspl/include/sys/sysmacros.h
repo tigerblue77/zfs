@@ -102,6 +102,8 @@
 
 #define	CPU_SEQID	((uintptr_t)pthread_self() & (max_ncpus - 1))
 #define	CPU_SEQID_UNSTABLE	CPU_SEQID
+#define	CPU_NODE_UNSTABLE	0
+#define	ncpu_nodes	1
 
 /*
  * Find highest one bit set.

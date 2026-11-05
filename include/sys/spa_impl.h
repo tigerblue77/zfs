@@ -186,8 +186,13 @@ typedef enum spa_proc_state {
 	SPA_PROC_GONE		/* spa_thread() is exiting, spa_proc = &p0 */
 } spa_proc_state_t;
 
+/*
+ * With stqs_nodes > 1, the taskqs are split into stqs_nodes equal groups, one
+ * per NUMA node: group n holds stqs_count / stqs_nodes consecutive taskqs.
+ */
 typedef struct spa_taskqs {
 	uint_t stqs_count;
+	uint_t stqs_nodes;
 	taskq_t **stqs_taskq;
 } spa_taskqs_t;
 
