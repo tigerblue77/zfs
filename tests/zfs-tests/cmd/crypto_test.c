@@ -1199,13 +1199,373 @@ perf_main(const char *algname, crypto_test_outmode_t outmode)
 
 /* ========== */
 
+/*
+ * Prototype self-check (-s, bench only): encrypt random messages with every
+ * AES-GCM implementation and compare the ciphertext and tag, byte for byte,
+ * with generic+generic. Each message is written through five output layouts:
+ * a raw buffer at a non-zero offset, a UIO with one data iovec and a tag
+ * iovec (the shape zio_crypt uses), a UIO split exactly like its UIO input
+ * (the ZIL and dnode shape), a UIO split at unrelated points, both with
+ * pieces of at least one block, and input and output split into pieces of
+ * any size, empty ones included. Every output iovec sits in one guarded
+ * arena, so a write outside the range the ICP was given is caught too.
+ *
+ * The last layout is skipped for the generic and pclmulqdq GCM code:
+ * crypto_get_ptrs() assumes a block spans at most two iovecs, so a block
+ * straddling an iovec shorter than 16 bytes is written wrongly there, with
+ * or without the prototype.
+ */
+
+#define	SC_MAXLEN	(70000)
+#define	SC_MAXOFF	(48)
+#define	SC_MAXIOV	(8)
+#define	SC_GAP		(16)
+#define	SC_GUARD	(0xa5)
+#define	SC_ARENA	(SC_MAXOFF + SC_MAXLEN + 16 + (SC_MAXIOV + 3) * SC_GAP)
+
+typedef enum {
+	SC_RAW,
+	SC_UIO_ONE,
+	SC_UIO_SAME,
+	SC_UIO_OTHER,
+	SC_UIO_TINY,
+	SC_NLAYOUTS,
+} sc_layout_t;
+
+static const char *sc_layout_name[SC_NLAYOUTS] = {
+	"raw+offset", "uio-data+tag", "uio-same-split", "uio-other-split",
+	"uio-tiny-split",
+};
+
+static uint64_t sc_rng_state;
+
+static uint64_t
+sc_rand(void)
+{
+	/* xorshift64*, reproducible from the printed seed */
+	sc_rng_state ^= sc_rng_state >> 12;
+	sc_rng_state ^= sc_rng_state << 25;
+	sc_rng_state ^= sc_rng_state >> 27;
+	return (sc_rng_state * 0x2545F4914F6CDD1DULL);
+}
+
+static void
+sc_fill(uint8_t *p, size_t len)
+{
+	for (size_t i = 0; i < len; i++)
+		p[i] = (uint8_t)(sc_rand() >> 56);
+}
+
+/*
+ * split len into up to maxn pieces at random points, each at least minp
+ * bytes long (minp == 0 allows empty pieces)
+ */
+static int
+sc_split(size_t len, size_t *pieces, int maxn, size_t minp)
+{
+	if (minp > 0 && len / minp < (size_t)maxn)
+		maxn = MAX(1, (int)(len / minp));
+	int n = 1 + (int)(sc_rand() % maxn);
+	if (n == 1) {
+		pieces[0] = len;
+		return (1);
+	}
+	size_t spare = len - n * minp;
+	size_t cuts[SC_MAXIOV + 2];
+
+	cuts[0] = 0;
+	for (int i = 1; i < n; i++)
+		cuts[i] = sc_rand() % (spare + 1);
+	cuts[n] = spare;
+	/* insertion sort, n is tiny */
+	for (int i = 2; i < n; i++) {
+		size_t v = cuts[i];
+		int j = i - 1;
+		while (j >= 1 && cuts[j] > v) {
+			cuts[j + 1] = cuts[j];
+			j--;
+		}
+		cuts[j + 1] = v;
+	}
+	for (int i = 0; i < n; i++)
+		pieces[i] = cuts[i + 1] - cuts[i] + minp;
+	return (n);
+}
+
+/* lay out iovecs of the given lengths in the arena, SC_GAP apart */
+static void
+sc_place(uint8_t *arena, iovec_t *iov, const size_t *lens, int n)
+{
+	size_t pos = SC_GAP;
+
+	for (int i = 0; i < n; i++) {
+		iov[i].iov_base = arena + pos;
+		iov[i].iov_len = lens[i];
+		pos += lens[i] + SC_GAP;
+	}
+	VERIFY3U(pos, <=, SC_ARENA);
+}
+
+/* copy len bytes of src into the iovecs, starting off bytes in */
+static void
+sc_scatter(const iovec_t *iov, int n, size_t off, const uint8_t *src,
+    size_t len)
+{
+	for (int i = 0; i < n && len > 0; i++) {
+		if (off >= iov[i].iov_len) {
+			off -= iov[i].iov_len;
+			continue;
+		}
+		size_t c = MIN(iov[i].iov_len - off, len);
+		memcpy((uint8_t *)iov[i].iov_base + off, src, c);
+		src += c;
+		len -= c;
+		off = 0;
+	}
+	VERIFY0(len);
+}
+
+typedef struct {
+	size_t		msglen;
+	const uint8_t	*msg;
+	const uint8_t	*key;
+	size_t		keylen;
+	const uint8_t	*iv;
+	const uint8_t	*aad;
+	size_t		aadlen;
+	const uint8_t	*ref;		/* generic+generic ciphertext and tag */
+	uint8_t		*arena;
+	uint8_t		*expect;
+} sc_case_t;
+
+/* run one layout through the currently selected implementation */
+static boolean_t
+sc_run_layout(const sc_case_t *c, sc_layout_t layout, int *rvp)
+{
+	size_t len = c->msglen;
+	size_t outlen = len + 16;
+	size_t off = 1 + sc_rand() % (SC_MAXOFF - 1);
+	size_t inlens[SC_MAXIOV], outlens[SC_MAXIOV + 1];
+	iovec_t iniov[SC_MAXIOV], outiov[SC_MAXIOV + 1];
+	int nin = 1, nout;
+	zfs_uio_t inuio = { 0 }, outuio = { 0 };
+	crypto_data_t i = { 0 }, o = { 0 };
+
+	inlens[0] = len;
+	switch (layout) {
+	case SC_RAW:
+		outlens[0] = off + outlen;
+		nout = 1;
+		break;
+	case SC_UIO_ONE:
+		outlens[0] = off + len;
+		outlens[1] = 16;
+		nout = 2;
+		break;
+	case SC_UIO_SAME:
+		nin = sc_split(len, inlens, SC_MAXIOV, 16);
+		memcpy(outlens, inlens, nin * sizeof (size_t));
+		outlens[0] += off;
+		outlens[nin] = 16;
+		nout = nin + 1;
+		break;
+	case SC_UIO_OTHER:
+		nin = sc_split(len, inlens, SC_MAXIOV, 16);
+		nout = sc_split(outlen, outlens, SC_MAXIOV + 1, 16);
+		outlens[0] += off;
+		break;
+	case SC_UIO_TINY:
+		nin = sc_split(len, inlens, SC_MAXIOV, 0);
+		nout = sc_split(outlen, outlens, SC_MAXIOV + 1, 0);
+		outlens[0] += off;
+		break;
+	default:
+		abort();
+	}
+
+	/* input iovecs point into the message itself */
+	size_t pos = 0;
+	for (int k = 0; k < nin; k++) {
+		iniov[k].iov_base = (len == 0) ? (void *)val_empty :
+		    (void *)(c->msg + pos);
+		iniov[k].iov_len = inlens[k];
+		pos += inlens[k];
+	}
+
+	memset(c->arena, SC_GUARD, SC_ARENA);
+	memset(c->expect, SC_GUARD, SC_ARENA);
+	sc_place(c->arena, outiov, outlens, nout);
+	sc_place(c->expect, outiov, outlens, nout);
+	sc_scatter(outiov, nout, off, c->ref, outlen);
+	/* point the output iovecs back at the arena */
+	sc_place(c->arena, outiov, outlens, nout);
+
+	if (layout == SC_RAW) {
+		i.cd_format = CRYPTO_DATA_RAW;
+		i.cd_raw = iniov[0];
+		o.cd_format = CRYPTO_DATA_RAW;
+		o.cd_raw = outiov[0];
+	} else {
+		inuio.uio_iov = iniov;
+		inuio.uio_iovcnt = nin;
+		inuio.uio_segflg = UIO_SYSSPACE;
+		outuio.uio_iov = outiov;
+		outuio.uio_iovcnt = nout;
+		outuio.uio_segflg = UIO_SYSSPACE;
+		i.cd_format = CRYPTO_DATA_UIO;
+		i.cd_uio = &inuio;
+		o.cd_format = CRYPTO_DATA_UIO;
+		o.cd_uio = &outuio;
+	}
+	i.cd_offset = 0;
+	i.cd_length = len;
+	o.cd_offset = off;
+	o.cd_length = outlen;
+
+	crypto_mechanism_t mech = { 0 };
+	CK_AES_GCM_PARAMS params = { 0 };
+	mech.cm_param = (caddr_t)&params;
+	init_mech(&mech, ALG_AES_GCM, (uint8_t *)c->iv, 12,
+	    (uint8_t *)c->aad, c->aadlen, len, 16, B_FALSE);
+
+	crypto_key_t k = {
+		.ck_data = (uint8_t *)c->key,
+		.ck_length = c->keylen << 3,
+	};
+
+	*rvp = crypto_encrypt(&mech, &i, &k, NULL, &o);
+	return (*rvp == CRYPTO_SUCCESS && o.cd_length == outlen &&
+	    memcmp(c->arena, c->expect, SC_ARENA) == 0);
+}
+
+static int
+selfcheck_main(crypto_test_outmode_t outmode)
+{
+	uint64_t seed;
+	int fd = open("/dev/urandom", O_RDONLY);
+	VERIFY3S(fd, >=, 0);
+	VERIFY3S(read(fd, &seed, sizeof (seed)), ==, sizeof (seed));
+	close(fd);
+	const char *env = getenv("CRYPTO_TEST_SEED");
+	if (env != NULL)
+		seed = strtoull(env, NULL, 0);
+	sc_rng_state = seed | 1;
+	printf("self-check seed 0x%llx\n", (unsigned long long)seed);
+
+	uint8_t *msg = malloc(SC_MAXLEN);
+	uint8_t *ref = malloc(SC_MAXLEN + 16);
+	uint8_t key[32], iv[12], aad[64];
+	sc_case_t c = {
+		.msg = msg,
+		.key = key,
+		.iv = iv,
+		.aad = aad,
+		.ref = ref,
+		.arena = malloc(SC_ARENA),
+		.expect = malloc(SC_ARENA),
+	};
+	uint64_t cases[ARRAY_SIZE(aes_gcm_impl)] = { 0 };
+	uint64_t fails[ARRAY_SIZE(aes_gcm_impl)] = { 0 };
+	boolean_t usable[ARRAY_SIZE(aes_gcm_impl)];
+
+	icp_init();
+
+	for (int m = 0; m < ARRAY_SIZE(aes_gcm_impl); m++) {
+		usable[m] = (aes_impl_set(aes_gcm_impl[m][0]) == 0 &&
+		    gcm_impl_set(aes_gcm_impl[m][1]) == 0);
+	}
+
+	/*
+	 * Every length up to 1100, then every 7th (so all residues mod 16 and
+	 * mod 96 are hit), plus every length within 300 bytes of a multiple of
+	 * the default 32736-byte chunk.
+	 */
+	uint64_t nlen = 0;
+	for (size_t len = 0; len <= SC_MAXLEN; len++) {
+		size_t r = len % 32736;
+		if (len > 1100 && len % 7 != 0 && r > 300 && r < 32736 - 300)
+			continue;
+		nlen++;
+
+		c.msglen = len;
+		c.keylen = 16 + 8 * (len % 3);
+		c.aadlen = sc_rand() % 40;
+		sc_fill(msg, len);
+		sc_fill(key, sizeof (key));
+		sc_fill(iv, sizeof (iv));
+		sc_fill(aad, sizeof (aad));
+
+		/* reference: generic+generic, raw, offset 0 */
+		VERIFY0(aes_impl_set("generic"));
+		VERIFY0(gcm_impl_set("generic"));
+		crypto_mechanism_t mech = { 0 };
+		CK_AES_GCM_PARAMS params = { 0 };
+		mech.cm_param = (caddr_t)&params;
+		init_mech(&mech, ALG_AES_GCM, iv, sizeof (iv), aad, c.aadlen,
+		    len, 16, B_FALSE);
+		VERIFY0(encrypt_one(&mech, key, c.keylen,
+		    len == 0 ? val_empty : msg, len, ref, len + 16, NULL));
+
+		for (int m = 0; m < ARRAY_SIZE(aes_gcm_impl); m++) {
+			if (!usable[m])
+				continue;
+			VERIFY0(aes_impl_set(aes_gcm_impl[m][0]));
+			VERIFY0(gcm_impl_set(aes_gcm_impl[m][1]));
+			boolean_t generic_gcm =
+			    strcmp(aes_gcm_impl[m][1], "generic") == 0 ||
+			    strcmp(aes_gcm_impl[m][1], "pclmulqdq") == 0;
+			for (int l = 0; l < SC_NLAYOUTS; l++) {
+				int rv;
+				if (l == SC_UIO_TINY && generic_gcm)
+					continue;
+				cases[m]++;
+				if (sc_run_layout(&c, l, &rv))
+					continue;
+				fails[m]++;
+				if (outmode != OUT_SUMMARY || fails[m] <= 5) {
+					printf("FAIL: AES-GCM [%s+%s] len %zu "
+					    "key %zu aad %zu layout %s rv %d\n",
+					    aes_gcm_impl[m][0],
+					    aes_gcm_impl[m][1], len,
+					    c.keylen, c.aadlen,
+					    sc_layout_name[l], rv);
+				}
+			}
+		}
+	}
+
+	int failed = 0;
+	printf("self-check: %llu lengths in [0, %d], %d layouts each "
+	    "(%d for generic/pclmulqdq GCM)\n", (unsigned long long)nlen,
+	    SC_MAXLEN, SC_NLAYOUTS, SC_NLAYOUTS - 1);
+	for (int m = 0; m < ARRAY_SIZE(aes_gcm_impl); m++) {
+		char alginfo[64];
+		snprintf(alginfo, sizeof (alginfo), "AES-GCM [%s+%s]",
+		    aes_gcm_impl[m][0], aes_gcm_impl[m][1]);
+		if (!usable[m]) {
+			printf("%-28s [not supported on this platform]\n",
+			    alginfo);
+			continue;
+		}
+		printf("%-28s cases %llu  failed %llu\n", alginfo,
+		    (unsigned long long)cases[m], (unsigned long long)fails[m]);
+		failed += (fails[m] != 0);
+	}
+
+	icp_fini();
+
+	return (failed);
+}
+
+/* ========== */
+
 /* main entry */
 
 static void
 usage(void)
 {
 	fprintf(stderr,
-	    "usage: crypto_test [-v] < -c <testfile> | -p <alg> >\n");
+	    "usage: crypto_test [-v] < -c <testfile> | -p <alg> | -s >\n");
 	exit(1);
 }
 
@@ -1215,15 +1575,19 @@ main(int argc, char **argv)
 	crypto_test_outmode_t outmode = OUT_SUMMARY;
 	const char *filename = NULL;
 	const char *algname = NULL;
+	boolean_t selfcheck = B_FALSE;
 
 	int c;
-	while ((c = getopt(argc, argv, "c:p:v")) != -1) {
+	while ((c = getopt(argc, argv, "c:p:sv")) != -1) {
 		switch (c) {
 		case 'c':
 			filename = optarg;
 			break;
 		case 'p':
 			algname = optarg;
+			break;
+		case 's':
+			selfcheck = B_TRUE;
 			break;
 		case 'v':
 			outmode = (outmode == OUT_SUMMARY) ? OUT_FAIL : OUT_ALL;
@@ -1243,6 +1607,9 @@ main(int argc, char **argv)
 
 	if (argc != 0)
 		usage();
+
+	if (selfcheck)
+		return (selfcheck_main(outmode));
 
 	if (filename)
 		return (runtests_main(filename, outmode));
