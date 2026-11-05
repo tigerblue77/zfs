@@ -5204,7 +5204,8 @@ arc_get_data_buf(arc_buf_hdr_t *hdr, uint64_t size, const void *tag,
  * The use_reserve argument allows some callers to wait less than others
  * to not block critical code paths, possibly blocking other resources.
  */
-static void
+/* perf-xpool: keep it out of line, so that the bench can time it. */
+noinline static void
 arc_wait_for_eviction_impl(uint64_t amount, boolean_t lax,
     boolean_t use_reserve, boolean_t lane)
 {

@@ -9,6 +9,8 @@
 #   report.py sample SECONDS INTERVAL COMM OUT_JSON
 #   report.py q1 OUT
 #   report.py q2 OUT
+#   report.py qv OUT
+#   report.py schedsample DELAY SECONDS OUT_JSON
 
 import collections
 import json
@@ -718,7 +720,9 @@ def phase_report(out, ph):
                   u1.get("cache_total_evicts", 0) -
                   u0.get("cache_total_evicts", 0),
                   u1.get("hash_misses", 0) - u0.get("hash_misses", 0)))
-    for pool in ("fastq", "slowq"):
+    pools = sorted(set(f.split(".")[0] for f in os.listdir(e)
+                       if f.endswith(".txgs"))) or ["fastq", "slowq"]
+    for pool in pools:
         h0 = hist_kstat(os.path.join(s, pool + ".dmu_tx_assign"))
         h1 = hist_kstat(os.path.join(e, pool + ".dmu_tx_assign"))
         hd = dict((b, h1.get(b, 0) - h0.get(b, 0)) for b in h1)
@@ -813,9 +817,370 @@ def cmd_q2(out):
                         print("      " + line)
 
 
+# ---------------------------------------------------------------- qv ----
+
+def read_tasks():
+    out = {}
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            tids = os.listdir("/proc/%s/task" % pid)
+        except OSError:
+            continue
+        for tid in tids:
+            ss = readf("/proc/%s/task/%s/schedstat" % (pid, tid))
+            c = readf("/proc/%s/task/%s/comm" % (pid, tid))
+            if not ss or not c:
+                continue
+            p = ss.split()
+            if len(p) < 3:
+                continue
+            out[tid] = (c.strip(), int(p[0]), int(p[1]), int(p[2]))
+    return out
+
+
+def cmd_schedsample(delay, span, outpath):
+    """Run time, run-queue wait and timeslices of every thread, summed by
+    thread name, over SPAN seconds after DELAY."""
+    time.sleep(float(delay))
+    a = read_tasks()
+    t0 = time.time()
+    time.sleep(float(span))
+    b = read_tasks()
+    t1 = time.time()
+    agg = {}
+    for tid, (c, r, w, n) in b.items():
+        if tid in a and a[tid][0] == c:
+            x = agg.setdefault(c, [0, 0, 0, 0])
+            x[0] += r - a[tid][1]
+            x[1] += w - a[tid][2]
+            x[2] += n - a[tid][3]
+            x[3] += 1
+    with open(outpath, "w") as f:
+        json.dump({"secs": t1 - t0, "comm": agg}, f)
+
+
+# Thread families for the scheduler summary.
+FAMILIES = [
+    ("fio", re.compile(r"^fiofast$")),
+    ("fast_int", re.compile(r"^z_(rd|wr|null)_int")),
+    ("fast_iss", re.compile(r"^z_wr_iss")),
+    ("slow_iss", re.compile(r"^s_wr_iss")),
+    ("slow_int", re.compile(r"^s_(rd|wr|null)_int")),
+    ("slow_all", re.compile(r"^s_")),
+    ("slow_fio", re.compile(r"^fio$")),
+    ("evict", re.compile(r"^(arc_evict|dbuf_evict)")),
+]
+
+
+def sched_load(path):
+    txt = readf(path)
+    if not txt:
+        return None
+    d = json.loads(txt)
+    secs = d.get("secs") or 1.0
+    fam = {}
+    for name, rx in FAMILIES:
+        r = w = n = 0
+        for c, (rr, ww, nn, _k) in d["comm"].items():
+            if rx.search(c):
+                r += rr
+                w += ww
+                n += nn
+        fam[name] = {"cpus": r / 1e9 / secs, "wait_us": w / 1e3 / max(1, n),
+                     "wait_cpus": w / 1e9 / secs}
+    return fam
+
+
+def hist_parse(path, name):
+    """Buckets of a bpftrace hist() map as [(low, count)]."""
+    out = []
+    on = False
+    mult = {"": 1, "K": 1024, "M": 1 << 20, "G": 1 << 30}
+    for line in (readf(path, "") or "").splitlines():
+        if line.startswith("@"):
+            on = line.startswith("@%s:" % name)
+            continue
+        if not on:
+            continue
+        m = re.match(r"^\[(\d+)([KMG]?)(?:, [^)]*\)|\])\s+(\d+)", line)
+        if m:
+            out.append((int(m.group(1)) * mult[m.group(2)],
+                        int(m.group(3))))
+        elif not line.strip():
+            on = False
+    return out
+
+
+def hist_q(h, q):
+    tot = sum(c for _b, c in h)
+    if not tot:
+        return None
+    acc = 0
+    for b, c in h:
+        acc += c
+        if acc >= q * tot:
+            return b
+    return h[-1][0]
+
+
+def qv_phases(out):
+    rows = []
+    for line in (readf(os.path.join(out, "phases.txt"), "") or "").splitlines():
+        p = line.split()
+        if len(p) >= 2:
+            name, spec = p[0], p[1]
+            parts = spec.split(":")
+            opts = parts[2].split(",") if len(parts) > 2 else []
+            rows.append((name, parts[1], opts))
+    return rows
+
+
+def qv_ref(name, opts, names):
+    """The phase a phase is compared with: the alone phase run the same
+    way (pinned or not)."""
+    if "sep" in opts and "alone-sep" in names:
+        return "alone-sep"
+    return "alone"
+
+
+def qv_default(name, names):
+    """The upstream counterpart of a variant phase: its name up to the
+    first dash (sw-nocomp -> sw, m-hi-all -> m-hi)."""
+    for cand in (name.rsplit("-", 1)[0], name.split("-")[0]):
+        if cand != name and cand in names:
+            return cand
+    return None
+
+
+QV_WLN = {"rr1": "4K randread QD1 nj1", "rr4": "4K randread QD1 nj4",
+          "sw1": "4K sync write QD1 nj1", "sw4": "4K sync write QD1 nj4",
+          "rc1": "4K cached randread QD1"}
+
+
+def qv_runs(out, name, wl, irate):
+    runs = []
+    for rep in range(1, 10):
+        label = "qv.%s.%s.r%d" % (name, wl, rep)
+        r = load_run(out, label, irate)
+        if r:
+            s = sched_load(os.path.join(out, "runs", label, "sched.json"))
+            r["sched"] = s
+            a0 = kstat(os.path.join(out, "runs", label, "pre.arcstats"))
+            a1 = kstat(os.path.join(out, "runs", label, "post.arcstats"))
+            if a0 and a1 and r["ios"]:
+                r["mmiss_per_io"] = (
+                    a1.get("demand_metadata_misses", 0) -
+                    a0.get("demand_metadata_misses", 0)) / r["ios"]
+            runs.append(r)
+    return runs
+
+
+def rng(vals, nd=0):
+    vals = [v for v in vals if v is not None]
+    if not vals:
+        return "-"
+    f = "%." + str(nd) + "f"
+    return (f + " [" + f + ".." + f + "]") % (statistics.median(vals),
+                                             min(vals), max(vals))
+
+
+def cmd_qv(out):
+    irate = idle_rate(out)
+    phases = qv_phases(out)
+    names = [p[0] for p in phases]
+    print("== QV: fast mirror next to slow pool(s), one variant per phase ==")
+    print(readf(os.path.join(out, "setup.txt"), "").strip())
+    print("phases: " + "; ".join("%s=%s%s" % (n, l, (":" + ",".join(o))
+                                            if o else "")
+                                for n, l, o in phases))
+    for n, l, o in phases:
+        if l == "none":
+            continue
+        bw = []
+        for f in sorted(os.listdir(out)):
+            if f.startswith("slow.%s." % n) and f.endswith(".json"):
+                r = load_fio(os.path.join(out, f))
+                if r:
+                    bw.append("%s %.0f MiB/s" % (f.split(".")[2],
+                                                  r["bw_mib"]))
+        print("  slow load in %s: %s" % (n, ", ".join(bw) or "no result"))
+    wls = []
+    for n, _l, _o in phases:
+        for f in os.listdir(os.path.join(out, "runs")):
+            m = re.match(r"^qv\.%s\.(\w+)\.r\d+$" % re.escape(n), f)
+            if m and m.group(1) not in wls:
+                wls.append(m.group(1))
+    table = {}
+    for wl in wls:
+        print("\n-- %s: median [min..max] over repetitions --" %
+              QV_WLN.get(wl, wl))
+        print("%-12s %-22s %-22s %-24s %8s %8s %-16s %-16s" % (
+            "phase", "IOPS", "p99 us", "p99.9 us", "dIOPS%", "xp99",
+            "fio rq-wait us", "int rq-wait us"))
+        for n, l, o in phases:
+            runs = qv_runs(out, n, wl, irate)
+            if not runs:
+                continue
+            table[(wl, n)] = runs
+            ref = table.get((wl, qv_ref(n, o, names)))
+            iops = [r["iops"] for r in runs]
+            p99 = [r["p99"] for r in runs]
+            d = x = "-"
+            if ref:
+                ri = statistics.median([r["iops"] for r in ref])
+                rp = statistics.median([r["p99"] for r in ref])
+                d = fmt(pct_change(statistics.median(iops), ri))
+                x = fmt(statistics.median(p99) / rp if rp else None, 2)
+            fw = [r["sched"]["fio"]["wait_us"] for r in runs if r["sched"]]
+            iw = [r["sched"]["fast_int"]["wait_us"] for r in runs
+                  if r["sched"]]
+            print("%-12s %-22s %-22s %-24s %8s %8s %-16s %-16s" % (
+                n, rng(iops), rng(p99), rng([r["p999"] for r in runs]),
+                d, x, rng(fw, 1), rng(iw, 1)))
+    print("\n-- gap closed by each variant against its upstream phase "
+          "(IOPS gap to alone; 100% = back to alone) --")
+    for wl in wls:
+        line = []
+        for n, l, o in phases:
+            dflt = qv_default(n, names)
+            if not dflt or (wl, n) not in table or (wl, dflt) not in table:
+                continue
+            ref = table.get((wl, qv_ref(n, o, names)))
+            refd = table.get((wl, qv_ref(dflt, [], names)))
+            if not ref or not refd:
+                continue
+            ri = statistics.median([r["iops"] for r in ref])
+            rdi = statistics.median([r["iops"] for r in refd])
+            vd = [r["iops"] for r in table[(wl, dflt)]]
+            vv = [r["iops"] for r in table[(wl, n)]]
+            gd = 1 - statistics.median(vd) / rdi
+            gv = 1 - statistics.median(vv) / ri
+            if gd <= 0.01:
+                line.append("%s: %s gap %.1f%%, no gap to close" % (
+                    n, dflt, 100 * gd))
+                continue
+            lo = (gd - (1 - max(vv) / ri)) / gd
+            hi = (gd - (1 - min(vv) / ri)) / gd
+            line.append("%s vs %s: gap %.1f%% -> %.1f%%, closed %.0f%% "
+                        "[%.0f..%.0f]" % (n, dflt, 100 * gd, 100 * gv,
+                                           100 * (gd - gv) / gd,
+                                           100 * min(lo, hi),
+                                           100 * max(lo, hi)))
+        if line:
+            print("  %s:\n    " % QV_WLN.get(wl, wl) + "\n    ".join(line))
+    print("\n-- scheduler (rr1 runs, medians): CPUs used and run-queue "
+          "wait per timeslice --")
+    for n, l, o in phases:
+        runs = table.get(("rr1", n)) or []
+        ss = [r["sched"] for r in runs if r.get("sched")]
+        if not ss:
+            continue
+        parts = []
+        for fam, _rx in FAMILIES:
+            c = median([s[fam]["cpus"] for s in ss])
+            w = median([s[fam]["wait_us"] for s in ss])
+            if c is not None and c > 0.005:
+                parts.append("%s %.2f cpu/%.0fus" % (fam, c, w))
+        print("  %-12s %s" % (n, ", ".join(parts)))
+    for n, l, o in phases:
+        print("\n== phase %s (%s%s) ==" % (n, l, (": " + ",".join(o))
+                                           if o else ""))
+        phase_report(out, n)
+        qv_phase_extra(out, n)
+        for wl in ("rr1", "sw1"):
+            dd = os.path.join(out, "diag", "qvdiag.%s.%s" % (n, wl))
+            if not os.path.isdir(dd):
+                continue
+            rd = load_run(out, "qvdiag.%s.%s" % (n, wl), irate)
+            print("  [%s %s] diag: %s" % (
+                n, wl, "iops %.0f mean %.1fus p99 %sus" % (
+                    rd["iops"], rd["mean"], fmt(rd["p99"])) if rd
+                else "no fio result"))
+            fl = os.path.join(dd, "funclat.txt")
+            funclat_summary(fl)
+            hs = []
+            for fn in ("arc_wait_for_eviction_impl", "arc_wait_for_eviction",
+                       "arc_read", "zio_wait", "zfs_read", "zil_commit"):
+                h = hist_parse(fl, "fast_h_" + fn)
+                if h and sum(c for _b, c in h):
+                    hs.append("%s n=%d p50<%s p99<%s p99.9<%s max<%s" % (
+                        fn, sum(c for _b, c in h), hist_q(h, 0.5),
+                        hist_q(h, 0.99), hist_q(h, 0.999), h[-1][0]))
+            if hs:
+                print("    fiofast latency hist (us, bucket lows): " +
+                      "; ".join(hs))
+            schedlock_summary(os.path.join(dd, "schedlock.txt"))
+            perf_summary(os.path.join(dd, "perf"), "perf -a", top=8,
+                         children=False, comm=True)
+            io = readf(os.path.join(dd, "zpool-iostat.txt"))
+            if io:
+                print("    zpool iostat -l:")
+                for line in io.strip().splitlines():
+                    if line.strip() and not line.startswith("-"):
+                        print("      " + line)
+
+
+def qv_phase_extra(out, ph):
+    s = os.path.join(out, "phase", ph + ".start")
+    e = os.path.join(out, "phase", ph + ".end")
+    a0 = kstat(os.path.join(s, "arcstats"))
+    a1 = kstat(os.path.join(e, "arcstats"))
+    if a1:
+        keys = ("hash_collisions", "hash_chain_max", "evict_skip",
+                "evict_l2_skip", "mru_evictable_data", "async_upgrade_sync",
+                "demand_metadata_misses", "prefetch_data_misses",
+                "arc_meta_used", "uncached_evictable_data")
+        print("  arcstats more: " + ", ".join(
+            "%s %d" % (k, a1.get(k, 0) - (a0.get(k, 0) if k not in (
+                "hash_chain_max", "mru_evictable_data", "arc_meta_used",
+                "uncached_evictable_data") else 0))
+            for k in keys if k in a1))
+    pin = readf(os.path.join(out, "phase", ph + ".pin"))
+    if pin:
+        print("  pinning: " + pin.strip())
+    m0 = readf(os.path.join(s, "meminfo"), "") or ""
+    m1 = readf(os.path.join(e, "meminfo"), "") or ""
+    for txt, tag in ((m0, "start"), (m1, "end")):
+        m = re.search(r"MemAvailable:\s+(\d+)", txt)
+        if m:
+            print("  MemAvailable at %s: %d MiB" % (tag, int(m.group(1)) >> 10))
+
+
+def schedlock_summary(path):
+    maps = parse_bt_maps(path)
+    rq = dict((k[0], v) for k, v in maps.get("rq_us", []) if k)
+    rqn = dict((k[0], v) for k, v in maps.get("rq_n", []) if k)
+    rqm = dict((k[0], v) for k, v in maps.get("rq_max_us", []) if k)
+    if rq:
+        names = sorted(rq, key=lambda c: -rq[c])[:12]
+        for want in ("fiofast", "z_rd_int", "z_wr_iss"):
+            if want in rq and want not in names:
+                names.append(want)
+        print("    run-queue wait by thread (total ms/mean us/max us): " +
+              "; ".join("%s %.0f/%.1f/%d" % (
+                  c, rq[c] / 1000.0, rq[c] / max(1, rqn.get(c, 1)),
+                  rqm.get(c, 0)) for c in names))
+    lk = dict((k[0], v) for k, v in maps.get("lock_us", []) if k)
+    lkn = dict((k[0], v) for k, v in maps.get("lock_n", []) if k)
+    if lk:
+        print("    contended-lock wait by thread (total ms/n): " +
+              "; ".join("%s %.1f/%d" % (c, lk[c] / 1000.0, lkn.get(c, 0))
+                        for c in sorted(lk, key=lambda c: -lk[c])[:10]))
+        stk = sorted(maps.get("lock_stk_us", []), key=lambda x: -x[1])[:6]
+        for k, v in stk:
+            print("      %.1f ms  %s" % (v / 1000.0, " <- ".join(
+                [f for f in k[0] if not f.startswith("__traceiter")][:6])))
+    elif not rq:
+        err = readf(path.replace(".txt", ".err"), "") or ""
+        print("    no sched/lock trace (%s)" % (err.strip().splitlines()[-1]
+                                                 if err.strip() else "empty"))
+
+
 def main():
     if len(sys.argv) < 3:
-        sys.exit("usage: report.py fioline|sample|q1|q2 ARGS")
+        sys.exit("usage: report.py fioline|sample|schedsample|q1|q2|qv ARGS")
     cmd = sys.argv[1]
     if cmd == "fioline":
         cmd_fioline(sys.argv[2])
@@ -825,6 +1190,10 @@ def main():
         cmd_q1(sys.argv[2])
     elif cmd == "q2":
         cmd_q2(sys.argv[2])
+    elif cmd == "qv":
+        cmd_qv(sys.argv[2])
+    elif cmd == "schedsample":
+        cmd_schedsample(*sys.argv[2:5])
     else:
         sys.exit("unknown command " + cmd)
 
