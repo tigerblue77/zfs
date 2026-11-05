@@ -1137,6 +1137,16 @@ dsl_dir_dirty(dsl_dir_t *dd, dmu_tx_t *tx)
 
 	ASSERT(dsl_dir_phys(dd));
 
+	/*
+	 * Every dirtied buffer gets here, almost always with dd already on
+	 * the list.  Only dsl_pool_sync() of tx_txg takes it off, and every
+	 * caller with that txg is ordered against it (an open tx holds the
+	 * txg open, syncing context finishes before or runs on the sync
+	 * thread), so checking without the list lock cannot miss a removal.
+	 */
+	if (txg_list_member(&dp->dp_dirty_dirs, dd, tx->tx_txg))
+		return;
+
 	if (txg_list_add(&dp->dp_dirty_dirs, dd, tx->tx_txg)) {
 		/* up the hold count until we can be written out */
 		dmu_buf_add_ref(dd->dd_dbuf, dd);
