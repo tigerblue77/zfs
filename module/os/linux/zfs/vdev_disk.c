@@ -31,6 +31,7 @@
 #include <linux/msdos_fs.h>
 #include <linux/vfs_compat.h>
 #include <linux/blk-cgroup.h>
+#include <linux/completion.h>
 
 /*
  * Linux 6.8.x uses a bdev_handle as an instance/refcount for an underlying
@@ -672,15 +673,6 @@ vdev_submit_bio(struct bio *bio)
 	current->bio_list = bio_list;
 }
 
-static inline void
-vdev_submit_bio_wait(struct bio *bio)
-{
-	struct bio_list *bio_list = current->bio_list;
-	current->bio_list = NULL;
-	(void) submit_bio_wait(bio);
-	current->bio_list = bio_list;
-}
-
 static inline struct bio *
 vdev_bio_alloc(struct block_device *bdev, gfp_t gfp_mask,
     unsigned short nr_vecs)
@@ -840,6 +832,12 @@ vbio_fill_cb(struct page *page, size_t off, size_t len, void *priv)
 	return (vbio_add_page(vbio, page, len, off));
 }
 
+static void
+vbio_wait_completion(struct bio *bio)
+{
+	complete((struct completion *)bio->bi_private);
+}
+
 /* Create some BIOs, fill them with data and submit them */
 static void
 vbio_submit(vbio_t *vbio, abd_t *abd, uint64_t size)
@@ -851,8 +849,16 @@ vbio_submit(vbio_t *vbio, abd_t *abd, uint64_t size)
 	 * still creating and executing later ones, and if the device goes
 	 * away while that's happening, older kernels can get confused and
 	 * trample memory.
+	 *
+	 * A thread that is itself submitting a bio, as a zvol serving a
+	 * request in its submitter's thread is, already has a plug, and ours
+	 * would only nest in it: our requests would then wait in it until
+	 * this thread sleeps, and be dispatched from a kblockd worker.  So
+	 * set the outer plug aside while ours is in use.
 	 */
+	struct blk_plug *outer_plug = current->plug;
 	struct blk_plug plug;
+	current->plug = NULL;
 	blk_start_plug(&plug);
 
 	(void) abd_iterate_page_func(abd, 0, size, vbio_fill_cb, vbio);
@@ -866,14 +872,29 @@ vbio_submit(vbio_t *vbio, abd_t *abd, uint64_t size)
 	 */
 
 	if (vbio->vbio_wait) {
-		vdev_submit_bio_wait(vbio->vbio_bio);
-	} else {
-		vbio->vbio_bio->bi_end_io = vbio_completion;
-		vbio->vbio_bio->bi_private = vbio;
-		vdev_submit_bio(vbio->vbio_bio);
+		/*
+		 * Unplug before waiting: a bio still in the plug would only
+		 * be dispatched when this thread sleeps, from a kblockd worker.
+		 */
+		DECLARE_COMPLETION_ONSTACK(done);
+		struct bio *bio = vbio->vbio_bio;
+
+		bio->bi_private = &done;
+		bio->bi_end_io = vbio_wait_completion;
+		bio->bi_opf |= REQ_SYNC;
+		vdev_submit_bio(bio);
+		blk_finish_plug(&plug);
+		current->plug = outer_plug;
+		wait_for_completion_io(&done);
+		return;
 	}
 
+	vbio->vbio_bio->bi_end_io = vbio_completion;
+	vbio->vbio_bio->bi_private = vbio;
+	vdev_submit_bio(vbio->vbio_bio);
+
 	blk_finish_plug(&plug);
+	current->plug = outer_plug;
 }
 
 /* IO completion callback */
