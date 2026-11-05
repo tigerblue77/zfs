@@ -57,6 +57,23 @@ jobs:
             "$RUNNER_TEMP/$v/tests/zfs-tests/cmd/crypto_test" -p AES-GCM
           done
         done
+    # zfs_nicetime() prints whole units ("1us" for anything up to 1.999us),
+    # too coarse for the effect measured here. Rebuild the base tree's
+    # crypto_test from the prototype's source, so that both trees run the
+    # same harness against their own libzpool, and time the vector
+    # implementations again in nanoseconds.
+    - name: Benchmark, interleaved, ns resolution
+      run: |
+        cp "$RUNNER_TEMP/proto/tests/zfs-tests/cmd/crypto_test.c" \
+          "$RUNNER_TEMP/base/tests/zfs-tests/cmd/crypto_test.c"
+        make -C "$RUNNER_TEMP/base" tests/zfs-tests/cmd/crypto_test
+        for i in 1 2 3 4 5; do
+          for v in base proto; do
+            echo "=== ns run $i $v ==="
+            CRYPTO_TEST_NS=1 CRYPTO_TEST_IMPL=avx \
+              "$RUNNER_TEMP/$v/tests/zfs-tests/cmd/crypto_test" -p AES-GCM
+          done
+        done
     # After the benchmark, so that a failure here still leaves the timings.
     - name: Correctness (prototype)
       working-directory: ${{ runner.temp }}/proto

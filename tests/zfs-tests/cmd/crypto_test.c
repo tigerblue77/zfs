@@ -1084,11 +1084,23 @@ typedef struct {
 #define	PERF_MSG_SHIFT_MAX	(19)	/* max test size 2^19 == 512K */
 #define	PERF_ROUNDS		(1000)	/* 1000 rounds per test */
 
+/*
+ * Bench only: CRYPTO_TEST_NS prints the average in whole nanoseconds instead
+ * of zfs_nicetime()'s whole units, and CRYPTO_TEST_IMPL skips every
+ * implementation whose name does not contain it. The timing loop is the same.
+ */
+static boolean_t perf_ns = B_FALSE;
+static const char *perf_impl_filter = NULL;
+
 /* per-alg-impl function for performance test runs */
 static void
 perf_alg_cb(const char *alginfo, void *arg)
 {
 	char buf[10];
+
+	if (perf_impl_filter != NULL &&
+	    strstr(alginfo, perf_impl_filter) == NULL)
+		return;
 	printf("%-28s", alginfo);
 
 	if (arg == NULL) {
@@ -1128,6 +1140,11 @@ perf_alg_cb(const char *alginfo, void *arg)
 		 * print avg time per round. zfs_nicetime expects nanoseconds,
 		 * so we multiply first
 		 */
+		if (perf_ns) {
+			printf("  %7llu",
+			    (unsigned long long)((total*1000)/PERF_ROUNDS));
+			continue;
+		}
 		zfs_nicetime((total*1000)/PERF_ROUNDS, buf, sizeof (buf));
 		printf("  %5s", buf);
 	}
@@ -1171,13 +1188,18 @@ perf_main(const char *algname, crypto_test_outmode_t outmode)
 
 	icp_init();
 
+	perf_ns = (getenv("CRYPTO_TEST_NS") != NULL);
+	perf_impl_filter = getenv("CRYPTO_TEST_IMPL");
+
 	/* print header */
 	char buf[10];
 	printf("avg encrypt (%4d rounds)   ", PERF_ROUNDS);
 	for (int i = PERF_MSG_SHIFT_MIN; i <= PERF_MSG_SHIFT_MAX; i++) {
 		zfs_nicebytes(1<<i, buf, sizeof (buf));
-		printf("  %5s", buf);
+		printf(perf_ns ? "  %7s" : "  %5s", buf);
 	}
+	if (perf_ns)
+		printf("  (ns)");
 	printf("\n");
 
 	/* loop over all implementations of the wanted algorithm */
