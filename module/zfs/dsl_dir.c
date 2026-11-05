@@ -1271,6 +1271,7 @@ dsl_dir_tempreserve_impl(dsl_dir_t *dd, uint64_t asize, boolean_t netfree,
 	struct tempreserve *tr;
 	int retval;
 	uint64_t ext_quota;
+	uint64_t pool_avail;
 	uint64_t ref_rsrv;
 	uint64_t est_inflight, used_on_disk, parent_rsrv;
 	dsl_dataset_t *ds;
@@ -1278,6 +1279,7 @@ dsl_dir_tempreserve_impl(dsl_dir_t *dd, uint64_t asize, boolean_t netfree,
 top_of_function:
 	txg = tx->tx_txg;
 	retval = EDQUOT;
+	pool_avail = UINT64_MAX;
 	ref_rsrv = 0;
 	ds = (first && tx->tx_objset) ? tx->tx_objset->os_dsl_dataset : NULL;
 
@@ -1315,6 +1317,7 @@ top_of_function:
 			quota = avail;
 			retval = SET_ERROR(ENOSPC);
 		}
+		pool_avail = avail;
 	}
 
 	/*
@@ -1362,6 +1365,13 @@ top_of_function:
 	ext_quota = quota >> 5;
 	if (quota == UINT64_MAX)
 		ext_quota = 0;
+
+	/*
+	 * The extension absorbs the overestimate of overwrites near a dataset
+	 * quota.  It must not reach past the pool's own limit: beyond it lies
+	 * the slop space that frees need (see spa_slop_shift).
+	 */
+	ext_quota = MIN(ext_quota, pool_avail - quota);
 
 	if (used_on_disk >= quota) {
 		if (retval == ENOSPC && (used_on_disk - quota) <
