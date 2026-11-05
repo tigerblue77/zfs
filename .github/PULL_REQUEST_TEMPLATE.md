@@ -27,6 +27,14 @@
 - [ ] Library ABI change (libzfs, libzfs\_core, libnvpair and libzfsbootenv)
 - [ ] Documentation (a change to man pages or other documentation)
 
+### Priority
+<!--- For a bug fix, how soon should it be reviewed? Put an `x` in one box. -->
+<!--- It is read once, when the PR is opened; a maintainer may change it. -->
+- [ ] Critical (data loss or corruption, silently wrong data included, on a pool that was healthy)
+- [ ] High (a pool that cannot be imported, a panic or deadlock in normal use, a security issue, or a regression in a release)
+- [ ] Medium (as high, but only in an uncommon setup, after existing on-disk damage, or in a race not seen outside a test)
+- [ ] Low (messages, tool output, debug-only assertions)
+
 ### Checklist
 <!--- Go over all the following points, and put an `x` in all the boxes that apply. -->
 <!--- If you're unsure about any of these, don't hesitate to ask. We're here to help! -->

@@ -19,6 +19,40 @@ jobs:
         run: |
           gh pr edit $ISSUE --add-label "Status: Work in Progress"
 
+  priority:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.action == 'opened' }}
+    steps:
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          # Only the box ticked when the PR is opened counts: later edits
+          # to the description leave the label alone.
+          picked=$(jq -r '.pull_request.body // ""' "$GITHUB_EVENT_PATH" |
+              tr -d '\r' | sed -n -E 's/^- \[[xX]\] (Critical|High|Medium|Low) \(.*/\1/p')
+          if [ -z "$picked" ] || [ "$(wc -l <<< "$picked")" -ne 1 ]; then
+            exit 0
+          fi
+          label="Priority: $picked"
+          case $picked in
+            Critical) color=b60205
+              desc="Data loss or corruption, silently wrong data included, on a healthy pool" ;;
+            High) color=d93f0b
+              desc="Unimportable pool, panic or deadlock in normal use, security, or a regression" ;;
+            Medium) color=fbca04
+              desc="As high, but in an uncommon setup or in a race not seen outside a test" ;;
+            Low) color=c2e0c6
+              desc="Messages, tool output, debug-only assertions" ;;
+          esac
+          if ! gh label list --limit 1000 --json name --jq '.[].name' |
+              grep -qxF "$label"; then
+            gh label create "$label" --color "$color" --description "$desc"
+          fi
+          gh api --silent -X POST "repos/$GH_REPO/issues/$PR/labels" \
+              -f "labels[]=$label"
+
   push:
     runs-on: ubuntu-latest
     if: ${{ github.event.action == 'synchronize' || github.event.action == 'reopened' }}
