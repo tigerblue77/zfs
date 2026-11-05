@@ -1,0 +1,119 @@
+# Fork-only experiment, not meant for upstream: ZFS per-I/O overhead on
+# zero-latency null_blk devices (q1), and interference between a slow
+# raidz2 pool and a fast pool on the same host (q2, with a high and a low
+# zfs_dirty_data_max), measured on a GitHub-hosted runner with this
+# branch's modules loaded.  tests/perf-xpool/run.sh does the work.
+name: perf-xpool
+
+on:
+  push:
+    branches: [perf-xpool-test]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perf-xpool-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  perf:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: q1
+            exp: q1
+            dirty: ""
+          - name: q2
+            exp: q2
+            dirty: "1610612736"
+          - name: q2-lowdirty
+            exp: q2
+            dirty: "268435456"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Runner
+        run: |
+          uname -a
+          lscpu | grep -E 'Model name|^CPU\(s\)|Thread|Hypervisor|MHz'
+          free -m
+          df -h / /mnt || true
+      - name: Install dependencies
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update -y -q
+          sudo apt-get install -y -q --no-install-recommends \
+            autoconf automake libtool gawk build-essential \
+            libblkid-dev uuid-dev libudev-dev libssl-dev zlib1g-dev \
+            libaio-dev libattr1-dev libelf-dev libtirpc-dev libffi-dev \
+            libcurl4-openssl-dev libpam0g-dev python3 python3-dev \
+            "linux-headers-$(uname -r)" fio bpftrace dmsetup sysstat \
+            linux-tools-common > apt.log 2>&1 || { tail -30 apt.log; exit 1; }
+          sudo apt-get install -y -q --no-install-recommends \
+            "linux-tools-$(uname -r)" >> apt.log 2>&1 ||
+            echo "linux-tools-$(uname -r) not installed"
+          sudo apt-get install -y -q --no-install-recommends \
+            "linux-modules-extra-$(uname -r)" >> apt.log 2>&1 ||
+            echo "linux-modules-extra-$(uname -r) not installed"
+          for m in null_blk dm_delay; do
+            modinfo -F filename "$m" || echo "$m: not found"
+          done
+          fio --version; bpftrace --version; perf --version || true
+      - name: Build
+        run: |
+          ./autogen.sh > build.log 2>&1 || { tail -40 build.log; exit 1; }
+          ./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var \
+            --disable-pyzfs >> build.log 2>&1 || { tail -60 build.log; exit 1; }
+          make -j"$(nproc)" >> build.log 2>&1 ||
+            { grep -n -m 20 -E 'error|Error' build.log; tail -40 build.log; exit 1; }
+          tail -2 build.log
+      - name: Install and load modules
+        run: |
+          sudo make install > install.log 2>&1 || { tail -40 install.log; exit 1; }
+          # Move Ubuntu's own zfs/spl modules out of the way so that
+          # modprobe picks the ones just built.
+          for d in $(find "/lib/modules/$(uname -r)/kernel" -type d -name zfs); do
+            sudo mv "$d" "/var/tmp/ubuntu-$(basename "$(dirname "$d")")-zfs"
+          done
+          sudo ldconfig
+          sudo depmod -a
+          sudo udevadm control --reload-rules || true
+          modinfo -F filename spl zfs
+          sudo ./scripts/zfs.sh -v
+          cat /sys/module/zfs/version
+          zfs version
+      - name: Experiment
+        timeout-minutes: 95
+        env:
+          Q2_DIRTY_MAX: ${{ matrix.dirty }}
+        run: |
+          sudo -E OUT=/var/tmp/perf-xpool/${{ matrix.name }} \
+            tests/perf-xpool/run.sh ${{ matrix.exp }}
+      - name: Summary
+        if: always()
+        run: |
+          sudo chmod -R a+rX /var/tmp/perf-xpool || true
+          d=/var/tmp/perf-xpool/${{ matrix.name }}
+          {
+            echo "### ${{ matrix.name }} on $(uname -r), $(nproc) CPUs"
+            grep -m1 'Model name' "$d/system.txt" || true
+            grep -E '^(zfs |fio-|bpftrace|perf version|null_blk)' "$d/system.txt" || true
+            cat "$d/params.txt" 2>/dev/null | tr '\n' ' '; echo
+            python3 tests/perf-xpool/report.py ${{ matrix.exp }} "$d"
+          } > summary.txt 2>&1
+          { echo '```'; cat summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          echo "=== PERF-XPOOL SUMMARY ${{ matrix.name }} ==="
+          cat summary.txt
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: perf-xpool-${{ matrix.name }}
+          path: /var/tmp/perf-xpool/${{ matrix.name }}
+          retention-days: 14
