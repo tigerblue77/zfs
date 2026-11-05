@@ -231,6 +231,12 @@ case "$OS" in
     ;;
 esac
 
+# Fork-only experiment: run ZTS with icp_gcm_impl=avx512-vaes.
+if ! "$HOME/zfs/.github/workflows/scripts/qemu-6-vaes-test-vm.sh"; then
+  echo 1 > /var/tmp/tests-exitcode.txt
+  exit 0
+fi
+
 # Lustre calls a number of exported ZFS module symbols.  To make sure we don't
 # change the symbols and break Lustre, do a quick Lustre build of the latest
 # released Lustre against ZFS.
@@ -257,6 +263,7 @@ grep -qw kmemleak=on /proc/cmdline && KMEMLEAK="-m"
 $TDIR/zfs-tests.sh -vKO $KMEMLEAK -s 3GB -T $TAGS || RV=$?
 
 df -h > df-postrun.txt
+"$HOME/zfs/.github/workflows/scripts/qemu-6-vaes-test-vm.sh" --after || true
 echo $RV > tests-exitcode.txt
 sync
 exit 0

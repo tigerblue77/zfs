@@ -6,6 +6,17 @@
 
 set -eu
 
+# Fork-only experiment: the test VMs see this CPU, and the avx512-vaes
+# GCM implementation needs these flags.  Fail at once without them.
+grep -m1 'model name' /proc/cpuinfo
+for flag in avx512f avx512bw avx512vl vaes vpclmulqdq bmi2; do
+  if ! grep -qw "$flag" /proc/cpuinfo; then
+    echo "VAES-TEST: NO AVX-512/VAES ON THIS RUNNER (no $flag)"
+    exit 1
+  fi
+done
+echo "VAES-TEST: runner has AVX-512 and VAES"
+
 # The default runner has a bunch of development tools and other things
 # that we do not need.  Remove them here to free up a total of 35GB.
 #
