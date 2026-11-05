@@ -26,7 +26,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: w1
+          - name: y1
             pools: "1"
             wl: "rr1 rr4 sw1 sw4"
             wmb: "1024"
@@ -34,35 +34,10 @@ jobs:
             arc: "2147483648"
             dirty: "1610612736"
             phases: >-
-              alone:none sw:write:diag sw-nocomp:write:comp=off
-              sw-nice:write:nice=-20 sw-pct25:write:pct=25
-              sw-pcmeta:write:pc=metadata sw-c1:write:kn=c1
-              sw-w:write:kn=w,diag sw-l:write:kn=l sw-all:write:kn=all
+              alone:none sw:write:diag sw-w:write:kn=w sw-wy:write:kn=wy
+              sw-w2:write:kn=w2 sw-idle:write:idle sw-all:write:kn=all,diag
               alone-all:none:kn=all alone2:none
-          - name: r1
-            pools: "1"
-            wl: "rr1 rr4 sw1 sw4"
-            wmb: "256"
-            rmb: "2560"
-            arc: "2147483648"
-            dirty: "1610612736"
-            phases: >-
-              alone:none sr:read:diag sr-pcmeta:read:pc=metadata
-              sr-r:read:kn=r sr-all:read:kn=all sw:write
-              alone-sep:none:sep sr-sep:read:sep sw-sep:write:sep
-              alone2:none
-          - name: m3
-            pools: "3"
-            wl: "rr1 rr4 sw1 rc1"
-            wmb: "3072"
-            rmb: "0"
-            arc: "4294967296"
-            dirty: "1610612736"
-            phases: >-
-              alone:none mhi:write:diag mhi-dirty512:write:dirty=536870912
-              mhi-nocomp:write:comp=off mhi-pcmeta:write:pc=metadata
-              mhi-l:write:kn=l,diag mhi-all:write:kn=all alone2:none
-          - name: c3
+          - name: y3
             pools: "3n"
             wl: "rr1 rr4 sw1 sw4"
             wmb: "256"
@@ -71,18 +46,19 @@ jobs:
             dirty: "1610612736"
             fastmb: "1024"
             phases: >-
-              alone:none m3w:write:diag m3w-nocomp:write:comp=off
-              m3w-w:write:kn=w m3w-all:write:kn=all alone2:none
-          - name: w1b
+              alone:none m3w:write:diag m3w-w:write:kn=w m3w-wy:write:kn=wy
+              m3w-w2:write:kn=w2 m3w-idle:write:idle m3w-all:write:kn=all,diag
+              alone2:none
+          - name: yr
             pools: "1"
             wl: "rr1 rr4 sw1 sw4"
-            wmb: "1024"
-            rmb: "0"
+            wmb: "256"
+            rmb: "2560"
             arc: "2147483648"
             dirty: "1610612736"
             phases: >-
-              alone:none sw:write sw-nocomp:write:comp=off sw-w:write:kn=w
-              sw-all:write:kn=all alone2:none
+              alone:none sr:read:diag sr-r:read:kn=r sr-r2:read:kn=r2
+              sr-all:read:kn=all,diag alone2:none
     steps:
       - uses: actions/checkout@v6
         with:
