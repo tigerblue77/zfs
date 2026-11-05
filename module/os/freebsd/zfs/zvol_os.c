@@ -779,7 +779,7 @@ zvol_geom_bio_strategy(struct bio *bp, boolean_t sync)
 	taskq_hash = cityhash3((uintptr_t)zv, curcpu, bp->bio_offset >>
 	    ZVOL_TASKQ_OFFSET_SHIFT);
 	tq_idx = taskq_hash % ztqs->tqs_cnt;
-	task = zv_request_task_create(zvr);
+	task = zv_request_task_create(zvr, B_FALSE);
 	taskq_dispatch_ent(ztqs->tqs_taskq[tq_idx], zvol_strategy_task, task,
 	    0, &task->ent);
 }
