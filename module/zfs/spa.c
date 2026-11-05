@@ -214,6 +214,17 @@ static const boolean_t spa_create_process = B_TRUE; /* no process => no sysdc */
 static uint_t	zio_taskq_write_tpq = 16;
 
 /*
+ * Run the issue or interrupt taskqs of an I/O type that has a high-priority
+ * counterpart (write issue, read interrupt by default) at the default
+ * priority, level with user threads and below every other taskq.  They carry
+ * the bulk work: compression, checksums and parity of a txg, verification and
+ * decompression of prefetch and scrub reads.  At the near-maximal priority of
+ * the other taskqs, a pool doing it flat out takes the CPUs from the I/O
+ * completions and the applications of every other pool.
+ */
+static int	zio_taskq_bulk_lowpri = 1;
+
+/*
  * Report any spa_load_verify errors found, but do not fail spa_load.
  * This is used by zdb to analyze non-idle pools.
  */
@@ -1326,11 +1337,17 @@ spa_taskqs_init(spa_t *spa, zio_type_t t, zio_taskq_type_t q)
 			/*
 			 * The write issue taskq can be extremely CPU
 			 * intensive.  Run it at slightly less important
-			 * priority than the other taskqs.
+			 * priority than the other taskqs, or at the default
+			 * priority as bulk work, see zio_taskq_bulk_lowpri.
 			 */
-			const pri_t pri = (t == ZIO_TYPE_WRITE &&
-			    q == ZIO_TASKQ_ISSUE) ?
-			    wtqclsyspri : maxclsyspri;
+			pri_t pri = maxclsyspri;
+			if ((q == ZIO_TASKQ_ISSUE ||
+			    q == ZIO_TASKQ_INTERRUPT) &&
+			    zio_taskq_bulk_lowpri &&
+			    zio_taskqs[t][q + 1].zti_mode != ZTI_MODE_NULL)
+				pri = defclsyspri;
+			else if (t == ZIO_TYPE_WRITE && q == ZIO_TASKQ_ISSUE)
+				pri = wtqclsyspri;
 			tq = taskq_create_proc(name, value, pri, 50,
 			    INT_MAX, spa->spa_proc, flags);
 #ifdef HAVE_SYSDC
@@ -12525,6 +12542,9 @@ ZFS_MODULE_VIRTUAL_PARAM_CALL(zfs_zio, zio_, taskq_free,
 
 ZFS_MODULE_PARAM(zfs_zio, zio_, taskq_write_tpq, UINT, ZMOD_RW,
 	"Number of CPUs per write issue taskq");
+
+ZFS_MODULE_PARAM(zfs_zio, zio_, taskq_bulk_lowpri, INT, ZMOD_RW,
+	"Run bulk I/O taskqs at the default priority");
 
 ZFS_MODULE_PARAM(zfs, zfs_, ccw_retry_interval, INT, ZMOD_RW,
 	"Configuration cache file write, retry after failure, interval "
