@@ -5,12 +5,13 @@
 # branch's modules loaded.  tests/perf-xpool/run.sh does the work.
 # On this branch: qz, the zvol rows of q1 under module-parameter variants,
 # on three runners, with zvol-inline-io merged: "base" is master's
-# behaviour (zvol_inline_io_uring=0), "inl" the change's default.
+# behaviour (zvol_inline_io_uring=0), "inl" the change's default, "nw"
+# zvol_nowait=1 (bio-based zvols take REQ_NOWAIT submissions).
 name: perf-xpool
 
 on:
   push:
-    branches: [perf-zvol-proto]
+    branches: [perf-zvol-proto2]
   workflow_dispatch:
 
 permissions:
@@ -100,16 +101,16 @@ jobs:
           QZ_VARIANTS: >-
             base:zvol_inline_io_uring=0
             inl
-            rs:zvol_inline_io_uring=0,zvol_request_sync=1
+            nw:zvol_inline_io_uring=0,zvol_nowait=1
+            inlnw:zvol_nowait=1
             mq:zvol_inline_io_uring=0,zvol_use_blk_mq=1
-            mqrs:zvol_inline_io_uring=0,zvol_use_blk_mq=1,zvol_request_sync=1
-            cti:zvol_inline_io_uring=0,zfs_vdev_disk_calling_thread_io=1
-            inlcti:zfs_vdev_disk_calling_thread_io=1
-            rscti:zvol_request_sync=1,zfs_vdev_disk_calling_thread_io=1
+            mqrs:zvol_use_blk_mq=1,zvol_request_sync=1
+            rs:zvol_inline_io_uring=0,zvol_request_sync=1
+            nwrs:zvol_nowait=1,zvol_request_sync=1
           QZ_PROFILE: >-
-            base:randread:1u inl:randread:1u base:randread:32
-            inl:randread:32 base:randwrite:1u inl:randwrite:1u
-            rscti:randread:1
+            base:randread:1u inl:randread:1u nw:randread:1u
+            base:randread:32 inl:randread:32 nw:randread:32
+            mqrs:randread:32
         run: |
           sudo -E OUT=/var/tmp/perf-xpool/${{ matrix.name }} \
             tests/perf-xpool/run.sh ${{ matrix.exp }}

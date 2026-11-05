@@ -270,7 +270,7 @@ dump_params() {
 	    zfs_vdev_aggregation_limit_non_rotational zio_taskq_batch_pct \
 	    zfs_arc_evict_threads zvol_request_sync zvol_use_blk_mq \
 	    zfs_vdev_disk_calling_thread_io zvol_threads zvol_num_taskqs \
-	    zvol_inline_io zfs_txg_history; do
+	    zvol_inline_io_uring zvol_nowait zfs_txg_history; do
 		[ -r "/sys/module/zfs/parameters/$p" ] &&
 		    echo "$p $(cat "/sys/module/zfs/parameters/$p")"
 	done
