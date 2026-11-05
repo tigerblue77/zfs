@@ -5,8 +5,9 @@
 # branch's modules loaded.  tests/perf-xpool/run.sh does the work.
 # On this branch: qz, the zvol rows of q1 under module-parameter variants,
 # on three runners, with zvol-inline-io merged: "base" is master's
-# behaviour (zvol_inline_io_uring=0), "inl" the change's default, "nw"
-# zvol_nowait=1 (bio-based zvols take REQ_NOWAIT submissions).
+# behaviour (zvol_inline_io_uring=0), "inl" the change's default
+# (requests up to 128 KiB from io_uring workers inline), "nw" zvol_nowait=1
+# (bio-based zvols take REQ_NOWAIT submissions).
 name: perf-xpool
 
 on:
@@ -106,7 +107,7 @@ jobs:
             mq:zvol_inline_io_uring=0,zvol_use_blk_mq=1
             mqrs:zvol_use_blk_mq=1,zvol_request_sync=1
             rs:zvol_inline_io_uring=0,zvol_request_sync=1
-            nwrs:zvol_nowait=1,zvol_request_sync=1
+            inlcti:zfs_vdev_disk_calling_thread_io=1
           QZ_PROFILE: >-
             base:randread:1u inl:randread:1u nw:randread:1u
             base:randread:32 inl:randread:32 nw:randread:32
