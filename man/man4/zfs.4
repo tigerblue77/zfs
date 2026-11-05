@@ -2929,6 +2929,23 @@ If
 generate a system-dependent value close to 6 threads per taskq.
 Set value only applies to pools imported/created after that.
 .
+.It Sy zio_taskq_bulk_lowpri Ns = Ns Sy 1 Ns | Ns 0 Pq int
+Run the issue or interrupt queues of an I/O type that also has a
+high-priority queue at the default thread priority, level with user
+processes, instead of the near-maximal priority of the other queues.
+With the default
+.Sy zio_taskq_read
+and
+.Sy zio_taskq_write ,
+these are the write issue queues, which compress, checksum and compute parity
+for asynchronous writes, and the read interrupt queues, which verify and
+decompress prefetch and scrub reads; synchronous reads and writes keep their
+high-priority queues.
+A pool writing or reading in bulk then cannot take the CPUs from the I/O
+completions and user processes of other pools, at the cost of slower bulk
+I/O when user processes keep every CPU busy.
+Set value only applies to pools imported/created after that.
+.
 .It Sy zio_taskq_write_tpq Ns = Ns Sy 16 Pq uint
 Determines the minimum number of threads per write issue taskq.
 Higher values improve CPU utilization on high throughput,
