@@ -1,0 +1,66 @@
+name: icp-bench
+
+# Bench only, never for upstream: times crypto_test -p AES-GCM on the base
+# commit and on the GCM bounce-buffer prototype, interleaved, on whatever
+# CPU the runner happens to have.
+
+on:
+  push:
+    branches:
+      - icp-gcm-copy-bench
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  BASE_SHA: 131faa02905d32bfbe6d58358e09d7ab3f72b812
+
+jobs:
+  icp-bench:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+    - name: CPU
+      run: |
+        lscpu
+        grep -o -m1 -E 'vaes|avx512f|vpclmulqdq|sha_ni|gfni' /proc/cpuinfo | sort -u
+    - name: Install dependencies
+      run: |
+        ONLY_DEPS=1 .github/workflows/scripts/qemu-3-deps-vm.sh ubuntu24
+    - name: Check out base and prototype
+      run: |
+        git worktree add --detach "$RUNNER_TEMP/base" "$BASE_SHA"
+        git worktree add --detach "$RUNNER_TEMP/proto" HEAD
+        git -C "$RUNNER_TEMP/base" log --oneline -1
+        git -C "$RUNNER_TEMP/proto" log --oneline -1
+    - name: Build base
+      working-directory: ${{ runner.temp }}/base
+      run: |
+        ./autogen.sh >/dev/null
+        ./configure --with-config=user >/dev/null
+        make -j"$(nproc)" >/dev/null
+    - name: Build prototype
+      working-directory: ${{ runner.temp }}/proto
+      run: |
+        ./autogen.sh >/dev/null
+        ./configure --with-config=user >/dev/null
+        make -j"$(nproc)" >/dev/null
+    - name: Benchmark, interleaved
+      run: |
+        for i in 1 2 3; do
+          for v in base proto; do
+            echo "=== run $i $v ==="
+            "$RUNNER_TEMP/$v/tests/zfs-tests/cmd/crypto_test" -p AES-GCM
+          done
+        done
+    # After the benchmark, so that a failure here still leaves the timings.
+    - name: Correctness (prototype)
+      working-directory: ${{ runner.temp }}/proto
+      run: |
+        ./tests/zfs-tests/cmd/crypto_test -c \
+          tests/zfs-tests/tests/functional/crypto/aes_gcm_test.txt
+        ./tests/zfs-tests/cmd/crypto_test -s
