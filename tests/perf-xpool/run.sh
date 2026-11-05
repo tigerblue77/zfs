@@ -255,7 +255,7 @@ dump_params() {
 	    zfs_vdev_aggregation_limit_non_rotational zio_taskq_batch_pct \
 	    zfs_arc_evict_threads zvol_request_sync zvol_use_blk_mq \
 	    zfs_txg_history zio_taskq_read zio_taskq_write \
-	    zio_taskq_bulk_lowpri zfs_arc_evict_lane; do
+	    zio_taskq_bulk_lowpri zfs_arc_evict_lane zio_taskq_bulk_yield; do
 		[ -r "/sys/module/zfs/parameters/$p" ] &&
 		    echo "$p $(cat "/sys/module/zfs/parameters/$p")"
 	done
@@ -608,6 +608,8 @@ q2() {
 #   pct=N             zio_taskq_batch_pct for the slow pools only
 #   dirty=BYTES       zfs_dirty_data_max (default Q2_DIRTY_MAX)
 #   kn=SET            prototype tunables, see qv_knobs (default up)
+#   idle              run the slow pools' write issue threads SCHED_IDLE, an
+#                     upper bound for making bulk work preemptible
 #   diag              also run the sw1 diagnostic
 # QV_POOLS=1 is the slow raidz2 of q2; QV_POOLS=3 is three slow raidz2 pools
 # on loop devices over files, under dm-delay, so that they can hold dirty
@@ -629,26 +631,33 @@ SLOW_POOLS=()
 SLOW_PIDS=()
 SLOW_IMPORT_DIR=/dev/mapper
 PIN_PID=""
+IDLE_PID=""
 FAST_THREADS='^(z_(null|rd|wr|fr|cl|flush|trim)_|dp_sync_taskq)'
 
 # Tunable sets of the prototype commits (pool-isolation-proto):
 #   up   all off: the taskq layout and priorities of master, single FIFO
 #   c1   synchronous write issue taskq only
 #   w    c1 + bulk taskqs at default priority (write side)
+#   wy   c1 + bulk taskq threads yield between tasks
+#   w2   c1 + default priority + yield
 #   r    synchronous read interrupt taskq + bulk taskqs at default priority
+#   r2   r + yield
 #   l    eviction lane only
 #   all  everything
 qv_knobs() {
 	local wr="sync null scale null" rd="fixed,1,8 null scale null"
-	local low=0 lane=0
+	local low=0 lane=0 yield=0
+	local c1w="sync scale scale null" c2r="fixed,1,8 null scale scale"
 	case $1 in
 	up) ;;
-	c1) wr="sync scale scale null" ;;
-	w) wr="sync scale scale null"; low=1 ;;
-	r) rd="fixed,1,8 null scale scale"; low=1 ;;
+	c1) wr=$c1w ;;
+	w) wr=$c1w; low=1 ;;
+	wy) wr=$c1w; yield=1 ;;
+	w2) wr=$c1w; low=1; yield=1 ;;
+	r) rd=$c2r; low=1 ;;
+	r2) rd=$c2r; low=1; yield=1 ;;
 	l) lane=1 ;;
-	all) wr="sync scale scale null"; rd="fixed,1,8 null scale scale"
-	    low=1; lane=1 ;;
+	all) wr=$c1w; rd=$c2r; low=1; lane=1; yield=1 ;;
 	*) die "unknown knob set $1" ;;
 	esac
 	local m=/sys/module/zfs/parameters
@@ -657,6 +666,7 @@ qv_knobs() {
 	printf '%s' "$rd" > $m/zio_taskq_read || die "zio_taskq_read"
 	echo "$low" > $m/zio_taskq_bulk_lowpri || die "zio_taskq_bulk_lowpri"
 	echo "$lane" > $m/zfs_arc_evict_lane || die "zfs_arc_evict_lane"
+	echo "$yield" > $m/zio_taskq_bulk_yield || die "zio_taskq_bulk_yield"
 }
 
 qv_setup_fast() {
@@ -853,6 +863,25 @@ qv_pin_loop() {
 	done
 }
 
+# Switch the slow pools' write issue threads to SCHED_IDLE as they appear.
+qv_idle_loop() {
+	local pid ok=0 fail=0
+	declare -A seen
+	while :; do
+		for pid in $(pgrep '^s_wr_iss'); do
+			[ -n "${seen[$pid]:-}" ] && continue
+			if chrt -i -p 0 "$pid" > /dev/null 2>&1; then
+				ok=$((ok + 1))
+			else
+				fail=$((fail + 1))
+			fi
+			seen[$pid]=1
+		done
+		echo "SCHED_IDLE set $ok failed $fail" > "$1"
+		sleep 0.5
+	done
+}
+
 qv_cycle_slow() {
 	local pct=$1 p m=/sys/module/zfs/parameters
 	local saved
@@ -920,7 +949,7 @@ qv_diag_sched() {
 
 qv_phase() {
 	local spec=$1 name load opts o rep wl comp=on pc=all nice="" sep=""
-	local pct="" dirty=$Q2_DIRTY_MAX kn=up diag="" p
+	local pct="" dirty=$Q2_DIRTY_MAX kn=up diag="" idle="" p
 	name=${spec%%:*}
 	load=${spec#*:}
 	opts=""
@@ -937,6 +966,7 @@ qv_phase() {
 		dirty=*) dirty=${o#dirty=} ;;
 		kn=*) kn=${o#kn=} ;;
 		diag) diag=1 ;;
+		idle) idle=1 ;;
 		*) die "unknown option $o in $spec" ;;
 		esac
 	done
@@ -958,7 +988,10 @@ qv_phase() {
 		PIN_PID=$!
 		sleep 1
 	fi
-	mkdir -p "$OUT/phase"
+	if [ -n "$idle" ]; then
+		qv_idle_loop "$OUT/phase/$name.idle" &
+		IDLE_PID=$!
+	fi
 	if [ "$load" != none ]; then
 		if [ -n "$sep" ]; then
 			qv_slow_start "$load" "$name" taskset -c "$QV_SLOW_CPUS"
@@ -991,6 +1024,11 @@ qv_phase() {
 		qv_diag_sched "$name" sw1
 	fi
 	phase_snap "$name" end
+	if [ -n "$IDLE_PID" ]; then
+		kill "$IDLE_PID" 2>/dev/null
+		wait "$IDLE_PID" 2>/dev/null
+		IDLE_PID=""
+	fi
 	if [ -n "$PIN_PID" ]; then
 		kill "$PIN_PID" 2>/dev/null
 		wait "$PIN_PID" 2>/dev/null

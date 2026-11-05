@@ -1162,6 +1162,9 @@ def qv_phase_extra(out, ph):
     pin = readf(os.path.join(out, "phase", ph + ".pin"))
     if pin:
         print("  pinning: " + pin.strip())
+    idle = readf(os.path.join(out, "phase", ph + ".idle"))
+    if idle:
+        print("  " + idle.strip())
     m0 = readf(os.path.join(s, "meminfo"), "") or ""
     m1 = readf(os.path.join(e, "meminfo"), "") or ""
     for txt, tag in ((m0, "start"), (m1, "end")):
