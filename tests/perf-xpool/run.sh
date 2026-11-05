@@ -39,6 +39,9 @@ SLOW_READ_MB=${SLOW_READ_MB:-2560}
 # The fast pool's fio runs under its own name so that the tracing below
 # can tell its threads from the slow pool's load generator.
 FIO=fiofast
+FIO_PREFIX=()
+SCHED_DELAY=""
+SCHED_SPAN=""
 REPORT=("python3" "$HERE/report.py")
 PERF=perf
 ASYNC_ENGINE=io_uring
@@ -67,7 +70,7 @@ snap() {
 # run_fio LABEL ARGS...: run the fast-pool fio with /proc/stat and
 # arcstats snapshots around it.
 run_fio() {
-	local label=$1 dir rc
+	local label=$1 dir rc spid
 	shift
 	dir=$OUT/runs/$label
 	mkdir -p "$dir"
@@ -76,9 +79,16 @@ run_fio() {
 		echo dead > "$dir/slow-load"
 	fi
 	snap "$dir/pre"
-	"$FIO" --output-format=json --output="$dir/fio.json" "$@" \
-	    > "$dir/fio.stderr" 2>&1
+	spid=""
+	if [ -n "$SCHED_SPAN" ]; then
+		"${REPORT[@]}" schedsample "$SCHED_DELAY" "$SCHED_SPAN" \
+		    "$dir/sched.json" &
+		spid=$!
+	fi
+	"${FIO_PREFIX[@]}" "$FIO" --output-format=json \
+	    --output="$dir/fio.json" "$@" > "$dir/fio.stderr" 2>&1
 	rc=$?
+	[ -n "$spid" ] && wait "$spid"
 	snap "$dir/post"
 	echo "$rc" > "$dir/rc"
 	if [ "$rc" -ne 0 ]; then
@@ -244,7 +254,8 @@ dump_params() {
 	    zfs_arc_eviction_pct zfs_arc_overflow_shift zfs_txg_timeout \
 	    zfs_vdev_aggregation_limit_non_rotational zio_taskq_batch_pct \
 	    zfs_arc_evict_threads zvol_request_sync zvol_use_blk_mq \
-	    zfs_txg_history; do
+	    zfs_txg_history zio_taskq_read zio_taskq_write \
+	    zio_taskq_bulk_lowpri zfs_arc_evict_lane; do
 		[ -r "/sys/module/zfs/parameters/$p" ] &&
 		    echo "$p $(cat "/sys/module/zfs/parameters/$p")"
 	done
@@ -340,7 +351,16 @@ q2_args() {
 	case $1 in
 	sw*) rw=randwrite ;;
 	esac
-	fio_args /fastq/fs/f file "$rw" 1 "$nj" "$2"
+	case $1 in
+	rc*)
+		# Cached reads: a 256 MiB file with primarycache=all.
+		fio_args /fastq/c/f file "$rw" 1 "$nj" "$2"
+		FIO_ARGS+=(--size=256M)
+		;;
+	*)
+		fio_args /fastq/fs/f file "$rw" 1 "$nj" "$2"
+		;;
+	esac
 }
 
 phase_snap() {
@@ -351,7 +371,7 @@ phase_snap() {
 	for k in arcstats dmu_tx dbufstats zil abdstats; do
 		cat "/proc/spl/kstat/zfs/$k" > "$d/$k" 2>/dev/null
 	done
-	for p in fastq slowq; do
+	for p in fastq "${SLOW_POOLS[@]:-slowq}"; do
 		for k in txgs dmu_tx_assign iostats; do
 			cat "/proc/spl/kstat/zfs/$p/$k" > "$d/$p.$k" 2>/dev/null
 		done
@@ -387,14 +407,19 @@ q2_diag_a() {
 }
 
 gen_funclat() {
-	local f n=0 clr=""
+	local f n=0 clr="" hist
 	echo 'BEGIN { @t0 = nsecs; }'
 	for f in zfs_write zfs_read zil_commit zil_commit_waiter \
 	    dmu_tx_assign dmu_tx_wait txg_wait_open txg_wait_synced_flags \
-	    arc_read arc_wait_for_eviction arc_get_data_impl dbuf_evict_one \
-	    zio_wait spa_open_common; do
+	    arc_read arc_wait_for_eviction arc_wait_for_eviction_impl \
+	    arc_get_data_impl dbuf_evict_one zio_wait spa_open_common; do
 		awk -v f="$f" '$3 == f && $4 == "[zfs]" { found = 1; exit }
 		    END { exit !found }' /proc/kallsyms || continue
+		hist=""
+		case $f in
+		zio_wait|arc_read|arc_wait_for_eviction*|zfs_read|zil_commit)
+			hist="@fast_h_$f = hist(\$d);" ;;
+		esac
 		cat <<-EOF
 		kprobe:$f { @s${n}[tid] = nsecs; }
 		kretprobe:$f /@s${n}[tid] != 0/
@@ -404,6 +429,7 @@ gen_funclat() {
 				@fast_us_$f = sum(\$d);
 				@fast_n_$f = count();
 				@fast_max_us_$f = max(\$d);
+				$hist
 			}
 			if (\$d >= 50) {
 				@slow_us_${f}[comm] = sum(\$d);
@@ -568,9 +594,430 @@ q2() {
 	zpool list -v > "$OUT/zpool-list.end"
 }
 
+# ------------------------------------------------------------------ qv --
+#
+# Variants of q2 that each remove one suspected cause of the interference,
+# measured as phases of one job so that they share a runner.  QV_PHASES is a
+# list of NAME:LOAD[:OPT,OPT...], LOAD being none, write or read (the slow
+# pools' fio load during the phase), and OPT one of
+#   comp=off|on       compression of the slow pools' datasets (default on)
+#   pc=all|metadata   primarycache of the slow pools' datasets (default all)
+#   nice=N            run the fast pool's fio at nice N
+#   sep               slow pools' threads and load on QV_SLOW_CPUS (0,1),
+#                     the fast pool's threads and fio on QV_FAST_CPUS (2,3)
+#   pct=N             zio_taskq_batch_pct for the slow pools only
+#   dirty=BYTES       zfs_dirty_data_max (default Q2_DIRTY_MAX)
+#   kn=SET            prototype tunables, see qv_knobs (default up)
+#   diag              also run the sw1 diagnostic
+# QV_POOLS=1 is the slow raidz2 of q2; QV_POOLS=3 is three slow raidz2 pools
+# on loop devices over files, under dm-delay, so that they can hold dirty
+# data far beyond their memory footprint; QV_POOLS=3n is three smaller
+# copies of q2's slow pool on null_blk.
+
+QV_POOLS=${QV_POOLS:-1}
+QV_PHASES=${QV_PHASES:-alone:none sw:write alone2:none}
+QV_WL=${QV_WL:-rr1 rr4 sw1 sw4}
+QV_SLOW_WRITE_MB=${QV_SLOW_WRITE_MB:-1024}
+QV_READ_MB=${QV_READ_MB:-0}
+QV3_DEV_MB=${QV3_DEV_MB:-2048}
+QV3N_DEV_MB=${QV3N_DEV_MB:-384}
+QV_SLOW_CPUS=${QV_SLOW_CPUS:-0,1}
+QV_FAST_CPUS=${QV_FAST_CPUS:-2,3}
+QV_WARM_WRITE=${QV_WARM_WRITE:-20}
+QV_WARM_READ=${QV_WARM_READ:-15}
+SLOW_POOLS=()
+SLOW_PIDS=()
+SLOW_IMPORT_DIR=/dev/mapper
+PIN_PID=""
+FAST_THREADS='^(z_(null|rd|wr|fr|cl|flush|trim)_|dp_sync_taskq)'
+
+# Tunable sets of the prototype commits (pool-isolation-proto):
+#   up   all off: the taskq layout and priorities of master, single FIFO
+#   c1   synchronous write issue taskq only
+#   w    c1 + bulk taskqs at default priority (write side)
+#   r    synchronous read interrupt taskq + bulk taskqs at default priority
+#   l    eviction lane only
+#   all  everything
+qv_knobs() {
+	local wr="sync null scale null" rd="fixed,1,8 null scale null"
+	local low=0 lane=0
+	case $1 in
+	up) ;;
+	c1) wr="sync scale scale null" ;;
+	w) wr="sync scale scale null"; low=1 ;;
+	r) rd="fixed,1,8 null scale scale"; low=1 ;;
+	l) lane=1 ;;
+	all) wr="sync scale scale null"; rd="fixed,1,8 null scale scale"
+	    low=1; lane=1 ;;
+	*) die "unknown knob set $1" ;;
+	esac
+	local m=/sys/module/zfs/parameters
+	echo "$wr" > $m/zio_taskq_write || die "zio_taskq_write"
+	echo "$rd" > $m/zio_taskq_read || die "zio_taskq_read"
+	echo "$low" > $m/zio_taskq_bulk_lowpri || die "zio_taskq_bulk_lowpri"
+	echo "$lane" > $m/zfs_arc_evict_lane || die "zfs_arc_evict_lane"
+}
+
+qv_setup_fast() {
+	nullb_add nullb0 0 "$FAST_DEV_MB" discard=1 || die "nullb0"
+	nullb_add nullb1 1 "$FAST_DEV_MB" discard=1 || die "nullb1"
+	zpool create -f -o ashift=12 -O atime=off \
+	    -O primarycache=metadata -O sync=always fastq \
+	    mirror /dev/nullb0 /dev/nullb1 || die "zpool create fastq"
+	zfs create -o recordsize=4K fastq/fs || die "zfs create fastq/fs"
+	prefill /fastq/fs/f 0
+	case " $QV_WL " in
+	*" rc1 "*)
+		zfs create -o recordsize=4K -o primarycache=all fastq/c ||
+		    die "zfs create fastq/c"
+		fio --name=prefill --filename=/fastq/c/f --rw=write --bs=1M \
+		    --size=256M --end_fsync=1 --ioengine=psync \
+		    > "$WORK/prefill-c.log" 2>&1 || die "prefill fastq/c"
+		;;
+	esac
+}
+
+qv_setup_slow1() {
+	local i idx sz mode=dm-delay attrs devs=()
+	modprobe dm_delay || { mode=nullb-timer; SLOW_IMPORT_DIR=/dev; }
+	for i in $(seq 0 $((SLOW_NDEV - 1))); do
+		idx=$((i + 2))
+		attrs=(discard=1)
+		if grep -qw mbps /sys/kernel/config/nullb/features; then
+			attrs+=("mbps=$SLOW_MBPS")
+		fi
+		if [ "$mode" = nullb-timer ]; then
+			attrs+=(irqmode=2 \
+			    "completion_nsec=$((SLOW_DELAY_MS * 1000000))")
+		fi
+		nullb_add "nullb$idx" "$idx" "$SLOW_DEV_MB" "${attrs[@]}" ||
+		    die "nullb$idx"
+		if [ "$mode" = dm-delay ]; then
+			sz=$(blockdev --getsz "/dev/nullb$idx")
+			dmsetup create "slow$i" --table \
+			    "0 $sz delay /dev/nullb$idx 0 $SLOW_DELAY_MS" ||
+			    die "dmsetup slow$i"
+			devs+=("/dev/mapper/slow$i")
+		else
+			devs+=("/dev/nullb$idx")
+		fi
+	done
+	udevadm settle
+	echo "slow pool: raidz2 of $SLOW_NDEV x ${SLOW_DEV_MB} MiB null_blk," \
+	    "$mode ${SLOW_DELAY_MS} ms, ${attrs[*]}" >> "$OUT/setup.txt"
+	zpool create -f -o ashift=12 -o autotrim=on -O atime=off slowq \
+	    raidz2 "${devs[@]}" || die "zpool create slowq"
+	zfs create slowq/data || die "zfs create slowq/data"
+	SLOW_POOLS=(slowq)
+	if [ "$QV_READ_MB" -gt 0 ]; then
+		log "qv writing the ${QV_READ_MB} MiB read file"
+		fio --name=mkread --filename=/slowq/data/r --rw=write --bs=1M \
+		    --size="${QV_READ_MB}M" --ioengine=psync --end_fsync=1 \
+		    > "$WORK/mkread.log" 2>&1 ||
+		    log "WARNING: read file incomplete"
+	fi
+}
+
+qv_setup_slow3() {
+	local p i f loop sz devs dio
+	modprobe dm_delay || die "dm_delay is required for QV_POOLS=3"
+	mkdir -p "$WORK/img"
+	for p in 1 2 3; do
+		devs=()
+		for i in $(seq 0 $((SLOW_NDEV - 1))); do
+			f=$WORK/img/slow$p.$i.img
+			truncate -s "${QV3_DEV_MB}M" "$f" || die "truncate $f"
+			loop=$(losetup --direct-io=on --sector-size 4096 -f \
+			    --show "$f") || die "losetup $f"
+			sz=$(blockdev --getsz "$loop")
+			dmsetup create "slow$p.$i" --table \
+			    "0 $sz delay $loop 0 $SLOW_DELAY_MS" ||
+			    die "dmsetup slow$p.$i"
+			devs+=("/dev/mapper/slow$p.$i")
+		done
+		udevadm settle
+		zpool create -f -o ashift=12 -o autotrim=on -O atime=off \
+		    "slow$p" raidz2 "${devs[@]}" || die "zpool create slow$p"
+		zfs create "slow$p/data" || die "zfs create slow$p/data"
+		SLOW_POOLS+=("slow$p")
+	done
+	losetup -l > "$OUT/losetup.txt" 2>&1
+	dio=$(losetup -l -n -O DIO | sort | uniq -c | tr '\n' ' ')
+	echo "slow pools: 3 x raidz2 of $SLOW_NDEV x ${QV3_DEV_MB} MiB loop" \
+	    "files under dm-delay ${SLOW_DELAY_MS} ms (loop DIO: $dio)" \
+	    >> "$OUT/setup.txt"
+}
+
+# Three slow raidz2 pools on null_blk under dm-delay, like q2's but
+# smaller (QV3N_DEV_MB per device), for the CPU load of several pools.
+qv_setup_slow3n() {
+	local p i idx sz devs attrs
+	modprobe dm_delay || die "dm_delay is required for QV_POOLS=3n"
+	for p in 1 2 3; do
+		devs=()
+		for i in $(seq 0 $((SLOW_NDEV - 1))); do
+			idx=$((2 + (p - 1) * SLOW_NDEV + i))
+			attrs=(discard=1)
+			if grep -qw mbps /sys/kernel/config/nullb/features; then
+				attrs+=("mbps=$SLOW_MBPS")
+			fi
+			nullb_add "nullb$idx" "$idx" "$QV3N_DEV_MB" "${attrs[@]}" ||
+			    die "nullb$idx"
+			sz=$(blockdev --getsz "/dev/nullb$idx")
+			dmsetup create "slow$p.$i" --table \
+			    "0 $sz delay /dev/nullb$idx 0 $SLOW_DELAY_MS" ||
+			    die "dmsetup slow$p.$i"
+			devs+=("/dev/mapper/slow$p.$i")
+		done
+		udevadm settle
+		zpool create -f -o ashift=12 -o autotrim=on -O atime=off \
+		    "slow$p" raidz2 "${devs[@]}" || die "zpool create slow$p"
+		zfs create "slow$p/data" || die "zfs create slow$p/data"
+		SLOW_POOLS+=("slow$p")
+	done
+	echo "slow pools: 3 x raidz2 of $SLOW_NDEV x ${QV3N_DEV_MB} MiB" \
+	    "null_blk under dm-delay ${SLOW_DELAY_MS} ms, ${attrs[*]}" \
+	    >> "$OUT/setup.txt"
+}
+
+qv_slow_stop() {
+	local pid
+	for pid in "${SLOW_PIDS[@]}"; do
+		kill -INT "$pid" 2>/dev/null
+	done
+	for pid in "${SLOW_PIDS[@]}"; do
+		wait "$pid"
+	done
+	SLOW_PIDS=()
+	SLOW_PID=""
+}
+
+# qv_slow_start LOAD PHASE PREFIX...: one fio per slow pool.
+qv_slow_start() {
+	local load=$1 ph=$2 p
+	shift 2
+	for p in "${SLOW_POOLS[@]}"; do
+		case $load in
+		write)
+			"$@" fio --name="sw-$p" --output-format=json \
+			    --output="$OUT/slow.$ph.$p.json" \
+			    --filename="/$p/data/w" --rw=write --bs=1M \
+			    --size="${QV_SLOW_WRITE_MB}M" --ioengine=psync \
+			    --time_based --runtime=36000 \
+			    > "$WORK/slow.$ph.$p.log" 2>&1 &
+			;;
+		read)
+			"$@" fio --name="sr-$p" --output-format=json \
+			    --output="$OUT/slow.$ph.$p.json" \
+			    --filename="/$p/data/r" --rw=read --bs=1M \
+			    --size=$((QV_READ_MB / 2))M \
+			    --offset_increment=$((QV_READ_MB / 2))M \
+			    --numjobs=2 --group_reporting --ioengine=psync \
+			    --time_based --runtime=36000 \
+			    > "$WORK/slow.$ph.$p.log" 2>&1 &
+			;;
+		esac
+		SLOW_PIDS+=($!)
+	done
+	SLOW_PID=${SLOW_PIDS[0]:-}
+}
+
+# Pin the slow pools' threads (named s_* by this branch) to QV_SLOW_CPUS and
+# the fast pool's zio threads to QV_FAST_CPUS, again as dynamic taskqs spawn
+# threads.  Failures are counted, since some kernel threads refuse it.
+qv_pin_loop() {
+	local pid fail=0 ok=0
+	declare -A seen
+	while :; do
+		for pid in $(pgrep '^s_'); do
+			[ -n "${seen[$pid]:-}" ] && continue
+			if taskset -pc "$QV_SLOW_CPUS" "$pid" > /dev/null 2>&1; then
+				ok=$((ok + 1))
+			else
+				fail=$((fail + 1))
+			fi
+			seen[$pid]=1
+		done
+		for pid in $(pgrep "$FAST_THREADS"); do
+			[ -n "${seen[$pid]:-}" ] && continue
+			if taskset -pc "$QV_FAST_CPUS" "$pid" > /dev/null 2>&1; then
+				ok=$((ok + 1))
+			else
+				fail=$((fail + 1))
+			fi
+			seen[$pid]=1
+		done
+		echo "pinned $ok failed $fail" > "$1"
+		sleep 0.5
+	done
+}
+
+qv_cycle_slow() {
+	local pct=$1 p m=/sys/module/zfs/parameters
+	local saved
+	saved=$(cat $m/zio_taskq_batch_pct)
+	[ -n "$pct" ] && echo "$pct" > $m/zio_taskq_batch_pct
+	# Import from the dm-delay devices only: the devices under them carry
+	# the same labels, and importing from those would skip the delay.
+	for p in "${SLOW_POOLS[@]}"; do
+		zpool export "$p" || die "cannot export $p"
+		zpool import -d "$SLOW_IMPORT_DIR" "$p" || die "cannot import $p"
+	done
+	echo "$saved" > $m/zio_taskq_batch_pct
+}
+
+qv_diag() {
+	local ph=$1 wl=$2 label d fpid b1 b2 ppid ipid
+	label=qvdiag.$ph.$wl
+	d=$OUT/diag/$label
+	mkdir -p "$d"
+	q2_args "$wl" "$DIAG_RUNTIME"
+	run_fio "$label" "${FIO_ARGS[@]}" &
+	fpid=$!
+	sleep 2
+	timeout -s INT 14 bpftrace "$WORK/funclat.bt" > "$d/funclat.txt" \
+	    2> "$d/funclat.err" &
+	b1=$!
+	timeout -s INT 14 bpftrace "$HERE/schedlock.bt" > "$d/schedlock.txt" \
+	    2> "$d/schedlock.err" &
+	b2=$!
+	"$PERF" record -a -g -F 499 -e cpu-clock -o "$WORK/perf.data" \
+	    -- sleep 8 > "$WORK/perf-qv.log" 2>&1 &
+	ppid=$!
+	zpool iostat -l -y 8 1 > "$d/zpool-iostat.txt" 2>&1 &
+	ipid=$!
+	sleep 4
+	cat /proc/spl/taskq > "$d/taskq.txt" 2>/dev/null
+	wait "$ppid"
+	wait "$ipid"
+	wait "$b1"
+	wait "$b2"
+	wait "$fpid"
+	perf_report perf "$d"
+}
+
+qv_phase() {
+	local spec=$1 name load opts o rep wl comp=on pc=all nice="" sep=""
+	local pct="" dirty=$Q2_DIRTY_MAX kn=up diag="" p
+	name=${spec%%:*}
+	load=${spec#*:}
+	opts=""
+	case $load in
+	*:*) opts=${load#*:}; load=${load%%:*} ;;
+	esac
+	for o in ${opts//,/ }; do
+		case $o in
+		comp=*) comp=${o#comp=} ;;
+		pc=*) pc=${o#pc=} ;;
+		nice=*) nice=${o#nice=} ;;
+		sep) sep=1 ;;
+		pct=*) pct=${o#pct=} ;;
+		dirty=*) dirty=${o#dirty=} ;;
+		kn=*) kn=${o#kn=} ;;
+		diag) diag=1 ;;
+		*) die "unknown option $o in $spec" ;;
+		esac
+	done
+	log "qv phase $name ($spec)"
+	echo "$name $spec" >> "$OUT/phases.txt"
+	qv_slow_stop
+	echo "$dirty" > /sys/module/zfs/parameters/zfs_dirty_data_max
+	qv_knobs "$kn"
+	for p in "${SLOW_POOLS[@]}"; do
+		zfs set compression="$comp" primarycache="$pc" "$p/data"
+	done
+	qv_cycle_slow "$pct"
+	FIO_PREFIX=()
+	[ -n "$nice" ] && FIO_PREFIX+=(nice -n "$nice")
+	mkdir -p "$OUT/phase"
+	if [ -n "$sep" ]; then
+		FIO_PREFIX=(taskset -c "$QV_FAST_CPUS" "${FIO_PREFIX[@]}")
+		qv_pin_loop "$OUT/phase/$name.pin" &
+		PIN_PID=$!
+		sleep 1
+	fi
+	mkdir -p "$OUT/phase"
+	if [ "$load" != none ]; then
+		if [ -n "$sep" ]; then
+			qv_slow_start "$load" "$name" taskset -c "$QV_SLOW_CPUS"
+		else
+			qv_slow_start "$load" "$name" env
+		fi
+		if [ "$load" = write ]; then
+			sleep "$QV_WARM_WRITE"
+		else
+			sleep "$QV_WARM_READ"
+		fi
+	fi
+	phase_snap "$name" start
+	for rep in $(seq 1 "$REPS"); do
+		pool_cycle fastq
+		for wl in $QV_WL; do
+			if [ "$wl" = rc1 ]; then
+				fio --name=warm --filename=/fastq/c/f --rw=read \
+				    --bs=1M --size=256M --ioengine=psync \
+				    > /dev/null 2>&1
+			fi
+			q2_args "$wl" "$Q2_RUNTIME"
+			run_fio "qv.$name.$wl.r$rep" "${FIO_ARGS[@]}"
+		done
+	done
+	qv_diag "$name" rr1
+	[ -n "$diag" ] && qv_diag "$name" sw1
+	phase_snap "$name" end
+	if [ -n "$PIN_PID" ]; then
+		kill "$PIN_PID" 2>/dev/null
+		wait "$PIN_PID" 2>/dev/null
+		PIN_PID=""
+		# Give every thread all CPUs back for the next phase.
+		for p in $(pgrep '^(s_|z_|dp_sync_taskq)'); do
+			taskset -pc "0-$(($(nproc) - 1))" "$p" > /dev/null 2>&1
+		done
+	fi
+	FIO_PREFIX=()
+}
+
+qv() {
+	local spec
+	common_setup
+	echo "$Q2_DIRTY_MAX" > /sys/module/zfs/parameters/zfs_dirty_data_max ||
+	    die "cannot set zfs_dirty_data_max"
+	SCHED_DELAY=3
+	SCHED_SPAN=$((Q2_RUNTIME - 6))
+	: > "$OUT/setup.txt"
+	: > "$OUT/phases.txt"
+	echo "fast pool: mirror of 2 x ${FAST_DEV_MB} MiB null_blk" \
+	    >> "$OUT/setup.txt"
+	qv_setup_fast
+	case $QV_POOLS in
+	1) qv_setup_slow1 ;;
+	3) qv_setup_slow3 ;;
+	3n) qv_setup_slow3n ;;
+	*) die "QV_POOLS must be 1, 3 or 3n" ;;
+	esac
+	echo "zfs_arc_max $ARC_MAX zfs_dirty_data_max $Q2_DIRTY_MAX," \
+	    "workloads $QV_WL, slow write file ${QV_SLOW_WRITE_MB} MiB," \
+	    "read file ${QV_READ_MB} MiB, ${REPS} x ${Q2_RUNTIME} s" \
+	    >> "$OUT/setup.txt"
+	zpool sync
+	dump_params > "$OUT/params.txt"
+	zpool status > "$OUT/zpool-status.txt"
+	gen_funclat > "$WORK/funclat.bt"
+	cp "$WORK/funclat.bt" "$OUT/funclat.bt"
+	idle_baseline
+	for spec in $QV_PHASES; do
+		qv_phase "$spec"
+	done
+	qv_slow_stop
+	zpool status > "$OUT/zpool-status.end"
+	zpool list -v > "$OUT/zpool-list.end"
+	free -m > "$OUT/free.end"
+}
+
 case $EXP in
 q1) q1 ;;
 q2) q2 ;;
+qv) qv ;;
 *) die "unknown experiment $EXP" ;;
 esac
 log "done"

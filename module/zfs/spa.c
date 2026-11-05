@@ -1326,6 +1326,9 @@ spa_taskqs_init(spa_t *spa, zio_type_t t, zio_taskq_type_t q)
 		else
 			(void) snprintf(name, sizeof (name), "%s_%s",
 			    zio_type_name[t], zio_taskq_types[q]);
+		/* perf-xpool: tell the slow pools' threads apart. */
+		if (strncmp(spa_name(spa), "slow", 4) == 0)
+			name[0] = 's';
 
 #ifdef HAVE_SYSDC
 		if (zio_taskq_sysdc && spa->spa_proc != &p0) {

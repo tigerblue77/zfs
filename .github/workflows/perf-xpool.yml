@@ -1,40 +1,88 @@
-# Fork-only experiment, not meant for upstream: ZFS per-I/O overhead on
-# zero-latency null_blk devices (q1), and interference between a slow
-# raidz2 pool and a fast pool on the same host (q2, with a high and a low
-# zfs_dirty_data_max), measured on a GitHub-hosted runner with this
-# branch's modules loaded.  tests/perf-xpool/run.sh does the work.
+# Fork-only experiment, not meant for upstream: interference between slow
+# pools and a fast pool on the same host, one suspected cause removed per
+# phase (tests/perf-xpool/run.sh qv), measured on GitHub-hosted runners with
+# this branch's modules loaded.  The other workflows are removed from this
+# branch so that a push runs only this one.
 name: perf-xpool
 
 on:
   push:
-    branches: [perf-xpool-test]
+    branches: [perf-xpool-cause]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: perf-xpool-${{ github.ref }}
-  cancel-in-progress: true
+  group: perf-xpool-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
 
 jobs:
   perf:
     name: ${{ matrix.name }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 170
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: q1
-            exp: q1
-            dirty: ""
-          - name: q2
-            exp: q2
+          - name: w1
+            pools: "1"
+            wl: "rr1 rr4 sw1 sw4"
+            wmb: "1024"
+            rmb: "0"
+            arc: "2147483648"
             dirty: "1610612736"
-          - name: q2-lowdirty
-            exp: q2
-            dirty: "268435456"
+            phases: >-
+              alone:none sw:write:diag sw-nocomp:write:comp=off
+              sw-nice:write:nice=-20 sw-pct25:write:pct=25
+              sw-pcmeta:write:pc=metadata sw-c1:write:kn=c1
+              sw-w:write:kn=w,diag sw-l:write:kn=l sw-all:write:kn=all
+              alone-all:none:kn=all alone2:none
+          - name: r1
+            pools: "1"
+            wl: "rr1 rr4 sw1 sw4"
+            wmb: "256"
+            rmb: "2560"
+            arc: "2147483648"
+            dirty: "1610612736"
+            phases: >-
+              alone:none sr:read:diag sr-pcmeta:read:pc=metadata
+              sr-r:read:kn=r sr-all:read:kn=all sw:write
+              alone-sep:none:sep sr-sep:read:sep sw-sep:write:sep
+              alone2:none
+          - name: m3
+            pools: "3"
+            wl: "rr1 rr4 sw1 rc1"
+            wmb: "3072"
+            rmb: "0"
+            arc: "4294967296"
+            dirty: "1610612736"
+            phases: >-
+              alone:none mhi:write:diag mhi-dirty512:write:dirty=536870912
+              mhi-nocomp:write:comp=off mhi-pcmeta:write:pc=metadata
+              mhi-l:write:kn=l,diag mhi-all:write:kn=all alone2:none
+          - name: c3
+            pools: "3n"
+            wl: "rr1 rr4 sw1 sw4"
+            wmb: "256"
+            rmb: "0"
+            arc: "2147483648"
+            dirty: "1610612736"
+            fastmb: "1024"
+            phases: >-
+              alone:none m3w:write:diag m3w-nocomp:write:comp=off
+              m3w-w:write:kn=w m3w-all:write:kn=all alone2:none
+          - name: w1b
+            pools: "1"
+            wl: "rr1 rr4 sw1 sw4"
+            wmb: "1024"
+            rmb: "0"
+            arc: "2147483648"
+            dirty: "1610612736"
+            phases: >-
+              alone:none sw:write sw-nocomp:write:comp=off sw-w:write:kn=w
+              sw-all:write:kn=all alone2:none
     steps:
       - uses: actions/checkout@v6
         with:
@@ -90,12 +138,22 @@ jobs:
           cat /sys/module/zfs/version
           zfs version
       - name: Experiment
-        timeout-minutes: 95
+        timeout-minutes: 140
         env:
+          QV_POOLS: ${{ matrix.pools }}
+          QV_PHASES: ${{ matrix.phases }}
+          QV_WL: ${{ matrix.wl }}
+          QV_SLOW_WRITE_MB: ${{ matrix.wmb }}
+          QV_READ_MB: ${{ matrix.rmb }}
+          ARC_MAX: ${{ matrix.arc }}
           Q2_DIRTY_MAX: ${{ matrix.dirty }}
+          FAST_DEV_MB: ${{ matrix.fastmb || '2048' }}
+          REPS: "3"
+          Q2_RUNTIME: "20"
+          DIAG_RUNTIME: "20"
         run: |
           sudo -E OUT=/var/tmp/perf-xpool/${{ matrix.name }} \
-            tests/perf-xpool/run.sh ${{ matrix.exp }}
+            tests/perf-xpool/run.sh qv
       - name: Summary
         if: always()
         run: |
@@ -106,7 +164,7 @@ jobs:
             grep -m1 'Model name' "$d/system.txt" || true
             grep -E '^(zfs |fio-|bpftrace|perf version|null_blk)' "$d/system.txt" || true
             cat "$d/params.txt" 2>/dev/null | tr '\n' ' '; echo
-            python3 tests/perf-xpool/report.py ${{ matrix.exp }} "$d"
+            python3 tests/perf-xpool/report.py qv "$d"
           } > summary.txt 2>&1
           { echo '```'; cat summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           echo "=== PERF-XPOOL SUMMARY ${{ matrix.name }} ==="
