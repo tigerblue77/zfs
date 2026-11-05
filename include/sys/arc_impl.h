@@ -1062,6 +1062,7 @@ typedef struct arc_evict_waiter {
 	list_node_t aew_node;
 	kcondvar_t aew_cv;
 	uint64_t aew_count;
+	boolean_t aew_lane;
 } arc_evict_waiter_t;
 
 #define	ARCSTAT(stat)	(arc_stats.stat.value.ui64)
