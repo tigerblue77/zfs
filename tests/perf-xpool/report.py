@@ -1057,17 +1057,28 @@ def cmd_qv(out):
             vv = [r["iops"] for r in table[(wl, n)]]
             gd = 1 - statistics.median(vd) / rdi
             gv = 1 - statistics.median(vv) / ri
+            tail = ""
+            for key, lab in (("p99", "p99"), ("p999", "p99.9")):
+                rt = statistics.median([r[key] for r in ref])
+                rdt = statistics.median([r[key] for r in refd])
+                ed = statistics.median([r[key] for r in
+                                        table[(wl, dflt)]]) - rdt
+                ev = statistics.median([r[key] for r in
+                                        table[(wl, n)]]) - rt
+                if ed > 0:
+                    tail += "; %s excess %.0f -> %.0f us, closed %.0f%%" % (
+                        lab, ed, ev, 100 * (ed - ev) / ed)
             if gd <= 0.01:
-                line.append("%s: %s gap %.1f%%, no gap to close" % (
-                    n, dflt, 100 * gd))
+                line.append("%s vs %s: IOPS gap %.1f%% -> %.1f%%%s" % (
+                    n, dflt, 100 * gd, 100 * gv, tail))
                 continue
             lo = (gd - (1 - max(vv) / ri)) / gd
             hi = (gd - (1 - min(vv) / ri)) / gd
             line.append("%s vs %s: gap %.1f%% -> %.1f%%, closed %.0f%% "
-                        "[%.0f..%.0f]" % (n, dflt, 100 * gd, 100 * gv,
-                                           100 * (gd - gv) / gd,
-                                           100 * min(lo, hi),
-                                           100 * max(lo, hi)))
+                        "[%.0f..%.0f]%s" % (n, dflt, 100 * gd, 100 * gv,
+                                             100 * (gd - gv) / gd,
+                                             100 * min(lo, hi),
+                                             100 * max(lo, hi), tail))
         if line:
             print("  %s:\n    " % QV_WLN.get(wl, wl) + "\n    ".join(line))
     print("\n-- scheduler (rr1 runs, medians): CPUs used and run-queue "
@@ -1090,6 +1101,17 @@ def cmd_qv(out):
         phase_report(out, n)
         qv_phase_extra(out, n)
         for wl in ("rr1", "sw1"):
+            ds = os.path.join(out, "diag", "qvsched.%s.%s" % (n, wl))
+            if os.path.isdir(ds):
+                rs = load_run(out, "qvsched.%s.%s" % (n, wl), irate)
+                print("  [%s %s] sched run: %s" % (
+                    n, wl, "iops %.0f p99 %sus p99.9 %sus" % (
+                        rs["iops"], fmt(rs["p99"]), fmt(rs["p999"]))
+                    if rs else "no fio result"))
+                timehist_summary(os.path.join(ds, "timehist.json"))
+                err = readf(os.path.join(ds, "sched.err"))
+                if err:
+                    print("    perf sched: " + err.strip().splitlines()[-1])
             dd = os.path.join(out, "diag", "qvdiag.%s.%s" % (n, wl))
             if not os.path.isdir(dd):
                 continue
@@ -1178,6 +1200,89 @@ def schedlock_summary(path):
                                                  if err.strip() else "empty"))
 
 
+# ------------------------------------------------- perf sched timehist ----
+
+TH_RE = re.compile(r"^\s*(\d+\.\d+)\s+\[(\d+)\]\s+(.+?)\s+"
+                   r"([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*$")
+TH_WATCH = [("fio", re.compile(r"^fiofast$")),
+            ("fast_int", re.compile(r"^z_(rd|wr|null)_int")),
+            ("fast_iss", re.compile(r"^z_wr_iss"))]
+
+
+def th_family(comm):
+    if comm.startswith("<idle>"):
+        return "idle"
+    for name, rx in FAMILIES:
+        if rx.search(comm):
+            return name
+    return re.sub(r"[/:0-9_-]+$", "", comm) or comm
+
+
+def cmd_timehist(outpath):
+    """Read perf sched timehist on stdin: scheduling delay (wakeup to run)
+    of the watched threads, and which threads ran on that CPU while a
+    watched thread waited 200 us or more."""
+    percpu = collections.defaultdict(lambda: collections.deque(maxlen=400))
+    delays = collections.defaultdict(list)
+    culprit = collections.defaultdict(collections.Counter)
+    nlong = collections.Counter()
+    for line in sys.stdin:
+        m = TH_RE.match(line)
+        if not m:
+            continue
+        t = float(m.group(1)) * 1e6
+        cpu = int(m.group(2))
+        comm = re.sub(r"\[[^]]*\]$", "", m.group(3).strip())
+        sch = float(m.group(5)) * 1000.0
+        run = float(m.group(6)) * 1000.0
+        start = t - run
+        for fam, rx in TH_WATCH:
+            if rx.search(comm):
+                delays[fam].append(sch)
+                if sch >= 200:
+                    nlong[fam] += 1
+                    w0 = start - sch
+                    for (s0, e0, c0) in percpu[cpu]:
+                        ov = min(e0, start) - max(s0, w0)
+                        if ov > 0:
+                            culprit[fam][th_family(c0)] += ov
+                break
+        percpu[cpu].append((start, t, comm))
+    res = {}
+    for fam, v in delays.items():
+        v.sort()
+        n = len(v)
+        res[fam] = {
+            "n": n,
+            "p50": v[n // 2], "p99": v[min(n - 1, int(n * 0.99))],
+            "p999": v[min(n - 1, int(n * 0.999))], "max": v[-1],
+            "long": nlong[fam],
+            "culprits": dict(culprit[fam].most_common(8)),
+        }
+    with open(outpath, "w") as f:
+        json.dump(res, f)
+
+
+def timehist_summary(path):
+    txt = readf(path)
+    if not txt:
+        return
+    d = json.loads(txt)
+    for fam in ("fio", "fast_int", "fast_iss"):
+        x = d.get(fam)
+        if not x:
+            continue
+        cul = x.get("culprits") or {}
+        tot = sum(cul.values()) or 1
+        print("    sched delay %s: n=%d p50 %.0f p99 %.0f p99.9 %.0f max %.0f "
+              "us; %d waits >= 200 us, CPU held by: %s" % (
+                  fam, x["n"], x["p50"], x["p99"], x["p999"], x["max"],
+                  x["long"], ", ".join("%s %.0f%%" % (c, 100.0 * v / tot)
+                                       for c, v in sorted(
+                                           cul.items(),
+                                           key=lambda y: -y[1])[:6])))
+
+
 def main():
     if len(sys.argv) < 3:
         sys.exit("usage: report.py fioline|sample|schedsample|q1|q2|qv ARGS")
@@ -1194,6 +1299,8 @@ def main():
         cmd_qv(sys.argv[2])
     elif cmd == "schedsample":
         cmd_schedsample(*sys.argv[2:5])
+    elif cmd == "timehist":
+        cmd_timehist(sys.argv[2])
     else:
         sys.exit("unknown command " + cmd)
 
