@@ -1159,6 +1159,42 @@ error:
 	return (0);
 }
 
+/*
+ * Keep a thread of a node's taskq on that node.  Since Linux 6.14, a thread
+ * created on a node runs on the CPUs of that node, and the kernel keeps it so
+ * across CPU hotplug.  Before that, no interface this module may call limits
+ * a thread to a set of CPUs (set_cpus_allowed_ptr() is GPL-only and
+ * kthread_bind_mask() is not exported), so bind the thread to one online CPU
+ * of the node, taking them in turn.  spl_taskq_thread_bind asks for that too.
+ */
+static void
+taskq_thread_bind_node(taskq_t *tq, struct task_struct *thread)
+{
+	static atomic_t next_cpu = ATOMIC_INIT(0);
+	const struct cpumask *mask = cpumask_of_node(tq->tq_node);
+	unsigned int ncpus = 0;
+	unsigned int n;
+	int cpu;
+
+#ifdef HAVE_KTHREAD_AFFINE_PREFERRED
+	if (!spl_taskq_thread_bind)
+		return;
+#endif
+	for_each_cpu_and(cpu, mask, cpu_online_mask) {
+		ncpus++;
+	}
+	if (ncpus == 0)
+		return;
+
+	n = (unsigned int)atomic_inc_return(&next_cpu) % ncpus;
+	for_each_cpu_and(cpu, mask, cpu_online_mask) {
+		if (n-- == 0) {
+			kthread_bind(thread, cpu);
+			return;
+		}
+	}
+}
+
 static taskq_thread_t *
 taskq_thread_create(taskq_t *tq)
 {
@@ -1171,14 +1207,16 @@ taskq_thread_create(taskq_t *tq)
 	tqt->tqt_tq = tq;
 	tqt->tqt_id = TASKQID_INVALID;
 
-	tqt->tqt_thread = spl_kthread_create(taskq_thread, tqt,
-	    "%s", tq->tq_name);
+	tqt->tqt_thread = spl_kthread_create_node(taskq_thread, tqt,
+	    tq->tq_node, "%s", tq->tq_name);
 	if (tqt->tqt_thread == NULL) {
 		kmem_free(tqt, sizeof (taskq_thread_t));
 		return (NULL);
 	}
 
-	if (spl_taskq_thread_bind) {
+	if (tq->tq_node != NUMA_NO_NODE) {
+		taskq_thread_bind_node(tq, tqt->tqt_thread);
+	} else if (spl_taskq_thread_bind) {
 		last_used_cpu = (last_used_cpu + 1) % num_online_cpus();
 		kthread_bind(tqt->tqt_thread, last_used_cpu);
 	}
@@ -1338,9 +1376,9 @@ taskq_kstats_fini(taskq_t *tq)
 	tq->tq_ksp = NULL;
 }
 
-taskq_t *
-taskq_create(const char *name, int threads_arg, pri_t pri,
-    int minalloc, int maxalloc, uint_t flags)
+static taskq_t *
+taskq_create_impl(const char *name, int threads_arg, pri_t pri,
+    int minalloc, int maxalloc, uint_t flags, int node)
 {
 	taskq_t *tq;
 	taskq_thread_t *tqt;
@@ -1386,6 +1424,7 @@ taskq_create(const char *name, int threads_arg, pri_t pri,
 	tq->tq_maxthreads = nthreads;
 	tq->tq_cpu_pct = threads_arg;
 	tq->tq_pri = pri;
+	tq->tq_node = node;
 	tq->tq_minalloc = minalloc;
 	tq->tq_maxalloc = maxalloc;
 	tq->tq_nalloc = 0;
@@ -1448,7 +1487,32 @@ taskq_create(const char *name, int threads_arg, pri_t pri,
 
 	return (tq);
 }
+
+taskq_t *
+taskq_create(const char *name, int threads_arg, pri_t pri,
+    int minalloc, int maxalloc, uint_t flags)
+{
+	return (taskq_create_impl(name, threads_arg, pri, minalloc, maxalloc,
+	    flags, NUMA_NO_NODE));
+}
 EXPORT_SYMBOL(taskq_create);
+
+/*
+ * Like taskq_create(), with the threads kept on the given NUMA node (see
+ * taskq_thread_bind_node()), or left unbound if the node has no CPU.
+ */
+taskq_t *
+taskq_create_node(const char *name, int threads_arg, pri_t pri,
+    int minalloc, int maxalloc, proc_t *proc, uint_t flags, int node)
+{
+	(void) proc;
+	if (node < 0 || (unsigned int)node >= nr_node_ids ||
+	    !node_state(node, N_CPU))
+		node = NUMA_NO_NODE;
+	return (taskq_create_impl(name, threads_arg, pri, minalloc, maxalloc,
+	    flags, node));
+}
+EXPORT_SYMBOL(taskq_create_node);
 
 void
 taskq_destroy(taskq_t *tq)

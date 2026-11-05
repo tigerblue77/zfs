@@ -119,6 +119,7 @@ typedef struct taskq {
 	/* If PERCPU flag is set, percent of NCPUs to have as threads */
 	int			tq_cpu_pct;
 	int			tq_pri;		/* priority */
+	int			tq_node;	/* NUMA node, or NUMA_NO_NODE */
 	int			tq_minalloc;	/* min taskq_ent_t pool size */
 	int			tq_maxalloc;	/* max taskq_ent_t pool size */
 	int			tq_nalloc;	/* cur taskq_ent_t pool size */
@@ -191,6 +192,8 @@ extern void taskq_dispatch_ent(taskq_t *, task_func_t, void *, uint_t,
 extern int taskq_empty_ent(taskq_ent_t *);
 extern void taskq_init_ent(taskq_ent_t *);
 extern taskq_t *taskq_create(const char *, int, pri_t, int, int, uint_t);
+extern taskq_t *taskq_create_node(const char *, int, pri_t, int, int,
+    proc_t *, uint_t, int);
 extern taskq_t *taskq_create_synced(const char *, int, pri_t, int, int, uint_t,
     kthread_t ***);
 extern void taskq_destroy(taskq_t *);

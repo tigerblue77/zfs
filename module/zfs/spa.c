@@ -165,7 +165,8 @@ static const char *const zio_taskq_types[ZIO_TASKQ_TYPES] = {
  * particular taskq is chosen at random. ZTI_SCALE uses a number of taskqs
  * that scales with the number of CPUs. With zio_taskq_numa, the read issue
  * and the read and write interrupt taskqs are split into one group per NUMA
- * node, and the random choice is made in the group of the dispatching CPU.
+ * node, whose threads stay on that node, and the random choice is made in the
+ * group of the dispatching CPU.
  *
  * The different taskq priorities are to handle the different contexts (issue
  * and interrupt) and then to reserve threads for high priority I/Os that
@@ -215,8 +216,9 @@ static uint_t	zio_taskq_write_tpq = 16;
 
 /*
  * Split the read and write interrupt taskqs, and the read issue taskq, across
- * the NUMA nodes that have CPUs, and dispatch a zio to the taskqs of the node
- * of the CPU that dispatches it, so that its completion stays on that node.
+ * the NUMA nodes that have CPUs, keep the threads of each group on its node,
+ * and dispatch a zio to the taskqs of the node of the CPU that dispatches it,
+ * so that its completion stays on that node.
  */
 static uint_t	zio_taskq_numa = 1;
 
@@ -1366,8 +1368,14 @@ spa_taskqs_init(spa_t *spa, zio_type_t t, zio_taskq_type_t q)
 			const pri_t pri = (t == ZIO_TYPE_WRITE &&
 			    q == ZIO_TASKQ_ISSUE) ?
 			    wtqclsyspri : maxclsyspri;
-			tq = taskq_create_proc(name, value, pri, 50,
-			    INT_MAX, spa->spa_proc, flags);
+			if (nodes > 1) {
+				tq = taskq_create_node(name, value, pri, 50,
+				    INT_MAX, spa->spa_proc, flags,
+				    i / (count / nodes));
+			} else {
+				tq = taskq_create_proc(name, value, pri, 50,
+				    INT_MAX, spa->spa_proc, flags);
+			}
 #ifdef HAVE_SYSDC
 		}
 #endif

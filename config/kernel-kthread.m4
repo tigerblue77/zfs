@@ -52,6 +52,25 @@ AC_DEFUN([ZFS_AC_KERNEL_KTHREAD_DEQUEUE_SIGNAL], [
 	])
 ])
 
+AC_DEFUN([ZFS_AC_KERNEL_KTHREAD_AFFINE_PREFERRED], [
+	dnl #
+	dnl # 6.14 API change,
+	dnl # kthread() gives a thread made by kthread_create_on_node() the CPUs
+	dnl # of its node, unless it was bound before its first wakeup, and
+	dnl # kthread_affine_preferred() is added along with it.  Only its
+	dnl # declaration is tested: it is not called, and is not exported in
+	dnl # 6.14 (GPL-only where it is).
+	dnl #
+	AC_MSG_CHECKING([whether kthread_affine_preferred() exists])
+	ZFS_LINUX_TEST_RESULT([kthread_affine_preferred], [
+		AC_MSG_RESULT(yes)
+		AC_DEFINE(HAVE_KTHREAD_AFFINE_PREFERRED, 1,
+		    [kthread_affine_preferred() exists])
+	], [
+		AC_MSG_RESULT(no)
+	])
+])
+
 AC_DEFUN([ZFS_AC_KERNEL_SRC_KTHREAD_COMPLETE_AND_EXIT], [
 	ZFS_LINUX_TEST_SRC([kthread_complete_and_exit], [
 		#include <linux/kthread.h>
@@ -88,12 +107,23 @@ AC_DEFUN([ZFS_AC_KERNEL_SRC_KTHREAD_DEQUEUE_SIGNAL], [
 	])
 ])
 
+AC_DEFUN([ZFS_AC_KERNEL_SRC_KTHREAD_AFFINE_PREFERRED], [
+	ZFS_LINUX_TEST_SRC([kthread_affine_preferred], [
+		#include <linux/kthread.h>
+	], [
+		__typeof__(kthread_affine_preferred) *fn
+		    __attribute__ ((unused)) = NULL;
+	])
+])
+
 AC_DEFUN([ZFS_AC_KERNEL_KTHREAD], [
 	ZFS_AC_KERNEL_KTHREAD_COMPLETE_AND_EXIT
 	ZFS_AC_KERNEL_KTHREAD_DEQUEUE_SIGNAL
+	ZFS_AC_KERNEL_KTHREAD_AFFINE_PREFERRED
 ])
 
 AC_DEFUN([ZFS_AC_KERNEL_SRC_KTHREAD], [
 	ZFS_AC_KERNEL_SRC_KTHREAD_COMPLETE_AND_EXIT
 	ZFS_AC_KERNEL_SRC_KTHREAD_DEQUEUE_SIGNAL
+	ZFS_AC_KERNEL_SRC_KTHREAD_AFFINE_PREFERRED
 ])

@@ -90,6 +90,8 @@ taskq_t	*taskq_create_synced(const char *, int, pri_t, int, int, uint_t,
 taskq_t	*taskq_create_instance(const char *, int, int, pri_t, int, int, uint_t);
 taskq_t	*taskq_create_proc(const char *, int, pri_t, int, int,
     struct proc *, uint_t);
+taskq_t	*taskq_create_node(const char *, int, pri_t, int, int,
+    struct proc *, uint_t, int);
 taskq_t	*taskq_create_sysdc(const char *, int, int, int,
     struct proc *, uint_t, uint_t);
 void	nulltask(void *);

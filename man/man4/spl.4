@@ -11,7 +11,7 @@
 .\"
 .\" Copyright 2013 Turbo Fredriksson <turbo@bayour.com>. All rights reserved.
 .\"
-.Dd May 7, 2025
+.Dd November 5, 2026
 .Dt SPL 4
 .Os
 .
@@ -154,6 +154,12 @@ When enabled all taskq threads will be distributed evenly
 across the available CPUs.
 By default, this behavior is disabled to allow the Linux scheduler
 the maximum flexibility to determine where a thread should run.
+When enabled, the threads of a taskq kept on a NUMA node, such as those
+split by
+.Sy zio_taskq_numa ,
+are distributed across the CPUs of that node instead.
+On kernels before 6.14 those threads are bound this way
+even when this is disabled.
 .
 .It Sy spl_taskq_thread_dynamic Ns = Ns Sy 1 Pq int
 Allow dynamic taskqs.

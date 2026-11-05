@@ -33,6 +33,7 @@
 #include <sys/lock.h>
 #include <sys/mutex.h>
 #include <sys/queue.h>
+#include <sys/smp.h>
 #include <sys/taskq.h>
 #include <sys/taskqueue.h>
 #include <sys/tsd.h>
@@ -206,7 +207,7 @@ taskq_tsd_set(void *context)
 
 static taskq_t *
 taskq_create_impl(const char *name, int nthreads, pri_t pri,
-    proc_t *proc __maybe_unused, uint_t flags)
+    proc_t *proc __maybe_unused, uint_t flags, int node)
 {
 	taskq_t *tq;
 
@@ -221,8 +222,18 @@ taskq_create_impl(const char *name, int nthreads, pri_t pri,
 	    taskq_tsd_set, tq);
 	taskqueue_set_callback(tq->tq_queue, TASKQUEUE_CALLBACK_TYPE_SHUTDOWN,
 	    taskq_tsd_set, NULL);
-	(void) taskqueue_start_threads_in_proc(&tq->tq_queue, nthreads, pri,
-	    proc, "%s", name);
+	/*
+	 * taskqueue_start_threads_cpuset() starts the threads in proc0, where
+	 * the zio taskqs already are (spa_proc is &p0).
+	 */
+	if (node >= 0 && node < vm_ndomains && proc == &p0 &&
+	    !CPU_EMPTY(&cpuset_domain[node])) {
+		(void) taskqueue_start_threads_cpuset(&tq->tq_queue, nthreads,
+		    pri, &cpuset_domain[node], "%s", name);
+	} else {
+		(void) taskqueue_start_threads_in_proc(&tq->tq_queue, nthreads,
+		    pri, proc, "%s", name);
+	}
 
 	return ((taskq_t *)tq);
 }
@@ -231,14 +242,26 @@ taskq_t *
 taskq_create(const char *name, int nthreads, pri_t pri, int minalloc __unused,
     int maxalloc __unused, uint_t flags)
 {
-	return (taskq_create_impl(name, nthreads, pri, system_proc, flags));
+	return (taskq_create_impl(name, nthreads, pri, system_proc, flags, -1));
 }
 
 taskq_t *
 taskq_create_proc(const char *name, int nthreads, pri_t pri,
     int minalloc __unused, int maxalloc __unused, proc_t *proc, uint_t flags)
 {
-	return (taskq_create_impl(name, nthreads, pri, proc, flags));
+	return (taskq_create_impl(name, nthreads, pri, proc, flags, -1));
+}
+
+/*
+ * Like taskq_create_proc(), with the threads on the CPUs of the given memory
+ * domain.
+ */
+taskq_t *
+taskq_create_node(const char *name, int nthreads, pri_t pri,
+    int minalloc __unused, int maxalloc __unused, proc_t *proc, uint_t flags,
+    int node)
+{
+	return (taskq_create_impl(name, nthreads, pri, proc, flags, node));
 }
 
 void

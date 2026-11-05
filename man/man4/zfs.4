@@ -2938,11 +2938,15 @@ Set value only applies to pools imported/created after that.
 .It Sy zio_taskq_numa Ns = Ns Sy 1 Ns | Ns 0 Pq uint
 Split the read issue taskqs and the read and write interrupt taskqs
 into one group per NUMA node that has CPUs,
+keep the threads of each group on the CPUs of its node,
 and dispatch each I/O to a taskq of the group of the dispatching CPU,
 so that the work done after an I/O completes, such as checksum verification
 and decompression, stays on the node that issued it.
 The number of these taskqs is rounded up to a multiple of the number of nodes.
 Has no effect on systems with a single node.
+On Linux, each of these threads is bound to one CPU of its node
+on kernels before 6.14, and on any kernel with
+.Sy spl_taskq_thread_bind Ns = Ns Sy 1 .
 Set value only applies to pools imported/created after that.
 .
 .It Sy zio_taskq_read Ns = Ns Sy fixed,1,8 null scale null Pq charp

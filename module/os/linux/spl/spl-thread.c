@@ -129,18 +129,14 @@ EXPORT_SYMBOL(__thread_create);
  * kthread_create() in which it is not killable and less likely
  * to return -ENOMEM.
  */
-struct task_struct *
-spl_kthread_create(int (*func)(void *), void *data, const char namefmt[], ...)
+static struct task_struct *
+spl_kthread_create_impl(int (*func)(void *), void *data, int node,
+    const char *name)
 {
 	struct task_struct *tsk;
-	va_list args;
-	char name[TASK_COMM_LEN];
 
-	va_start(args, namefmt);
-	vsnprintf(name, sizeof (name), namefmt, args);
-	va_end(args);
 	do {
-		tsk = kthread_create(func, data, "%s", name);
+		tsk = kthread_create_on_node(func, data, node, "%s", name);
 		if (IS_ERR(tsk)) {
 			if (signal_pending(current)) {
 				clear_thread_flag(TIF_SIGPENDING);
@@ -154,7 +150,39 @@ spl_kthread_create(int (*func)(void *), void *data, const char namefmt[], ...)
 		}
 	} while (1);
 }
+
+struct task_struct *
+spl_kthread_create(int (*func)(void *), void *data, const char namefmt[], ...)
+{
+	va_list args;
+	char name[TASK_COMM_LEN];
+
+	va_start(args, namefmt);
+	vsnprintf(name, sizeof (name), namefmt, args);
+	va_end(args);
+
+	return (spl_kthread_create_impl(func, data, NUMA_NO_NODE, name));
+}
 EXPORT_SYMBOL(spl_kthread_create);
+
+/*
+ * Like spl_kthread_create(), for a thread whose task structure and stack
+ * come from the given NUMA node (NUMA_NO_NODE for any).
+ */
+struct task_struct *
+spl_kthread_create_node(int (*func)(void *), void *data, int node,
+    const char namefmt[], ...)
+{
+	va_list args;
+	char name[TASK_COMM_LEN];
+
+	va_start(args, namefmt);
+	vsnprintf(name, sizeof (name), namefmt, args);
+	va_end(args);
+
+	return (spl_kthread_create_impl(func, data, node, name));
+}
+EXPORT_SYMBOL(spl_kthread_create_node);
 
 /*
  * Extract the next pending signal from p_sig into p_cursig; stop the process
