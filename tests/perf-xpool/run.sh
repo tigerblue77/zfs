@@ -652,8 +652,9 @@ qv_knobs() {
 	*) die "unknown knob set $1" ;;
 	esac
 	local m=/sys/module/zfs/parameters
-	echo "$wr" > $m/zio_taskq_write || die "zio_taskq_write"
-	echo "$rd" > $m/zio_taskq_read || die "zio_taskq_read"
+	# No newline: the row parser takes it as part of the last mode.
+	printf '%s' "$wr" > $m/zio_taskq_write || die "zio_taskq_write"
+	printf '%s' "$rd" > $m/zio_taskq_read || die "zio_taskq_read"
 	echo "$low" > $m/zio_taskq_bulk_lowpri || die "zio_taskq_bulk_lowpri"
 	echo "$lane" > $m/zfs_arc_evict_lane || die "zfs_arc_evict_lane"
 }
