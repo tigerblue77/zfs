@@ -5382,8 +5382,18 @@ vdev_stat_update(zio_t *zio, uint64_t psize)
 		ASSERT(vd == zio->io_vd);
 		vdev_stat_t *vs = &vd->vdev_stat;
 		vdev_stat_ex_t *vsx = &vd->vdev_stat_ex;
+		boolean_t leaf_io = vd->vdev_ops->vdev_op_leaf &&
+		    zio->io_priority < ZIO_PRIORITY_NUM_QUEUEABLE;
 
 		if (flags & ZIO_FLAG_IO_BYPASS)
+			return;
+
+		/*
+		 * Only leaf I/Os and repairs are recorded below, so do not take
+		 * the lock of an interior vdev, which every I/O to a mirror or
+		 * RAID-Z vdev would otherwise take.
+		 */
+		if (!leaf_io && !(flags & ZIO_FLAG_IO_REPAIR))
 			return;
 
 		mutex_enter(&vd->vdev_stat_lock);
@@ -5430,8 +5440,7 @@ vdev_stat_update(zio_t *zio, uint64_t psize)
 		 * The bytes/ops/histograms are recorded at the leaf level and
 		 * aggregated into the higher level vdevs in vdev_get_stats().
 		 */
-		if (vd->vdev_ops->vdev_op_leaf &&
-		    (zio->io_priority < ZIO_PRIORITY_NUM_QUEUEABLE)) {
+		if (leaf_io) {
 			zio_type_t vs_type = type;
 			zio_priority_t priority = zio->io_priority;
 
