@@ -51,16 +51,18 @@ static unsigned int zvol_open_timeout_ms = 1000;
 /*
  * Serve a request of at most this many bytes in the thread that submitted
  * it, rather than in a zvol taskq thread, when that thread is an io_uring
- * worker; 0 never does.  See zvol_request_inline().
+ * worker; 0 never does.  See zvol_request_inline().  Off by default: with
+ * zvol_nowait, io_uring rarely goes through its workers, and where it does,
+ * their bounded number limits the concurrency of a ring.
  */
-static unsigned int zvol_inline_io_uring = 128 * 1024;
+static unsigned int zvol_inline_io_uring = 0;
 
 /*
  * Let a bio-based zvol take non-blocking (REQ_NOWAIT) submissions, so that
  * io_uring submits to it without going through its workers.  Read when a
  * zvol's block device is created; blk-mq zvols always take them.
  */
-static unsigned int zvol_nowait = 0;
+static unsigned int zvol_nowait = 1;
 
 static unsigned int zvol_blk_mq_threads = 0;
 static unsigned int zvol_blk_mq_actual_threads;
