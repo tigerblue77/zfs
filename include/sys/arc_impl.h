@@ -112,9 +112,10 @@ typedef struct arc_state {
 	 */
 	zfs_refcount_t arcs_size[ARC_BUFC_NUMTYPES] ____cacheline_aligned;
 	/*
-	 * total amount of evictable data in this state
+	 * total amount of evictable data in this state; a per-CPU sum, as it
+	 * changes on most I/Os but is read only by eviction and kstats
 	 */
-	zfs_refcount_t arcs_esize[ARC_BUFC_NUMTYPES];
+	wmsum_t arcs_esize[ARC_BUFC_NUMTYPES];
 	/*
 	 * amount of hit bytes for this state (counted only for ghost states)
 	 */
@@ -1114,6 +1115,7 @@ extern uint64_t arc_reduce_target_size(uint64_t to_free);
 extern boolean_t arc_reclaim_needed(void);
 extern void arc_kmem_reap_soon(void);
 extern void arc_wait_for_eviction(uint64_t, boolean_t, boolean_t);
+extern uint64_t arc_state_esize(arc_state_t *, arc_buf_contents_t);
 
 extern void arc_lowmem_init(void);
 extern void arc_lowmem_fini(void);
