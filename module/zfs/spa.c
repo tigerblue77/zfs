@@ -225,6 +225,13 @@ static uint_t	zio_taskq_write_tpq = 16;
 static int	zio_taskq_bulk_lowpri = 1;
 
 /*
+ * Let the threads of those bulk taskqs give their CPU to waiting threads
+ * between tasks (TASKQ_YIELD, Linux only), so that a burst of compression
+ * delays a woken I/O completion or application thread by at most one task.
+ */
+static int	zio_taskq_bulk_yield = 1;
+
+/*
  * Report any spa_load_verify errors found, but do not fail spa_load.
  * This is used by zdb to analyze non-idle pools.
  */
@@ -1341,15 +1348,18 @@ spa_taskqs_init(spa_t *spa, zio_type_t t, zio_taskq_type_t q)
 			 * priority as bulk work, see zio_taskq_bulk_lowpri.
 			 */
 			pri_t pri = maxclsyspri;
-			if ((q == ZIO_TASKQ_ISSUE ||
+			uint_t tqflags = flags;
+			boolean_t bulk = (q == ZIO_TASKQ_ISSUE ||
 			    q == ZIO_TASKQ_INTERRUPT) &&
-			    zio_taskq_bulk_lowpri &&
-			    zio_taskqs[t][q + 1].zti_mode != ZTI_MODE_NULL)
+			    zio_taskqs[t][q + 1].zti_mode != ZTI_MODE_NULL;
+			if (bulk && zio_taskq_bulk_lowpri)
 				pri = defclsyspri;
 			else if (t == ZIO_TYPE_WRITE && q == ZIO_TASKQ_ISSUE)
 				pri = wtqclsyspri;
+			if (bulk && zio_taskq_bulk_yield)
+				tqflags |= TASKQ_YIELD;
 			tq = taskq_create_proc(name, value, pri, 50,
-			    INT_MAX, spa->spa_proc, flags);
+			    INT_MAX, spa->spa_proc, tqflags);
 #ifdef HAVE_SYSDC
 		}
 #endif
@@ -12545,6 +12555,9 @@ ZFS_MODULE_PARAM(zfs_zio, zio_, taskq_write_tpq, UINT, ZMOD_RW,
 
 ZFS_MODULE_PARAM(zfs_zio, zio_, taskq_bulk_lowpri, INT, ZMOD_RW,
 	"Run bulk I/O taskqs at the default priority");
+
+ZFS_MODULE_PARAM(zfs_zio, zio_, taskq_bulk_yield, INT, ZMOD_RW,
+	"Bulk I/O taskq threads yield to waiting threads between tasks");
 
 ZFS_MODULE_PARAM(zfs, zfs_, ccw_retry_interval, INT, ZMOD_RW,
 	"Configuration cache file write, retry after failure, interval "
