@@ -342,6 +342,14 @@ static uint64_t arc_evict_count;
 static list_t arc_evict_waiters;
 
 /*
+ * When arc_is_overflowing(), let the allocations of a pool that holds no more
+ * than zfs_arc_pool_dirty_percent of the anonymous data, other than for a
+ * prefetch, wait for their own share of eviction ahead of the eviction debt
+ * queued by other allocations, instead of behind it.
+ */
+static int zfs_arc_evict_lane = 1;
+
+/*
  * When arc_is_overflowing(), arc_get_data_impl() waits for this percent of
  * the requested amount of data to be evicted.  For example, by default for
  * every 2KB that's evicted, 1KB of it may be "reused" by a new allocation.
@@ -897,11 +905,13 @@ enum arc_hdr_alloc_flags {
 	ARC_HDR_ALLOC_RDATA = 0x1,
 	ARC_HDR_USE_RESERVE = 0x4,
 	ARC_HDR_ALLOC_LINEAR = 0x8,
+	ARC_HDR_ALLOC_LANE = 0x10,
 };
 
 
 static abd_t *arc_get_data_abd(arc_buf_hdr_t *, uint64_t, const void *, int);
-static void *arc_get_data_buf(arc_buf_hdr_t *, uint64_t, const void *);
+static void *arc_get_data_buf(arc_buf_hdr_t *, uint64_t, const void *, int);
+static int arc_evict_lane_flag(spa_t *);
 static void arc_get_data_impl(arc_buf_hdr_t *, uint64_t, const void *, int);
 static void arc_free_data_abd(arc_buf_hdr_t *, abd_t *, uint64_t, const void *);
 static void arc_free_data_buf(arc_buf_hdr_t *, void *, uint64_t, const void *);
@@ -2143,7 +2153,7 @@ arc_buf_fill(arc_buf_t *buf, spa_t *spa, const zbookmark_phys_t *zb,
 			/* We need to give the buf its own b_data */
 			buf->b_flags &= ~ARC_BUF_FLAG_SHARED;
 			buf->b_data =
-			    arc_get_data_buf(hdr, HDR_GET_LSIZE(hdr), buf);
+			    arc_get_data_buf(hdr, HDR_GET_LSIZE(hdr), buf, 0);
 			arc_hdr_clear_flags(hdr, ARC_FLAG_SHARED_DATA);
 
 			/* Previously overhead was 0; just add new overhead */
@@ -2155,7 +2165,7 @@ arc_buf_fill(arc_buf_t *buf, spa_t *spa, const zbookmark_phys_t *zb,
 			arc_free_data_buf(hdr, buf->b_data, HDR_GET_PSIZE(hdr),
 			    buf);
 			buf->b_data =
-			    arc_get_data_buf(hdr, HDR_GET_LSIZE(hdr), buf);
+			    arc_get_data_buf(hdr, HDR_GET_LSIZE(hdr), buf, 0);
 
 			/* We increased the size of b_data; update overhead */
 			ARCSTAT_INCR(arcstat_overhead_size,
@@ -2850,8 +2860,8 @@ arc_buf_alloc_impl(arc_buf_hdr_t *hdr, spa_t *spa, const zbookmark_phys_t *zb,
 		buf->b_flags |= ARC_BUF_FLAG_SHARED;
 		arc_hdr_set_flags(hdr, ARC_FLAG_SHARED_DATA);
 	} else {
-		buf->b_data =
-		    arc_get_data_buf(hdr, arc_buf_size(buf), buf);
+		buf->b_data = arc_get_data_buf(hdr, arc_buf_size(buf), buf,
+		    HDR_PREFETCH(hdr) ? 0 : arc_evict_lane_flag(spa));
 		ARCSTAT_INCR(arcstat_overhead_size, arc_buf_size(buf));
 	}
 	VERIFY3P(buf->b_data, !=, NULL);
@@ -5171,11 +5181,12 @@ arc_get_data_abd(arc_buf_hdr_t *hdr, uint64_t size, const void *tag,
 }
 
 static void *
-arc_get_data_buf(arc_buf_hdr_t *hdr, uint64_t size, const void *tag)
+arc_get_data_buf(arc_buf_hdr_t *hdr, uint64_t size, const void *tag,
+    int alloc_flags)
 {
 	arc_buf_contents_t type = arc_buf_type(hdr);
 
-	arc_get_data_impl(hdr, size, tag, 0);
+	arc_get_data_impl(hdr, size, tag, alloc_flags);
 	if (type == ARC_BUFC_METADATA) {
 		return (zio_buf_alloc(size));
 	} else {
@@ -5193,8 +5204,9 @@ arc_get_data_buf(arc_buf_hdr_t *hdr, uint64_t size, const void *tag)
  * The use_reserve argument allows some callers to wait less than others
  * to not block critical code paths, possibly blocking other resources.
  */
-void
-arc_wait_for_eviction(uint64_t amount, boolean_t lax, boolean_t use_reserve)
+static void
+arc_wait_for_eviction_impl(uint64_t amount, boolean_t lax,
+    boolean_t use_reserve, boolean_t lane)
 {
 	switch (arc_is_overflowing(lax, use_reserve)) {
 	case ARC_OVF_NONE:
@@ -5231,15 +5243,41 @@ arc_wait_for_eviction(uint64_t amount, boolean_t lax, boolean_t use_reserve)
 			arc_evict_needed = B_TRUE;
 			zthr_wakeup(arc_evict_zthr);
 		}
-		/*
-		 * Note, the last waiter's count may be less than
-		 * arc_evict_count if we are low on memory in which
-		 * case arc_evict_state_impl() may have deferred
-		 * wakeups (but still incremented arc_evict_count).
-		 */
-		aw.aew_count = MAX(last_count, arc_evict_count) + amount;
-
-		list_insert_tail(&arc_evict_waiters, &aw);
+		if (lane && last != NULL) {
+			/*
+			 * Go after the other lane waiters but ahead of the
+			 * rest, and make each of those wait for this amount
+			 * too, so that eviction still covers every allocation
+			 * it lets through.
+			 */
+			arc_evict_waiter_t *pos = NULL, *w;
+			uint64_t base = arc_evict_count;
+			for (w = list_head(&arc_evict_waiters);
+			    w != NULL && w->aew_lane;
+			    w = list_next(&arc_evict_waiters, w)) {
+				base = MAX(base, w->aew_count);
+				pos = w;
+			}
+			for (; w != NULL; w = list_next(&arc_evict_waiters, w))
+				w->aew_count += amount;
+			aw.aew_count = base + amount;
+			aw.aew_lane = B_TRUE;
+			if (pos == NULL)
+				list_insert_head(&arc_evict_waiters, &aw);
+			else
+				list_insert_after(&arc_evict_waiters, pos, &aw);
+		} else {
+			/*
+			 * Note, the last waiter's count may be less than
+			 * arc_evict_count if we are low on memory in which
+			 * case arc_evict_state_impl() may have deferred
+			 * wakeups (but still incremented arc_evict_count).
+			 */
+			aw.aew_count = MAX(last_count, arc_evict_count) +
+			    amount;
+			aw.aew_lane = lane;
+			list_insert_tail(&arc_evict_waiters, &aw);
+		}
 
 		arc_set_need_free();
 
@@ -5262,6 +5300,35 @@ arc_wait_for_eviction(uint64_t amount, boolean_t lax, boolean_t use_reserve)
 		cv_destroy(&aw.aew_cv);
 	}
 	}
+}
+
+void
+arc_wait_for_eviction(uint64_t amount, boolean_t lax, boolean_t use_reserve)
+{
+	arc_wait_for_eviction_impl(amount, lax, use_reserve, B_FALSE);
+}
+
+/*
+ * ARC_HDR_ALLOC_LANE if an allocation for this pool may wait in the lane of
+ * arc_wait_for_eviction_impl(): the pool holds no more than the share of the
+ * anonymous data that arc_tempreserve_space() exempts from throttling, so it
+ * is not the one the ARC has to evict for.
+ */
+static int
+arc_evict_lane_flag(spa_t *spa)
+{
+	dsl_pool_t *dp;
+
+	/* No dsl_pool yet while dsl_pool_init() reads the MOS. */
+	if (!zfs_arc_evict_lane || spa == NULL ||
+	    (dp = spa_get_dsl(spa)) == NULL)
+		return (0);
+	uint64_t anon_size =
+	    zfs_refcount_count(&arc_anon->arcs_size[ARC_BUFC_DATA]) +
+	    zfs_refcount_count(&arc_anon->arcs_size[ARC_BUFC_METADATA]);
+	if (dp->dp_dirty_total > anon_size * zfs_arc_pool_dirty_percent / 100)
+		return (0);
+	return (ARC_HDR_ALLOC_LANE);
 }
 
 /*
@@ -5289,8 +5356,9 @@ arc_get_data_impl(arc_buf_hdr_t *hdr, uint64_t size, const void *tag,
 	 * ensure that that progress is also made towards getting arc_size
 	 * under arc_c.  See the comment above zfs_arc_eviction_pct.
 	 */
-	arc_wait_for_eviction(size * zfs_arc_eviction_pct / 100,
-	    B_TRUE, alloc_flags & ARC_HDR_USE_RESERVE);
+	arc_wait_for_eviction_impl(size * zfs_arc_eviction_pct / 100,
+	    B_TRUE, alloc_flags & ARC_HDR_USE_RESERVE,
+	    (alloc_flags & ARC_HDR_ALLOC_LANE) != 0);
 
 	arc_buf_contents_t type = arc_buf_type(hdr);
 	if (type == ARC_BUFC_METADATA) {
@@ -6113,6 +6181,8 @@ top:
 		uint64_t size;
 		abd_t *hdr_abd;
 		int alloc_flags = encrypted_read ? ARC_HDR_ALLOC_RDATA : 0;
+		if (!(*arc_flags & ARC_FLAG_PREFETCH))
+			alloc_flags |= arc_evict_lane_flag(spa);
 		arc_buf_contents_t type = BP_GET_BUFC_TYPE(bp);
 		int config_lock;
 		int error;
@@ -11846,6 +11916,9 @@ ZFS_MODULE_PARAM(zfs_arc, zfs_arc_, dnode_reduce_percent, UINT, ZMOD_RW,
 
 ZFS_MODULE_PARAM(zfs_arc, zfs_arc_, eviction_pct, UINT, ZMOD_RW,
 	"When full, ARC allocation waits for eviction of this % of alloc size");
+
+ZFS_MODULE_PARAM(zfs_arc, zfs_arc_, evict_lane, INT, ZMOD_RW,
+	"When full, lightly dirty pools wait for eviction ahead of the rest");
 
 ZFS_MODULE_PARAM(zfs_arc, zfs_arc_, evict_batch_limit, UINT, ZMOD_RW,
 	"The number of headers to evict per sublist before moving to the next");

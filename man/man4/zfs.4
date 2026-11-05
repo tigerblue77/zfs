@@ -875,6 +875,17 @@ with 8-byte pointers.
 For configurations with a known larger average block size,
 this value can be increased to reduce the memory footprint.
 .
+.It Sy zfs_arc_evict_lane Ns = Ns Sy 1 Ns | Ns 0 Pq int
+When the ARC is over its target size and allocations wait for eviction,
+let the allocations of a pool that holds no more than its share of the
+anonymous (dirty) data exempted from throttling by the ARC, other than
+those of prefetches, wait for their own amount of eviction ahead of the
+other waiting allocations, instead of behind all of them.
+Each allocation still waits for its own amount, so the eviction keeps
+covering the allocations it lets through.
+A pool writing flat out then does not make the reads and synchronous writes
+of other pools wait for the eviction its own data calls for.
+.
 .It Sy zfs_arc_eviction_pct Ns = Ns Sy 200 Ns % Pq uint
 When
 .Fn arc_is_overflowing ,
