@@ -108,9 +108,13 @@ typedef struct arc_state {
 	 */
 	arc_state_type_t arcs_state;
 	/*
-	 * total amount of data in this state.
+	 * total amount of data in this state; a per-CPU sum, as it changes
+	 * on most I/Os but is read only by eviction, the L2ARC feed thread
+	 * and kstats.  arc_tempreserve_space() compares the size of arc_anon
+	 * on every transaction, so that one is the arc_anon_size aggsum in
+	 * arc.c instead and this member is unused.
 	 */
-	zfs_refcount_t arcs_size[ARC_BUFC_NUMTYPES] ____cacheline_aligned;
+	wmsum_t arcs_size[ARC_BUFC_NUMTYPES] ____cacheline_aligned;
 	/*
 	 * total amount of evictable data in this state; a per-CPU sum, as it
 	 * changes on most I/Os but is read only by eviction and kstats
