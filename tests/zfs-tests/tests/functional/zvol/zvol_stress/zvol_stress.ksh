@@ -25,7 +25,7 @@
 #
 # For both the normal submit_bio() codepath and the blk-mq codepath, and
 # on Linux through io_uring with O_DIRECT on submit_bio() zvols, with and
-# without zvol_inline_io_uring, do the following:
+# without zvol_inline_io_uring and zvol_nowait, do the following:
 #
 # 1. Create one zvol per CPU
 # 2. In parallel, spawn an fio "write and verify" for each zvol
@@ -54,6 +54,7 @@ typeset tmpdir="$(mktemp -d "$TEST_BASE_DIR/zvol_stress_fio_state.XXXXXX")"
 log_must save_tunable VOL_USE_BLK_MQ
 log_must save_tunable VOL_REQUEST_SYNC
 log_must save_tunable VOL_INLINE_IO_URING
+log_must save_tunable VOL_NOWAIT
 
 function create_zvols
 {
@@ -129,6 +130,7 @@ function cleanup
 	log_must restore_tunable VOL_USE_BLK_MQ
 	log_must restore_tunable VOL_REQUEST_SYNC
 	log_must restore_tunable VOL_INLINE_IO_URING
+	log_must restore_tunable VOL_NOWAIT
 
 	# Remove all fio's leftover state files
 	if [ -n "$tmpdir" ] ; then
@@ -160,18 +162,21 @@ destroy_zvols
 
 # O_DIRECT through io_uring on bio-based zvols, whose requests io_uring
 # issues from its workers, which process them inline when they are no
-# larger than zvol_inline_io_uring (1M here, the size of these writes).
+# larger than zvol_inline_io_uring (1M here, the size of these writes),
+# or, with zvol_nowait, issues without blocking to the zvol taskqs.
 # Only if fio and the kernel support io_uring.
 if is_linux && fio --name=probe --ioengine=io_uring --size=64k --bs=4k \
     --rw=write --filename="$tmpdir/probe" > /dev/null 2>&1 ; then
 	rm -f "$tmpdir/probe"
 	set_blk_mq 0
-	for inline in 1048576 0 ; do
-		log_must set_tunable32 VOL_INLINE_IO_URING $inline
+	for mode in 1048576:0 0:0 1048576:1 ; do
+		log_must set_tunable32 VOL_INLINE_IO_URING ${mode%:*}
+		log_must set_tunable32 VOL_NOWAIT ${mode#*:}
 		create_zvols
 		do_zvol_stress io_uring 1
 		destroy_zvols
 	done
+	log_must set_tunable32 VOL_NOWAIT 0
 	set_blk_mq 1
 else
 	rm -f "$tmpdir/probe"
