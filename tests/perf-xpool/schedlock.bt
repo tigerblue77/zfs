@@ -1,33 +1,14 @@
 // SPDX-License-Identifier: CDDL-1.0
 //
-// System-wide run-queue latency by thread name (from wakeup or preemption
-// to running again) and time spent waiting for contended locks, by thread
-// name and by kernel stack.  Stop it with SIGINT.
+// Time spent waiting for contended locks, by thread name and by kernel
+// stack (lock:contention_begin/end).  Run-queue waits come from
+// /proc/<tid>/schedstat instead (report.py schedsample): a sched_switch
+// program keyed by thread name does not load on the runners' kernel.
+// Stop it with SIGINT.
 
 BEGIN
 {
 	@t0 = nsecs;
-}
-
-tracepoint:sched:sched_wakeup,
-tracepoint:sched:sched_wakeup_new
-{
-	@qt[args->pid] = nsecs;
-}
-
-tracepoint:sched:sched_switch
-{
-	if ((args->prev_state & 0xff) == 0) {
-		@qt[args->prev_pid] = nsecs;
-	}
-	$q = @qt[args->next_pid];
-	if ($q != 0) {
-		$d = (nsecs - $q) / 1000;
-		@rq_us[args->next_comm] = sum($d);
-		@rq_n[args->next_comm] = count();
-		@rq_max_us[args->next_comm] = max($d);
-		delete(@qt[args->next_pid]);
-	}
 }
 
 tracepoint:lock:contention_begin
@@ -51,6 +32,5 @@ END
 {
 	printf("elapsed_ms %d\n", (nsecs - @t0) / 1000000);
 	clear(@t0);
-	clear(@qt);
 	clear(@lt);
 }
