@@ -1580,6 +1580,36 @@ vdev_spa_set_alloc(spa_t *spa, uint64_t min_alloc)
 		spa->spa_gcd_alloc = vdev_gcd(min_alloc, spa->spa_gcd_alloc);
 }
 
+/*
+ * Raise spa_asize_ratio to the largest deflated size this vdev allocates for
+ * one DVA, per byte of the block's size rounded up to spa_max_alloc.  Of the
+ * sizes that allocate the same asize, the smallest gives the largest ratio,
+ * so only those are tried.  A raidz vdev is measured at its original width,
+ * which needs the most parity.
+ */
+static void
+vdev_spa_set_asize_ratio(spa_t *spa, vdev_t *vd)
+{
+	uint64_t quantum = spa->spa_max_alloc;
+	uint64_t ratio = 0;
+
+	for (uint64_t psize = SPA_MINBLOCKSIZE; psize <= SPA_MAXBLOCKSIZE;
+	    psize += 1ULL << vd->vdev_ashift) {
+		uint64_t asize = vdev_psize_to_asize(vd, psize);
+		uint64_t dsize = spa->spa_deflate ?
+		    vdev_deflated_space(vd, asize) : asize;
+
+		ratio = MAX(ratio, DIV_ROUND_UP(dsize << SPA_ASIZE_RATIO_SHIFT,
+		    roundup(psize, quantum)));
+	}
+
+	if (ratio > spa->spa_asize_ratio) {
+		spa->spa_asize_ratio = ratio;
+		vdev_dbgmsg(vd, "asize ratio %llu/%u",
+		    (u_longlong_t)ratio, 1U << SPA_ASIZE_RATIO_SHIFT);
+	}
+}
+
 void
 vdev_metaslab_group_create(vdev_t *vd)
 {
@@ -1636,6 +1666,7 @@ vdev_metaslab_group_create(vdev_t *vd)
 				spa->spa_min_ashift = vd->vdev_ashift;
 
 			vdev_spa_set_alloc(spa, vdev_get_min_alloc(vd));
+			vdev_spa_set_asize_ratio(spa, vd);
 		}
 	}
 }

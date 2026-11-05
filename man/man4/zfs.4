@@ -16,7 +16,7 @@
 .\" Copyright (c) 2026, Mateusz Piotrowski <0mp@FreeBSD.org>
 .\" Copyright (c) 2026, TrueNAS.
 .\"
-.Dd September 9, 2026
+.Dd November 5, 2026
 .Dt ZFS 4
 .Os
 .
@@ -628,6 +628,14 @@ Multiplication factor used to estimate actual disk consumption from the
 size of data being written.
 The default value is a worst case estimate,
 but lower values may be valid for a given pool depending on its configuration.
+Each pool also derives an estimate from its own vdevs:
+the most any of them allocates per byte written, times three copies,
+times two for gang blocks and metadata.
+This gives
+.Sy 6
+for mirrors and single disks, and more for RAID-Z, depending on its parity
+and width.
+The lower of the two estimates is used, so this value caps the derived one.
 Pool administrators who understand the factors involved
 may wish to specify a more realistic inflation factor,
 particularly if they operate close to quota or capacity limits.

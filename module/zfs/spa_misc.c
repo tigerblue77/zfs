@@ -337,8 +337,21 @@ const char *zfs_deadman_failmode = "wait";
  * the block may be dittoed with up to 3 DVAs by ddt_sync().  All together,
  * the worst case is:
  *     (VDEV_RAIDZ_MAXPARITY + 1) * SPA_DVAS_PER_BP * 2 == 24
+ *
+ * Few pools can reach it, and ddt_sync() no longer writes ditto copies, so
+ * each pool also bounds the estimate by its own layout: spa_asize_ratio,
+ * the most any of its normal class vdevs allocates per byte of a block
+ * rounded up to spa_max_alloc, times spa_max_replication() DVAs, times
+ * SPA_ASIZE_MARGIN.  That is 6 for mirrors and single disks.  The lower of
+ * the two estimates is used, so this tunable still caps it.
  */
 uint_t spa_asize_inflation = 24;
+
+/*
+ * Room in the per-pool estimate for what its holds do not count: gang
+ * headers, and indirect blocks and dnodes dirtied along with the data.
+ */
+#define	SPA_ASIZE_MARGIN	2
 
 /*
  * Normally, we don't allow the last 3.2% (1/(2^spa_slop_shift)) of space in
@@ -2018,14 +2031,32 @@ spa_freeze_txg(spa_t *spa)
  * DMU to calculate the space a logical write will require on disk.
  * If lsize is smaller than the largest physical block size allocatable on this
  * pool we use its value instead, since the write will end up using the whole
- * block anyway.
+ * block anyway.  The pool's layout may give a lower estimate, see the comment
+ * above spa_asize_inflation.
  */
 uint64_t
 spa_get_worst_case_asize(spa_t *spa, uint64_t lsize)
 {
 	if (lsize == 0)
 		return (0);	/* No inflation needed */
-	return (MAX(lsize, 1 << spa->spa_max_ashift) * spa_asize_inflation);
+
+	/* A negative size, from a shrinking buffer, is inflated alike. */
+	if ((int64_t)lsize < 0)
+		return (-spa_get_worst_case_asize(spa, -lsize));
+
+	uint64_t asize = MAX(lsize, 1ULL << spa->spa_max_ashift) *
+	    spa_asize_inflation;
+	uint64_t ratio = spa->spa_asize_ratio;
+	if (ratio == 0)
+		return (asize);
+
+	ratio *= spa_max_replication(spa) * SPA_ASIZE_MARGIN;
+	uint64_t size = roundup(lsize, spa->spa_max_alloc);
+	uint64_t mask = (1ULL << SPA_ASIZE_RATIO_SHIFT) - 1;
+	uint64_t est = (size >> SPA_ASIZE_RATIO_SHIFT) * ratio +
+	    (((size & mask) * ratio) >> SPA_ASIZE_RATIO_SHIFT);
+
+	return (MIN(asize, est));
 }
 
 /*
