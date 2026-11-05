@@ -36,7 +36,9 @@ QZ_VARIANTS=${QZ_VARIANTS:-"def rs:zvol_request_sync=1 mq:zvol_use_blk_mq=1 \
 cti:zfs_vdev_disk_calling_thread_io=1 \
 rscti:zvol_request_sync=1,zfs_vdev_disk_calling_thread_io=1 \
 mqrscti:zvol_use_blk_mq=1,zvol_request_sync=1,zfs_vdev_disk_calling_thread_io=1"}
-QZ_PROFILE=${QZ_PROFILE:-"def rscti"}
+# VARIANT:RW:QD (QD 1u: io_uring at depth 1), on the mirror's zvol.
+QZ_PROFILE=${QZ_PROFILE:-"def:randread:1 def:randread:1u def:randwrite:1 \
+rscti:randread:1 rscti:randwrite:1"}
 DIAG_RUNTIME=${DIAG_RUNTIME:-20}
 SIZE_MB=${SIZE_MB:-512}
 ARC_MAX=${ARC_MAX:-$((2 << 30))}
@@ -104,11 +106,12 @@ run_fio() {
 	"${REPORT[@]}" fioline "$dir/fio.json"
 }
 
-# fio_args PATH KIND(dev|file) RW QD NJ RUNTIME: fill FIO_ARGS.  Writes
+# fio_args PATH KIND(dev|file) RW QD NJ RUNTIME [ENGINE]: fill FIO_ARGS
+# (ENGINE for QD1, psync by default).  Writes
 # are O_SYNC everywhere (and sync=always on the datasets), so that every
 # write is durable before it returns, as on the raw device.
 fio_args() {
-	local path=$1 kind=$2 rw=$3 qd=$4 nj=$5 rt=$6 eng=psync
+	local path=$1 kind=$2 rw=$3 qd=$4 nj=$5 rt=$6 eng=${7:-psync}
 	[ "$qd" -gt 1 ] && eng=$ASYNC_ENGINE
 	FIO_ARGS=(--name=t --filename="$path" --rw="$rw" --bs=4k
 	    --size="${SIZE_MB}M" --ioengine="$eng" --iodepth="$qd"
@@ -178,7 +181,15 @@ zvol_dev() {
 # pool_cycle POOL: export and import, which drops the pool's data from
 # the ARC so that the read runs below reach the device.
 pool_cycle() {
-	zpool export "$1" || die "cannot export $1"
+	local i
+	# udev probes a zvol when a writer closes it, which can keep the
+	# pool busy for a moment.
+	for i in $(seq 1 20); do
+		udevadm settle
+		zpool export "$1" 2> "$WORK/export.err" && break
+		sleep 0.5
+	done
+	[ "$i" -lt 20 ] || { cat "$WORK/export.err"; die "cannot export $1"; }
 	zpool import -d /dev "$1" || die "cannot import $1"
 }
 
@@ -278,9 +289,9 @@ q1_runs() {
 }
 
 q1_profile() {
-	local tag=$1 path=$2 kind=$3 rw=$4 qd=$5 nj=$6 label fpid
-	label=q1prof.$tag.$rw.qd$qd.nj$nj
-	fio_args "$path" "$kind" "$rw" "$qd" "$nj" "$Q1_RUNTIME"
+	local tag=$1 path=$2 kind=$3 rw=$4 qd=$5 nj=$6 eng=${7:-} label fpid
+	label=q1prof.$tag.$rw.qd$qd${eng:+u}.nj$nj
+	fio_args "$path" "$kind" "$rw" "$qd" "$nj" "$Q1_RUNTIME" $eng
 	run_fio "$label" "${FIO_ARGS[@]}" &
 	fpid=$!
 	sleep 3
@@ -353,12 +364,10 @@ q1() {
 QZ_DEFAULTS=()
 
 qz_params() {
-	local v p
+	local v
 	for v in $QZ_VARIANTS; do
 		[ "${v#*:}" = "$v" ] && continue
-		for p in ${v#*:}; do
-			echo "${p%%=*}"
-		done
+		echo "${v#*:}"
 	done | tr ',' '\n' | sed 's/=.*//' | sort -u
 }
 
@@ -396,7 +405,7 @@ qz_apply() {
 }
 
 qz_variant_runs() {
-	local v=$1 rep=$2 name=${1%%:*} p t rw qn qd nj
+	local v=$1 rep=$2 name=${1%%:*} p t rw qn qd nj eng
 	log "qz variant $name repetition $rep"
 	qz_apply "$v"
 	for p in fast1 fastm; do
@@ -404,11 +413,14 @@ qz_variant_runs() {
 		[ "$p" = fastm ] && t=fmvol
 		for rw in randwrite randread; do
 			[ "$rw" = randread ] && pool_cycle "$p"
-			for qn in 1:1 1:4 32:1 32:4; do
+			# 1u: QD1 through io_uring, as QEMU's aio=io_uring
+			for qn in 1:1 1u:1 1:4 32:1 32:4; do
 				qd=${qn%:*}
 				nj=${qn#*:}
-				fio_args "$(zvol_dev "$p/vol")" dev "$rw" "$qd" \
-				    "$nj" "$QZ_RUNTIME"
+				eng=""
+				[ "$qd" = 1u ] && eng=$ASYNC_ENGINE
+				fio_args "$(zvol_dev "$p/vol")" dev "$rw" \
+				    "${qd%u}" "$nj" "$QZ_RUNTIME" $eng
 				run_fio "qz.$name.$t.$rw.qd$qd.nj$nj.r$rep" \
 				    "${FIO_ARGS[@]}"
 			done
@@ -417,7 +429,7 @@ qz_variant_runs() {
 }
 
 qz() {
-	local rep v p list rev name qn
+	local rep v p list rev name qn pr rw eng
 	common_setup
 	nullb_add nullb0 0 1024 || die "nullb0"
 	nullb_add nullb1 1 "$FAST_DEV_MB" || die "nullb1"
@@ -463,22 +475,23 @@ qz() {
 		fi
 	done
 	log "qz perf profiles"
-	for v in "${list[@]}"; do
-		name=${v%%:*}
-		case " $QZ_PROFILE " in
-		*" $name "*) ;;
-		*) continue ;;
-		esac
+	for pr in $QZ_PROFILE; do
+		name=${pr%%:*}
+		qn=${pr##*:}
+		rw=${pr#*:}
+		rw=${rw%:*}
+		for v in "${list[@]}"; do
+			[ "${v%%:*}" = "$name" ] && break
+		done
+		[ "${v%%:*}" = "$name" ] || continue
 		qz_apply "$v"
-		q1_profile "qz$name.fmvol" "$(zvol_dev fastm/vol)" dev \
-		    randwrite 1 1
-		pool_cycle fastm
-		q1_profile "qz$name.fmvol" "$(zvol_dev fastm/vol)" dev \
-		    randread 1 1
-		q1_profile "qz$name.fmvol" "$(zvol_dev fastm/vol)" dev \
-		    randread 32 1
+		[ "$rw" = randread ] && pool_cycle fastm
+		eng=""
+		[ "$qn" = 1u ] && eng=$ASYNC_ENGINE
+		q1_profile "qz$name.fmvol" "$(zvol_dev fastm/vol)" dev "$rw" \
+		    "${qn%u}" 1 $eng
 	done
-	qz_apply def
+	qz_apply "${list[0]}"
 	cat /proc/spl/taskq > "$OUT/taskq.end" 2>/dev/null
 	zpool iostat -v > "$OUT/zpool-iostat.end"
 }

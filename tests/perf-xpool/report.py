@@ -623,6 +623,8 @@ def cmd_q1(out):
 # ---------------------------------------------------------------- qz ----
 
 QZ_TARGETS = [("f1vol", "1 vdev"), ("fmvol", "mirror")]
+# 1u: QD1 through io_uring; 1: QD1 through psync
+QZ_QDNJ = [("1", 1), ("1u", 1), ("1", 4), ("32", 1), ("32", 4)]
 
 
 def cmd_qz(out):
@@ -640,7 +642,7 @@ def cmd_qz(out):
     def get(v, t, rw, qd, nj):
         runs = []
         for rep in range(1, 10):
-            r = load_run(out, "qz.%s.%s.%s.qd%d.nj%d.r%d" % (
+            r = load_run(out, "qz.%s.%s.%s.qd%s.nj%d.r%d" % (
                 v, t, rw, qd, nj, rep), irate)
             if r:
                 runs.append(r)
@@ -655,7 +657,7 @@ def cmd_qz(out):
         return m
 
     for rw in ("randwrite", "randread"):
-        raw = get("raw", "raw", rw, 1, 1)
+        raw = get("raw", "raw", rw, "1", 1)
         print("\n-- %s 4K (%s) --" % (rw, "sync=always, O_SYNC"
                                      if rw == "randwrite" else
                                      "primarycache=metadata, O_DIRECT"))
@@ -669,7 +671,7 @@ def cmd_qz(out):
             "variant", "pool", "qd/nj", "IOPS", "min..max", "mean_us",
             "p50_us", "p99_us", "CPUus/IO", "ctx/IO", "dIOPS%", "dp50"))
         for t, tname in QZ_TARGETS:
-            for qd, nj in QDNJ:
+            for qd, nj in QZ_QDNJ:
                 for v in variants:
                     m = get(v, t, rw, qd, nj)
                     if m is None:
@@ -682,7 +684,7 @@ def cmd_qz(out):
                         b["p50"] and v != variants[0] else None
                     print("%-8s %-7s %-6s %8.0f %15s %8.1f %8s %8s %8s "
                           "%6s %7s %7s" % (
-                              v, tname, "%d/%d" % (qd, nj), m["iops"],
+                              v, tname, "%s/%d" % (qd, nj), m["iops"],
                               "%.0f..%.0f" % (m["iops_min"],
                                               m["iops_max"]),
                               m["mean"], fmt(m["p50"]), fmt(m["p99"]),
