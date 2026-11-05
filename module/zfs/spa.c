@@ -169,12 +169,13 @@ static const char *const zio_taskq_types[ZIO_TASKQ_TYPES] = {
  * and interrupt) and then to reserve threads for high priority I/Os that
  * need to be handled with minimum delay.  Synchronous writes get their own
  * issue taskq, so that they never wait for a thread busy compressing the
- * asynchronous writes of a txg.
+ * asynchronous writes of a txg, and synchronous reads their own interrupt
+ * taskq, apart from the checksums and decompression of prefetch and scrub.
  */
 static zio_taskq_info_t zio_taskqs[ZIO_TYPES][ZIO_TASKQ_TYPES] = {
 	/* ISSUE	ISSUE_HIGH	INTR		INTR_HIGH */
 	{ ZTI_ONE,	ZTI_NULL,	ZTI_ONE,	ZTI_NULL }, /* NULL */
-	{ ZTI_N(8),	ZTI_NULL,	ZTI_SCALE(0),	ZTI_NULL }, /* READ */
+	{ ZTI_N(8),	ZTI_NULL,	ZTI_SCALE(0), ZTI_SCALE(0) }, /* READ */
 #ifdef illumos
 	{ ZTI_SYNC,	ZTI_N(5),	ZTI_SCALE(0),	ZTI_N(5) }, /* WRITE */
 #else
