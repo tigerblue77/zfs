@@ -15,7 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ github.event.action == 'opened' || github.event.action == 'reopened' }}
     steps:
-      - env:
+      - shell: bash
+        env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
@@ -52,7 +53,8 @@ jobs:
       group: area-${{ github.event.pull_request.number || 'all' }}
       cancel-in-progress: true
     steps:
-      - env:
+      - shell: bash
+        env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
@@ -103,7 +105,8 @@ jobs:
       group: size-${{ github.event.pull_request.number || 'all' }}
       cancel-in-progress: true
     steps:
-      - env:
+      - shell: bash
+        env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
