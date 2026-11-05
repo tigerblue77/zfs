@@ -3019,8 +3019,9 @@ This parameter applies regardless of the
 .Sy zvol_use_blk_mq
 setting.
 .
-.It Sy zvol_inline_io_uring Ns = Ns Sy 1 Ns | Ns 0 Pq uint
-Process a zvol I/O request in the thread that submitted it, as
+.It Sy zvol_inline_io_uring Ns = Ns Sy 131072 Ns B Po 128 KiB Pc Pq uint
+Process a zvol I/O request of at most this many bytes in the thread that
+submitted it, as
 .Sy zvol_request_sync
 does, when that thread is an
 .Xr io_uring 7
@@ -3028,8 +3029,11 @@ worker, instead of handing it to the thread pool.
 io_uring submits a request from one of its workers when the request may
 block, and starts more workers as they block, so the hand-off only adds a
 thread switch.
-Requests submitted under a block plug, from memory reclaim, or that must
+Readahead, requests submitted from memory reclaim, and requests that must
 not block still go to the thread pool.
+Set to
+.Sy 0
+to hand every request to the thread pool.
 This parameter only applies on Linux.
 .
 .It Sy zvol_num_taskqs Ns = Ns Sy 0 Pq uint

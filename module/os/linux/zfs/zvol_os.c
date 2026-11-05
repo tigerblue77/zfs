@@ -49,11 +49,11 @@ static unsigned int zvol_open_timeout_ms = 1000;
 #endif
 
 /*
- * Serve a request in the thread that submitted it, rather than in a zvol
- * taskq thread, when that thread is an io_uring worker.  See
- * zvol_request_inline().
+ * Serve a request of at most this many bytes in the thread that submitted
+ * it, rather than in a zvol taskq thread, when that thread is an io_uring
+ * worker; 0 never does.  See zvol_request_inline().
  */
-static unsigned int zvol_inline_io_uring = 1;
+static unsigned int zvol_inline_io_uring = 128 * 1024;
 
 static unsigned int zvol_blk_mq_threads = 0;
 static unsigned int zvol_blk_mq_actual_threads;
@@ -497,21 +497,24 @@ zvol_read_task(void *arg)
  * file does not take non-blocking submissions, as a bio-based zvol does
  * not, and starts another worker when one blocks.  That worker may block
  * while it issues the request, so passing the request on to a zvol taskq
- * thread only adds a wake-up and a thread switch.  A batch under a block
- * plug still goes to the taskqs, so that its bios run in parallel, and
- * nothing runs inline in memory reclaim or for a request that must not
- * block.
+ * thread only adds a wake-up and a thread switch.  Larger requests, which
+ * the block layer may have split into bios that would then run one after
+ * the other, and readahead, which nobody waits for, still go to the
+ * taskqs, and nothing runs inline in memory reclaim or for a request that
+ * must not block.  __submit_bio() plugs every bio, so a plug tells
+ * nothing about the submitter.
  */
 static inline boolean_t
-zvol_request_inline(struct bio *bio, struct request *rq)
+zvol_request_inline(struct bio *bio, struct request *rq, uint64_t size)
 {
 #ifdef PF_IO_WORKER
-	return (zvol_inline_io_uring != 0 &&
+	return (zvol_inline_io_uring != 0 && size <= zvol_inline_io_uring &&
 	    (current->flags & (PF_IO_WORKER | PF_MEMALLOC)) == PF_IO_WORKER &&
-	    current->plug == NULL && !io_is_nowait(bio, rq));
+	    !io_is_nowait(bio, rq) && !io_is_rahead(bio, rq));
 #else
 	(void) bio;
 	(void) rq;
+	(void) size;
 	return (B_FALSE);
 #endif
 }
@@ -566,7 +569,7 @@ zvol_request_impl(zvol_state_t *zv, struct bio *bio, struct request *rq,
 	}
 
 	if (zvol_request_sync || zv->zv_threading == B_FALSE ||
-	    zvol_request_inline(bio, rq))
+	    zvol_request_inline(bio, rq, size))
 		force_sync = 1;
 
 	zv_request_t zvr = {
@@ -1959,7 +1962,7 @@ MODULE_PARM_DESC(zvol_use_blk_mq, "Use the blk-mq API for zvols");
 
 module_param(zvol_inline_io_uring, uint, 0644);
 MODULE_PARM_DESC(zvol_inline_io_uring,
-	"Process requests from io_uring workers in the submitting thread");
+	"Largest request from an io_uring worker processed in that thread");
 
 module_param(zvol_blk_mq_blocks_per_thread, uint, 0644);
 MODULE_PARM_DESC(zvol_blk_mq_blocks_per_thread,
