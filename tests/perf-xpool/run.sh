@@ -897,6 +897,27 @@ qv_diag() {
 	perf_report perf "$d"
 }
 
+# Diagnostic run S: perf sched record for 6 s, summarized on the spot into
+# the scheduling delay (wakeup to running) of the fast pool's threads and the
+# threads that held their CPU meanwhile (report.py timehist).
+qv_diag_sched() {
+	local ph=$1 wl=$2 label d fpid
+	label=qvsched.$ph.$wl
+	d=$OUT/diag/$label
+	mkdir -p "$d"
+	q2_args "$wl" "$DIAG_RUNTIME"
+	run_fio "$label" "${FIO_ARGS[@]}" &
+	fpid=$!
+	sleep 4
+	"$PERF" sched record -a -o "$WORK/sched.data" -- sleep 6 \
+	    > "$WORK/perf-sched.log" 2>&1 ||
+	    tail -3 "$WORK/perf-sched.log" > "$d/sched.err"
+	wait "$fpid"
+	"$PERF" sched timehist -i "$WORK/sched.data" 2> "$d/timehist.err" |
+	    "${REPORT[@]}" timehist "$d/timehist.json"
+	rm -f "$WORK/sched.data"
+}
+
 qv_phase() {
 	local spec=$1 name load opts o rep wl comp=on pc=all nice="" sep=""
 	local pct="" dirty=$Q2_DIRTY_MAX kn=up diag="" p
@@ -964,7 +985,11 @@ qv_phase() {
 		done
 	done
 	qv_diag "$name" rr1
-	[ -n "$diag" ] && qv_diag "$name" sw1
+	qv_diag_sched "$name" rr1
+	if [ -n "$diag" ]; then
+		qv_diag "$name" sw1
+		qv_diag_sched "$name" sw1
+	fi
 	phase_snap "$name" end
 	if [ -n "$PIN_PID" ]; then
 		kill "$PIN_PID" 2>/dev/null
