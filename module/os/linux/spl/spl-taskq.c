@@ -36,6 +36,7 @@
 #include <sys/atomic.h>
 #include <sys/kstat.h>
 #include <linux/cpuhotplug.h>
+#include <linux/sched/stat.h>
 #include <linux/mod_compat.h>
 #include <linux/kthread_compat.h>
 
@@ -1098,6 +1099,18 @@ taskq_thread(void *args)
 			/* Perform the requested task */
 			scoped_with_init_fs()
 			    t->tqent_func(t->tqent_arg);
+
+			/*
+			 * A TASKQ_YIELD thread gives its CPU to the threads
+			 * waiting for it between tasks.  Since Linux 6.6 the
+			 * scheduler may otherwise let it run out its slice, a
+			 * few milliseconds, before a thread that became
+			 * runnable on its CPU gets it, even one of higher
+			 * priority.
+			 */
+			if ((tq->tq_flags & TASKQ_YIELD) &&
+			    !single_task_running())
+				yield();
 
 			TQSTAT_DEC(tq, threads_active);
 			if ((t->tqent_flags & TQENT_LIST_MASK) ==
