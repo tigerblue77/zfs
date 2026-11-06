@@ -241,6 +241,15 @@ static int	zio_taskq_bulk_lowpri = 1;
 static int	zio_taskq_bulk_yield = 1;
 
 /*
+ * Run the dp_sync_taskq threads of a pool, which run at minclsyspri, at the
+ * default priority while the pool holds no more than its small share of the
+ * dirty data in the ARC (arc_spa_dirty_small()): the txg sync of a lightly
+ * loaded pool, which its synchronous writers may wait for, then keeps up next
+ * to pools writing in bulk.
+ */
+static int	spa_sync_light_pri = 1;
+
+/*
  * Report any spa_load_verify errors found, but do not fail spa_load.
  * This is used by zdb to analyze non-idle pools.
  */
@@ -11468,6 +11477,15 @@ spa_sync(spa_t *spa, uint64_t txg)
 	spa->spa_syncing_txg = txg;
 	spa->spa_sync_pass = 0;
 
+	boolean_t light = spa_sync_light_pri && arc_spa_dirty_small(spa);
+	if (light != spa->spa_sync_light && spa->spa_syncthreads != NULL) {
+		for (int i = 0; i < spa->spa_alloc_count; i++) {
+			thread_set_pri(spa->spa_syncthreads[i].sti_thread,
+			    light ? defclsyspri : minclsyspri);
+		}
+		spa->spa_sync_light = light;
+	}
+
 	/*
 	 * If there are any pending vdev state changes, convert them
 	 * into config changes that go out with this transaction group.
@@ -12580,6 +12598,9 @@ ZFS_MODULE_PARAM(zfs_zio, zio_, taskq_write_pct, UINT, ZMOD_RW,
 
 ZFS_MODULE_PARAM(zfs_zio, zio_, taskq_bulk_lowpri, INT, ZMOD_RW,
 	"Run bulk I/O taskqs at the default priority");
+
+ZFS_MODULE_PARAM(zfs_spa, spa_, sync_light_pri, INT, ZMOD_RW,
+	"Run the sync threads of lightly dirty pools at the default priority");
 
 ZFS_MODULE_PARAM(zfs_zio, zio_, taskq_bulk_yield, INT, ZMOD_RW,
 	"Bulk I/O taskq threads yield to waiting threads between tasks");

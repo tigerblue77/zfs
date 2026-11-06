@@ -295,6 +295,7 @@ struct spa {
 	/* per-allocator sync thread taskqs */
 	taskq_t		*spa_sync_tq;
 	spa_syncthread_info_t *spa_syncthreads;
+	boolean_t	spa_sync_light;	/* sync threads at defclsyspri */
 
 	spa_aux_vdev_t	spa_spares;		/* hot spares */
 	spa_aux_vdev_t	spa_l2cache;		/* L2ARC cache devices */

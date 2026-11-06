@@ -55,6 +55,7 @@ typedef void (*thread_func_t)(void *) __attribute__((noreturn));
 	arg, len, pp, state, pri)
 
 #define	thread_exit()			spl_thread_exit()
+#define	thread_set_pri(t, pri)		set_user_nice((t), PRIO_TO_NICE(pri))
 #define	thread_join(t)			VERIFY(0)
 #define	curthread			current
 #define	getcomm()			current->comm
