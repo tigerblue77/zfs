@@ -214,6 +214,15 @@ static const boolean_t spa_create_process = B_TRUE; /* no process => no sysdc */
 static uint_t	zio_taskq_write_tpq = 16;
 
 /*
+ * Percentage of online CPUs that run the write issue threads of each pool,
+ * in place of zio_taskq_batch_pct.  These threads compress, encrypt and
+ * checksum all of a txg's writes at once, so a pool syncing a large txg keeps
+ * this share of the CPUs busy for the length of the burst, and the bursts of
+ * several pools add up.
+ */
+static uint_t	zio_taskq_write_pct = 25;
+
+/*
  * Run the issue or interrupt taskqs of an I/O type that has a high-priority
  * counterpart (write issue, read interrupt by default) at the default
  * priority, level with user threads and below every other taskq.  They carry
@@ -1230,7 +1239,7 @@ spa_taskqs_init(spa_t *spa, zio_type_t t, zio_taskq_type_t q)
 	uint_t value = ztip->zti_value;
 	uint_t count = ztip->zti_count;
 	spa_taskqs_t *tqs = &spa->spa_zio_taskq[t][q];
-	uint_t cpus, threads, flags = TASKQ_DYNAMIC;
+	uint_t cpus, threads, pct, flags = TASKQ_DYNAMIC;
 
 	switch (mode) {
 	case ZTI_MODE_FIXED:
@@ -1240,22 +1249,32 @@ spa_taskqs_init(spa_t *spa, zio_type_t t, zio_taskq_type_t q)
 	case ZTI_MODE_SYNC:
 
 		/*
+		 * zio_taskq_write_pct of the CPUs, but no fewer threads than
+		 * the other taskqs get, up to 4: the cap is for large hosts,
+		 * and costs a small one throughput without isolating anything.
+		 */
+		pct = zio_taskq_write_pct;
+		threads = MIN(4, boot_ncpus * zio_taskq_batch_pct / 100);
+		if (boot_ncpus * pct / 100 < threads)
+			pct = (threads * 100 + boot_ncpus - 1) / boot_ncpus;
+
+		/*
 		 * Create one wr_iss taskq for every 'zio_taskq_write_tpq' CPUs,
 		 * not to exceed the number of spa allocators, and align to it.
 		 */
-		threads = MAX(1, boot_ncpus * zio_taskq_batch_pct / 100);
+		threads = MAX(1, boot_ncpus * pct / 100);
 		count = MAX(1, threads / MAX(1, zio_taskq_write_tpq));
-		count = MAX(count, (zio_taskq_batch_pct + 99) / 100);
+		count = MAX(count, (pct + 99) / 100);
 		count = MIN(count, spa->spa_alloc_count);
 		while (spa->spa_alloc_count % count != 0 &&
 		    spa->spa_alloc_count < count * 2)
 			count--;
 
 		/*
-		 * zio_taskq_batch_pct is unbounded and may exceed 100%, but no
+		 * zio_taskq_write_pct is unbounded and may exceed 100%, but no
 		 * single taskq may have more threads than 100% of online cpus.
 		 */
-		value = (zio_taskq_batch_pct + count / 2) / count;
+		value = (pct + count / 2) / count;
 		value = MIN(value, 100);
 		flags |= TASKQ_THREADS_CPU_PCT;
 		break;
@@ -12552,6 +12571,9 @@ ZFS_MODULE_VIRTUAL_PARAM_CALL(zfs_zio, zio_, taskq_free,
 
 ZFS_MODULE_PARAM(zfs_zio, zio_, taskq_write_tpq, UINT, ZMOD_RW,
 	"Number of CPUs per write issue taskq");
+
+ZFS_MODULE_PARAM(zfs_zio, zio_, taskq_write_pct, UINT, ZMOD_RW,
+	"Percentage of CPUs to run write issue threads, per pool");
 
 ZFS_MODULE_PARAM(zfs_zio, zio_, taskq_bulk_lowpri, INT, ZMOD_RW,
 	"Run bulk I/O taskqs at the default priority");
