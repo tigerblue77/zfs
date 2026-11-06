@@ -992,6 +992,12 @@ def cmd_qv(out):
     names = [p[0] for p in phases]
     print("== QV: fast mirror next to slow pool(s), one variant per phase ==")
     print(readf(os.path.join(out, "setup.txt"), "").strip())
+    for f in sorted(os.listdir(out)):
+        if f.startswith("hung-"):
+            print("!! %s (last 60 lines):" % f)
+            for line in (readf(os.path.join(out, f), "") or "").splitlines(
+                    )[-60:]:
+                print("   " + line)
     print("phases: " + "; ".join("%s=%s%s" % (n, l, (":" + ",".join(o))
                                             if o else "")
                                 for n, l, o in phases))

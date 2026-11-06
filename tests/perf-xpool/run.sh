@@ -174,8 +174,28 @@ zvol_dev() {
 # pool_cycle POOL: export and import, which drops the pool's data from
 # the ARC so that the read runs below reach the device.
 pool_cycle() {
-	zpool export "$1" || die "cannot export $1"
-	zpool import -d /dev "$1" || die "cannot import $1"
+	pool_op "$1" export "$1"
+	pool_op "$1" import -d /dev "$1"
+}
+
+# pool_op POOL ARGS...: zpool ARGS under a 10-minute watchdog; on a hang,
+# dump the blocked tasks (sysrq w) and the zpool processes' stacks, and stop.
+pool_op() {
+	local p=$1 f pid
+	shift
+	timeout 600 zpool "$@" && return 0
+	f=$OUT/hung-$p-$1.txt
+	{
+		echo "zpool $* failed or hung (rc $?) at $(date +%T)"
+		for pid in $(pgrep -x zpool); do
+			echo "--- zpool $pid: $(tr '\0' ' ' < /proc/$pid/cmdline)"
+			cat "/proc/$pid/stack"
+		done
+		echo w > /proc/sysrq-trigger
+		sleep 2
+		dmesg | tail -400
+	} > "$f" 2>&1
+	die "zpool $* (see $(basename "$f"))"
 }
 
 idle_baseline() {
@@ -670,8 +690,8 @@ qv_knobs() {
 }
 
 qv_setup_fast() {
-	nullb_add nullb0 0 "$FAST_DEV_MB" discard=1 || die "nullb0"
-	nullb_add nullb1 1 "$FAST_DEV_MB" discard=1 || die "nullb1"
+	nullb_add nullb0 0 "$FAST_DEV_MB" || die "nullb0"
+	nullb_add nullb1 1 "$FAST_DEV_MB" || die "nullb1"
 	zpool create -f -o ashift=12 -O atime=off \
 	    -O primarycache=metadata -O sync=always fastq \
 	    mirror /dev/nullb0 /dev/nullb1 || die "zpool create fastq"
@@ -693,7 +713,7 @@ qv_setup_slow1() {
 	modprobe dm_delay || { mode=nullb-timer; SLOW_IMPORT_DIR=/dev; }
 	for i in $(seq 0 $((SLOW_NDEV - 1))); do
 		idx=$((i + 2))
-		attrs=(discard=1)
+		attrs=()
 		if grep -qw mbps /sys/kernel/config/nullb/features; then
 			attrs+=("mbps=$SLOW_MBPS")
 		fi
@@ -716,7 +736,7 @@ qv_setup_slow1() {
 	udevadm settle
 	echo "slow pool: raidz2 of $SLOW_NDEV x ${SLOW_DEV_MB} MiB null_blk," \
 	    "$mode ${SLOW_DELAY_MS} ms, ${attrs[*]}" >> "$OUT/setup.txt"
-	zpool create -f -o ashift=12 -o autotrim=on -O atime=off slowq \
+	zpool create -f -o ashift=12 -O atime=off slowq \
 	    raidz2 "${devs[@]}" || die "zpool create slowq"
 	zfs create slowq/data || die "zfs create slowq/data"
 	SLOW_POOLS=(slowq)
@@ -747,7 +767,7 @@ qv_setup_slow3() {
 			devs+=("/dev/mapper/slow$p.$i")
 		done
 		udevadm settle
-		zpool create -f -o ashift=12 -o autotrim=on -O atime=off \
+		zpool create -f -o ashift=12 -O atime=off \
 		    "slow$p" raidz2 "${devs[@]}" || die "zpool create slow$p"
 		zfs create "slow$p/data" || die "zfs create slow$p/data"
 		SLOW_POOLS+=("slow$p")
@@ -768,7 +788,7 @@ qv_setup_slow3n() {
 		devs=()
 		for i in $(seq 0 $((SLOW_NDEV - 1))); do
 			idx=$((2 + (p - 1) * SLOW_NDEV + i))
-			attrs=(discard=1)
+			attrs=()
 			if grep -qw mbps /sys/kernel/config/nullb/features; then
 				attrs+=("mbps=$SLOW_MBPS")
 			fi
@@ -781,7 +801,7 @@ qv_setup_slow3n() {
 			devs+=("/dev/mapper/slow$p.$i")
 		done
 		udevadm settle
-		zpool create -f -o ashift=12 -o autotrim=on -O atime=off \
+		zpool create -f -o ashift=12 -O atime=off \
 		    "slow$p" raidz2 "${devs[@]}" || die "zpool create slow$p"
 		zfs create "slow$p/data" || die "zfs create slow$p/data"
 		SLOW_POOLS+=("slow$p")
@@ -890,8 +910,8 @@ qv_cycle_slow() {
 	# Import from the dm-delay devices only: the devices under them carry
 	# the same labels, and importing from those would skip the delay.
 	for p in "${SLOW_POOLS[@]}"; do
-		zpool export "$p" || die "cannot export $p"
-		zpool import -d "$SLOW_IMPORT_DIR" "$p" || die "cannot import $p"
+		pool_op "$p" export "$p"
+		pool_op "$p" import -d "$SLOW_IMPORT_DIR" "$p"
 	done
 	echo "$saved" > $m/zio_taskq_batch_pct
 }
