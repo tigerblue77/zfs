@@ -18,7 +18,7 @@ imported.  Use only memory-backed devices (null_blk), nothing on the VM disk.
       libpam0g-dev python3 python3-dev linux-headers-$(uname -r) fio \
       bpftrace dmsetup linux-perf > /var/tmp/xpool-apt.log 2>&1
     git clone -q --branch perf-xpool-cause https://github.com/tigerblue77/zfs \
-      /var/tmp/xpool-src && cd /var/tmp/xpool-src && git checkout -q e6d2104091
+      /var/tmp/xpool-src && cd /var/tmp/xpool-src && git checkout -q f2ce2029df
     sh autogen.sh > /var/tmp/xpool-build.log 2>&1 && ./configure \
       --prefix=/usr --sysconfdir=/etc --localstatedir=/var --disable-pyzfs \
       >> /var/tmp/xpool-build.log 2>&1 && make -j16 >> /var/tmp/xpool-build.log 2>&1
