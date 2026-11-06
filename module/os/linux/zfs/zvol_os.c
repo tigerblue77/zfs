@@ -501,6 +501,7 @@ zvol_request_impl(zvol_state_t *zv, struct bio *bio, struct request *rq,
 	fstrans_cookie_t cookie = spl_fstrans_mark();
 	uint64_t offset = io_offset(bio, rq);
 	uint64_t size = io_size(bio, rq);
+	boolean_t nowait = io_is_nowait(bio, rq);
 	int rw;
 
 	if (unlikely(!ZVOL_OP_IS_SUPPORTED(ZVOL_OP(bio, rq)))) {
@@ -536,6 +537,17 @@ zvol_request_impl(zvol_state_t *zv, struct bio *bio, struct request *rq,
 
 	if (zvol_request_sync || zv->zv_threading == B_FALSE)
 		force_sync = 1;
+
+	/*
+	 * A request that must not block is only ever queued to a taskq.
+	 * When that would block, or when it would have to be processed here,
+	 * fail it with EAGAIN: its submitter then retries it from a thread
+	 * that may block (an io_uring worker).
+	 */
+	if (nowait && force_sync) {
+		zvol_end_io(bio, rq, SET_ERROR(EAGAIN));
+		goto out;
+	}
 
 	zv_request_t zvr = {
 		.zv = zv,
@@ -580,7 +592,12 @@ zvol_request_impl(zvol_state_t *zv, struct bio *bio, struct request *rq,
 		 * concurrently opened.  Will be released after the i/o
 		 * completes.
 		 */
-		rw_enter(&zv->zv_suspend_lock, RW_READER);
+		if (!nowait) {
+			rw_enter(&zv->zv_suspend_lock, RW_READER);
+		} else if (!rw_tryenter(&zv->zv_suspend_lock, RW_READER)) {
+			zvol_end_io(bio, rq, SET_ERROR(EAGAIN));
+			goto out;
+		}
 
 		/*
 		 * Open a ZIL if this is the first time we have written to this
@@ -588,6 +605,11 @@ zvol_request_impl(zvol_state_t *zv, struct bio *bio, struct request *rq,
 		 * than zv_state_lock so that we don't need to acquire an
 		 * additional lock in this path.
 		 */
+		if (zv->zv_zilog == NULL && nowait) {
+			rw_exit(&zv->zv_suspend_lock);
+			zvol_end_io(bio, rq, SET_ERROR(EAGAIN));
+			goto out;
+		}
 		if (zv->zv_zilog == NULL) {
 			rw_exit(&zv->zv_suspend_lock);
 			rw_enter(&zv->zv_suspend_lock, RW_WRITER);
@@ -635,18 +657,24 @@ zvol_request_impl(zvol_state_t *zv, struct bio *bio, struct request *rq,
 		if (io_is_discard(bio, rq) || io_is_write_zeroes(bio, rq)) {
 			if (force_sync) {
 				zvol_discard(&zvr);
-			} else {
-				task = zv_request_task_create(zvr);
+			} else if ((task = zv_request_task_create(zvr,
+			    nowait)) != NULL) {
 				taskq_dispatch_ent(ztqs->tqs_taskq[tq_idx],
 				    zvol_discard_task, task, 0, &task->ent);
+			} else {
+				rw_exit(&zv->zv_suspend_lock);
+				zvol_end_io(bio, rq, SET_ERROR(EAGAIN));
 			}
 		} else {
 			if (force_sync) {
 				zvol_write(&zvr);
-			} else {
-				task = zv_request_task_create(zvr);
+			} else if ((task = zv_request_task_create(zvr,
+			    nowait)) != NULL) {
 				taskq_dispatch_ent(ztqs->tqs_taskq[tq_idx],
 				    zvol_write_task, task, 0, &task->ent);
+			} else {
+				rw_exit(&zv->zv_suspend_lock);
+				zvol_end_io(bio, rq, SET_ERROR(EAGAIN));
 			}
 		}
 	} else {
@@ -660,15 +688,23 @@ zvol_request_impl(zvol_state_t *zv, struct bio *bio, struct request *rq,
 			goto out;
 		}
 
-		rw_enter(&zv->zv_suspend_lock, RW_READER);
+		if (!nowait) {
+			rw_enter(&zv->zv_suspend_lock, RW_READER);
+		} else if (!rw_tryenter(&zv->zv_suspend_lock, RW_READER)) {
+			zvol_end_io(bio, rq, SET_ERROR(EAGAIN));
+			goto out;
+		}
 
 		/* See comment in WRITE case above. */
 		if (force_sync) {
 			zvol_read(&zvr);
-		} else {
-			task = zv_request_task_create(zvr);
+		} else if ((task = zv_request_task_create(zvr,
+		    nowait)) != NULL) {
 			taskq_dispatch_ent(ztqs->tqs_taskq[tq_idx],
 			    zvol_read_task, task, 0, &task->ent);
+		} else {
+			rw_exit(&zv->zv_suspend_lock);
+			zvol_end_io(bio, rq, SET_ERROR(EAGAIN));
 		}
 	}
 
