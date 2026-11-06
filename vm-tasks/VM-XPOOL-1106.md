@@ -3,7 +3,7 @@
 Goal: repeat on a 16-vCPU VM (Debian 13, kernel 6.12, 11-16 GiB)
 the runner measurements of how much a slow RAID-Z2 pool writing flat out
 slows a fast mirror pool, and how much of it the pool-isolation prototype
-(5 commits, each behind a tunable) removes.  The 4-vCPU runners exaggerate
+(each commit behind a tunable) removes.  The 4-vCPU runners exaggerate
 CPU starvation; this run says what remains with 16 vCPUs.
 
 Rules: disposable VM only (it creates null_blk/dm devices, pools named fastq,
@@ -28,7 +28,7 @@ imported.  Use only memory-backed devices (null_blk), nothing on the VM disk.
 
 ## 2. Runs (each ~45-60 min; the tunables make A/B/A inside one run)
 
-Run 1, one slow pool (vm1); in the -sep phases the slow pool's threads and
+Run 1, one slow pool (vm1, ~75 min); in the -sep phases the slow pool's threads and
 load run on the first half of the CPUs, the fast pool's on the second half.
 Device sizes keep the worst case under 9 GiB of RAM (VM 106 has 11 GiB):
 
@@ -39,27 +39,32 @@ Device sizes keep the worst case under 9 GiB of RAM (VM 106 has 11 GiB):
       QV_SLOW_CPUS=0-$(($(nproc) / 2 - 1)) \
       QV_FAST_CPUS=$(($(nproc) / 2))-$(($(nproc) - 1)) \
       QV_PHASES="alone:none sw:write:diag sw-nocomp:write:comp=off \
-        sw-w:write:kn=w sw-wy:write:kn=wy sw-all:write:kn=all,diag \
-        sw-up2:write alone-sep:none:sep sw-sep:write:sep \
-        alone-all:none:kn=all alone2:none" \
+        sw-pct25:write:pct=25 sw-w:write:kn=w sw-wy:write:kn=wy \
+        sw-w2:write:kn=w2 sw-all:write:kn=all,diag sw-up2:write \
+        alone-sep:none:sep sw-sep:write:sep alone-all:none:kn=all \
+        alone2:none" \
       tests/perf-xpool/run.sh qv > /var/tmp/vm1.log 2>&1; tail -1 /var/tmp/vm1.log
 
-Run 2, three slow pools on null_blk (vm3), the CPU load of three HDD pools:
+Run 2, three slow pools on null_blk (vm3, ~50 min), the CPU load of three HDD pools:
 
     cd /var/tmp/xpool-src && sudo env OUT=/var/tmp/perf-xpool/vm3 \
       QV_POOLS=3n QV3N_DEV_MB=256 QV_SLOW_WRITE_MB=256 FAST_DEV_MB=1024 \
       ARC_MAX=2147483648 \
       Q2_DIRTY_MAX=1610612736 REPS=3 Q2_RUNTIME=20 DIAG_RUNTIME=20 \
       QV_PHASES="alone:none m3w:write:diag m3w-nocomp:write:comp=off \
-        m3w-w:write:kn=w m3w-wy:write:kn=wy m3w-all:write:kn=all,diag \
-        m3w-up2:write alone2:none" \
+        m3w-pct25:write:pct=25 m3w-w2:write:kn=w2 \
+        m3w-all:write:kn=all,diag m3w-up2:write alone2:none" \
       tests/perf-xpool/run.sh qv > /var/tmp/vm3.log 2>&1; tail -1 /var/tmp/vm3.log
 
 Before run 2, destroy run 1's devices (section 4, without the last two
 lines), since both use the same device names.  In each run, A = sw/m3w
 (kn=up: master's taskqs and FIFO), B = *-w (bulk at nice 0), *-wy (bulk
-threads yield between tasks) and *-all (all 5 prototype commits), A again =
-*-up2; the -nocomp and -sep phases say how much of the gap is CPU.  Each
+threads yield between tasks), *-w2 (both) and *-all (all tunables), A again
+= *-up2; -nocomp, -pct25 (the slow pools get zio_taskq_batch_pct=25: a
+quarter of the CPUs for their taskq threads) and -sep say how much of the
+gap is CPU.  On the 4-vCPU runners -pct25 closed 87-90 % of the p99.9 excess
+and -w2 43-80 %: the question for this VM is what remains of both at 16
+vCPUs.  Each
 phase also has a perf sched run: its "sched delay" lines give the wakeup-to-run
 delay tail of the fast pool's fio and completion threads and which threads
 held the CPU meanwhile -- the line to look at on this 6.12 kernel.
