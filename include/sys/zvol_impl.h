@@ -65,6 +65,7 @@ typedef struct zv_request_stack {
 	struct bio	*bio;
 #ifdef __linux__
 	struct request	*rq;
+	boolean_t	inflight;	/* counted in the zvol's zvo_inflight */
 #endif
 } zv_request_t;
 

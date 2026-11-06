@@ -3046,8 +3046,30 @@ property asks for it to be processed by its submitter;
 the submitter then retries it from a thread that may block.
 .Li blk-mq
 zvols always take them.
+A request is also failed with
+.Er EAGAIN
+when the zvol already has
+.Sy zvol_nowait_max_inflight
+requests in flight.
 This parameter is read when a zvol's block device is created, as when the
 zvol is created or its pool imported, and only applies on Linux.
+.
+.It Sy zvol_nowait_max_inflight Ns = Ns Sy 8 Pq uint
+Number of requests in flight from which a zvol taking non-blocking submissions
+.Pq see Sy zvol_nowait
+fails a new one with
+.Er EAGAIN ,
+so that its submitter retries it from a thread that may block.
+A deep queue is then issued by several of
+.Xr io_uring 7 Ns 's
+worker threads instead of entirely by the submitting thread, which would
+otherwise limit throughput when it is the only one, as QEMU's thread for a
+disk is.
+Shallower queues keep being issued by their submitter, without the hand-off to
+a worker.
+.Sy 0
+lifts the limit.
+Only applies on Linux.
 .
 .It Sy zvol_num_taskqs Ns = Ns Sy 0 Pq uint
 Number of zvol taskqs.

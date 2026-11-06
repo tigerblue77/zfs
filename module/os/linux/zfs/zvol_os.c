@@ -55,6 +55,14 @@ static unsigned int zvol_open_timeout_ms = 1000;
  */
 static unsigned int zvol_nowait = 1;
 
+/*
+ * Such a zvol queues a non-blocking bio from its submitter only while it has
+ * fewer requests in flight than this; deeper, it fails the bio with EAGAIN.
+ * The submitter's workers then share the cost of issuing a deep queue, which
+ * a single submitting thread would otherwise bear alone.  0 lifts the limit.
+ */
+static unsigned int zvol_nowait_max_inflight = 8;
+
 static unsigned int zvol_blk_mq_threads = 0;
 static unsigned int zvol_blk_mq_actual_threads;
 static boolean_t zvol_use_blk_mq = B_FALSE;
@@ -103,9 +111,42 @@ struct zvol_state_os {
 
 	/* Set from the global 'zvol_use_blk_mq' at zvol load */
 	boolean_t use_blk_mq;
+
+	/* Takes non-blocking bios, from 'zvol_nowait' at zvol load */
+	boolean_t zvo_nowait;
+	/* If so, its bios being queued or processed */
+	atomic_t zvo_inflight;
 };
 
 static struct ida zvol_ida;
+
+/*
+ * Queue a request to a zvol taskq, counting it until zvol_request_end() if it
+ * is a bio to a zvol that takes non-blocking bios.
+ */
+static inline void
+zvol_request_dispatch(taskq_t *tq, task_func_t *func, zv_request_task_t *task)
+{
+	struct zvol_state_os *zso = task->zvr.zv->zv_zso;
+
+	if (task->zvr.bio != NULL && zso->zvo_nowait) {
+		task->zvr.inflight = B_TRUE;
+		atomic_inc(&zso->zvo_inflight);
+	}
+	taskq_dispatch_ent(tq, func, task, 0, &task->ent);
+}
+
+/*
+ * End a request that is being processed.  Its zvol may go away as soon as
+ * its last request has ended, so stop counting it first.
+ */
+static inline void
+zvol_request_end(zv_request_t *zvr, int error)
+{
+	if (zvr->inflight)
+		atomic_dec(&zvr->zv->zv_zso->zvo_inflight);
+	zvol_end_io(zvr->bio, zvr->rq, error);
+}
 
 /*
  * This is called when a new block multiqueue request comes in.  A request
@@ -211,7 +252,7 @@ zvol_write(zv_request_t *zvr)
 		error = zil_commit(zv->zv_zilog, ZVOL_OBJ);
 		if (error != 0) {
 			rw_exit(&zv->zv_suspend_lock);
-			zvol_end_io(bio, rq, -error);
+			zvol_request_end(zvr, -error);
 			return;
 		}
 	}
@@ -219,7 +260,7 @@ zvol_write(zv_request_t *zvr)
 	/* Some requests are just for flush and nothing else. */
 	if (io_size(bio, rq) == 0) {
 		rw_exit(&zv->zv_suspend_lock);
-		zvol_end_io(bio, rq, 0);
+		zvol_request_end(zvr, 0);
 		return;
 	}
 
@@ -287,7 +328,7 @@ zvol_write(zv_request_t *zvr)
 		blk_generic_end_io_acct(q, disk, WRITE, bio, start_time);
 	}
 
-	zvol_end_io(bio, rq, error);
+	zvol_request_end(zvr, error);
 }
 
 static void
@@ -383,7 +424,7 @@ unlock:
 		    start_time);
 	}
 
-	zvol_end_io(bio, rq, error);
+	zvol_request_end(zvr, error);
 }
 
 static void
@@ -461,7 +502,7 @@ zvol_read(zv_request_t *zvr)
 		blk_generic_end_io_acct(q, disk, READ, bio, start_time);
 	}
 
-	zvol_end_io(bio, rq, error);
+	zvol_request_end(zvr, error);
 }
 
 static void
@@ -558,11 +599,15 @@ zvol_request_impl(zvol_state_t *zv, struct bio *bio, struct request *rq,
 
 	/*
 	 * A non-blocking bio is still in its submitter's task, and is only
-	 * ever queued to a taskq.  When that would block, or when the bio
-	 * should be processed here, fail it with EAGAIN: its submitter then
-	 * retries it from a thread that may block (an io_uring worker).
+	 * ever queued to a taskq.  When that would block, when the bio should
+	 * be processed here, or when the zvol already has
+	 * zvol_nowait_max_inflight requests in flight, fail it with EAGAIN:
+	 * its submitter then retries it from a thread that may block (an
+	 * io_uring worker).
 	 */
-	if (nowait && force_sync) {
+	if (nowait && (force_sync || (zvol_nowait_max_inflight != 0 &&
+	    (uint_t)atomic_read(&zv->zv_zso->zvo_inflight) >=
+	    zvol_nowait_max_inflight))) {
 		zvol_end_io(bio, rq, SET_ERROR(EAGAIN));
 		goto out;
 	}
@@ -677,8 +722,8 @@ zvol_request_impl(zvol_state_t *zv, struct bio *bio, struct request *rq,
 				zvol_discard(&zvr);
 			} else if ((task = zv_request_task_create(zvr,
 			    nowait)) != NULL) {
-				taskq_dispatch_ent(ztqs->tqs_taskq[tq_idx],
-				    zvol_discard_task, task, 0, &task->ent);
+				zvol_request_dispatch(ztqs->tqs_taskq[tq_idx],
+				    zvol_discard_task, task);
 			} else {
 				rw_exit(&zv->zv_suspend_lock);
 				zvol_end_io(bio, rq, SET_ERROR(EAGAIN));
@@ -688,8 +733,8 @@ zvol_request_impl(zvol_state_t *zv, struct bio *bio, struct request *rq,
 				zvol_write(&zvr);
 			} else if ((task = zv_request_task_create(zvr,
 			    nowait)) != NULL) {
-				taskq_dispatch_ent(ztqs->tqs_taskq[tq_idx],
-				    zvol_write_task, task, 0, &task->ent);
+				zvol_request_dispatch(ztqs->tqs_taskq[tq_idx],
+				    zvol_write_task, task);
 			} else {
 				rw_exit(&zv->zv_suspend_lock);
 				zvol_end_io(bio, rq, SET_ERROR(EAGAIN));
@@ -718,8 +763,8 @@ zvol_request_impl(zvol_state_t *zv, struct bio *bio, struct request *rq,
 			zvol_read(&zvr);
 		} else if ((task = zv_request_task_create(zvr,
 		    nowait)) != NULL) {
-			taskq_dispatch_ent(ztqs->tqs_taskq[tq_idx],
-			    zvol_read_task, task, 0, &task->ent);
+			zvol_request_dispatch(ztqs->tqs_taskq[tq_idx],
+			    zvol_read_task, task);
 		} else {
 			rw_exit(&zv->zv_suspend_lock);
 			zvol_end_io(bio, rq, SET_ERROR(EAGAIN));
@@ -1479,6 +1524,7 @@ zvol_alloc(dev_t dev, const char *name, uint64_t dsobj, uint64_t volsize,
 
 	zvol_queue_limits_t limits;
 	zvol_queue_limits_init(&limits, zv, zv->zv_zso->use_blk_mq);
+	zso->zvo_nowait = limits.zql_nowait;
 
 	/*
 	 * The block layer has 3 interfaces for getting BIOs:
@@ -1561,6 +1607,7 @@ zvol_os_remove_minor(zvol_state_t *zv)
 	ASSERT(zv->zv_flags & ZVOL_REMOVING);
 
 	struct zvol_state_os *zso = zv->zv_zso;
+	ASSERT0(atomic_read(&zso->zvo_inflight));
 	zv->zv_zso = NULL;
 
 	/* Clearing private_data will make new callers return immediately. */
@@ -1990,6 +2037,10 @@ MODULE_PARM_DESC(zvol_use_blk_mq, "Use the blk-mq API for zvols");
 module_param(zvol_nowait, uint, 0644);
 MODULE_PARM_DESC(zvol_nowait,
 	"Let bio-based zvols take non-blocking submissions");
+
+module_param(zvol_nowait_max_inflight, uint, 0644);
+MODULE_PARM_DESC(zvol_nowait_max_inflight,
+	"Requests in flight beyond which non-blocking bios get EAGAIN");
 
 module_param(zvol_blk_mq_blocks_per_thread, uint, 0644);
 MODULE_PARM_DESC(zvol_blk_mq_blocks_per_thread,

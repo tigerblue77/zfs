@@ -53,6 +53,7 @@ typeset tmpdir="$(mktemp -d "$TEST_BASE_DIR/zvol_stress_fio_state.XXXXXX")"
 log_must save_tunable VOL_USE_BLK_MQ
 log_must save_tunable VOL_REQUEST_SYNC
 log_must save_tunable VOL_NOWAIT
+log_must save_tunable VOL_NOWAIT_MAX_INFLIGHT
 
 function create_zvols
 {
@@ -128,6 +129,7 @@ function cleanup
 	log_must restore_tunable VOL_USE_BLK_MQ
 	log_must restore_tunable VOL_REQUEST_SYNC
 	log_must restore_tunable VOL_NOWAIT
+	log_must restore_tunable VOL_NOWAIT_MAX_INFLIGHT
 
 	# Remove all fio's leftover state files
 	if [ -n "$tmpdir" ] ; then
@@ -160,16 +162,21 @@ destroy_zvols
 # O_DIRECT through io_uring, whose requests are issued without blocking
 # (REQ_NOWAIT) to bio-based zvols with zvol_nowait and to blk-mq zvols, and
 # from io_uring's workers otherwise or when a bio-based zvol fails them with
-# EAGAIN, as it does in zvol sync mode.  Only if fio and the kernel support
+# EAGAIN, as it does in zvol sync mode and, with zvol_nowait_max_inflight=1,
+# whenever another request is in flight.  Only if fio and the kernel support
 # io_uring.
 if is_linux && fio --name=probe --ioengine=io_uring --size=64k --bs=4k \
     --rw=write --filename="$tmpdir/probe" > /dev/null 2>&1 ; then
 	rm -f "$tmpdir/probe"
-	# blk-mq:nowait:sync
-	for mode in 0:1:0 0:0:0 0:1:1 1:1:1 ; do
-		set_blk_mq ${mode%%:*}
+	typeset max_inflight=$(get_tunable VOL_NOWAIT_MAX_INFLIGHT)
+	# blk-mq:nowait:sync:nowait_max_inflight
+	for mode in 0:1:0:$max_inflight 0:1:0:1 0:0:0:$max_inflight \
+	    0:1:1:$max_inflight 1:1:1:$max_inflight ; do
+		set_blk_mq $(echo $mode | cut -d: -f1)
 		log_must set_tunable32 VOL_NOWAIT $(echo $mode | cut -d: -f2)
-		set_zvol_sync ${mode##*:}
+		set_zvol_sync $(echo $mode | cut -d: -f3)
+		log_must set_tunable32 VOL_NOWAIT_MAX_INFLIGHT \
+		    $(echo $mode | cut -d: -f4)
 		create_zvols
 		do_zvol_stress io_uring 1
 		destroy_zvols
