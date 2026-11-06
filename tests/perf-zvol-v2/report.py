@@ -125,10 +125,10 @@ def load_row(d):
     r = {"iops": x["iops"], "lat": x["lat_ns"]["mean"] / 1000.0,
          "p99": x["clat_ns"]["percentile"].get("99.000000", 0) / 1000.0,
          "ios": x["total_ios"]}
-    if len(pre) == 3 and len(post) == 3 and x["total_ios"]:
-        r["cpu_io"] = (int(post[0]) - int(pre[0])) / HZ * 1e6 / \
-            x["total_ios"]
-        r["ctx_io"] = (int(post[1]) - int(pre[1])) / x["total_ios"]
+    if len(pre) == 3 and len(post) == 3 and x["iops"]:
+        ios = x["iops"] * (float(post[2]) - float(pre[2]))
+        r["cpu_io"] = (int(post[0]) - int(pre[0])) / HZ * 1e6 / ios
+        r["ctx_io"] = (int(post[1]) - int(pre[1])) / ios
     r["thr"] = threads_delta(d)
     pst = readf(d + "/perf-stat.txt")
     if pst:

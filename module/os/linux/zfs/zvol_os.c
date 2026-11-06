@@ -55,14 +55,6 @@ static unsigned int zvol_open_timeout_ms = 1000;
  */
 static unsigned int zvol_nowait = 1;
 
-/*
- * Such a zvol queues a non-blocking bio from its submitter only while it has
- * fewer requests in flight than this; deeper, it fails the bio with EAGAIN.
- * The submitter's workers then share the cost of issuing a deep queue, which
- * a single submitting thread would otherwise bear alone.  0 lifts the limit.
- */
-static unsigned int zvol_nowait_max_inflight = 8;
-
 static unsigned int zvol_blk_mq_threads = 0;
 static unsigned int zvol_blk_mq_actual_threads;
 static boolean_t zvol_use_blk_mq = B_FALSE;
@@ -112,40 +104,61 @@ struct zvol_state_os {
 	/* Set from the global 'zvol_use_blk_mq' at zvol load */
 	boolean_t use_blk_mq;
 
-	/* Takes non-blocking bios, from 'zvol_nowait' at zvol load */
-	boolean_t zvo_nowait;
-	/* If so, its bios being queued or processed */
-	atomic_t zvo_inflight;
+	/* Requests staged for the next taskq thread to queue them */
+	spinlock_t zvo_staged_lock;
+	struct list_head zvo_staged;
 };
 
 static struct ida zvol_ida;
 
 /*
- * Queue a request to a zvol taskq, counting it until zvol_request_end() if it
- * is a bio to a zvol that takes non-blocking bios.
+ * Run a request staged by zvol_request_dispatch(), after queueing the ones
+ * staged since then on its zvol.
  */
-static inline void
-zvol_request_dispatch(taskq_t *tq, task_func_t *func, zv_request_task_t *task)
+static void
+zvol_staged_task(void *arg)
 {
+	zv_request_task_t *task = arg;
 	struct zvol_state_os *zso = task->zvr.zv->zv_zso;
+	zv_request_task_t *t, *next;
+	LIST_HEAD(staged);
 
-	if (task->zvr.bio != NULL && zso->zvo_nowait) {
-		task->zvr.inflight = B_TRUE;
-		atomic_inc(&zso->zvo_inflight);
+	spin_lock(&zso->zvo_staged_lock);
+	list_splice_init(&zso->zvo_staged, &staged);
+	spin_unlock(&zso->zvo_staged_lock);
+
+	/* A request may end as soon as it is queued: no list use after. */
+	list_for_each_entry_safe(t, next, &staged, zvr.node) {
+		if (t != task) {
+			taskq_dispatch_ent(t->zvr.tq, t->zvr.func, t, 0,
+			    &t->ent);
+		}
 	}
-	taskq_dispatch_ent(tq, func, task, 0, &task->ent);
+	task->zvr.func(task);
 }
 
 /*
- * End a request that is being processed.  Its zvol may go away as soon as
- * its last request has ended, so stop counting it first.
+ * Queue a request to a zvol taskq.  Waking a taskq thread is most of what
+ * this costs, and a task that submits a deep queue by itself, as QEMU's
+ * thread for a disk does through io_uring, can spend much of its time doing
+ * so.  So stage the request on its zvol, and queue it with a wakeup only if
+ * nothing was staged: the taskq thread that runs it then queues the requests
+ * staged meanwhile, and its wakeups, before processing its own.
  */
-static inline void
-zvol_request_end(zv_request_t *zvr, int error)
+static void
+zvol_request_dispatch(taskq_t *tq, task_func_t *func, zv_request_task_t *task)
 {
-	if (zvr->inflight)
-		atomic_dec(&zvr->zv->zv_zso->zvo_inflight);
-	zvol_end_io(zvr->bio, zvr->rq, error);
+	struct zvol_state_os *zso = task->zvr.zv->zv_zso;
+	boolean_t first;
+
+	task->zvr.tq = tq;
+	task->zvr.func = func;
+	spin_lock(&zso->zvo_staged_lock);
+	first = list_empty(&zso->zvo_staged);
+	list_add_tail(&task->zvr.node, &zso->zvo_staged);
+	spin_unlock(&zso->zvo_staged_lock);
+	if (first)
+		taskq_dispatch_ent(tq, zvol_staged_task, task, 0, &task->ent);
 }
 
 /*
@@ -252,7 +265,7 @@ zvol_write(zv_request_t *zvr)
 		error = zil_commit(zv->zv_zilog, ZVOL_OBJ);
 		if (error != 0) {
 			rw_exit(&zv->zv_suspend_lock);
-			zvol_request_end(zvr, -error);
+			zvol_end_io(bio, rq, -error);
 			return;
 		}
 	}
@@ -260,7 +273,7 @@ zvol_write(zv_request_t *zvr)
 	/* Some requests are just for flush and nothing else. */
 	if (io_size(bio, rq) == 0) {
 		rw_exit(&zv->zv_suspend_lock);
-		zvol_request_end(zvr, 0);
+		zvol_end_io(bio, rq, 0);
 		return;
 	}
 
@@ -328,7 +341,7 @@ zvol_write(zv_request_t *zvr)
 		blk_generic_end_io_acct(q, disk, WRITE, bio, start_time);
 	}
 
-	zvol_request_end(zvr, error);
+	zvol_end_io(bio, rq, error);
 }
 
 static void
@@ -424,7 +437,7 @@ unlock:
 		    start_time);
 	}
 
-	zvol_request_end(zvr, error);
+	zvol_end_io(bio, rq, error);
 }
 
 static void
@@ -502,7 +515,7 @@ zvol_read(zv_request_t *zvr)
 		blk_generic_end_io_acct(q, disk, READ, bio, start_time);
 	}
 
-	zvol_request_end(zvr, error);
+	zvol_end_io(bio, rq, error);
 }
 
 static void
@@ -599,15 +612,11 @@ zvol_request_impl(zvol_state_t *zv, struct bio *bio, struct request *rq,
 
 	/*
 	 * A non-blocking bio is still in its submitter's task, and is only
-	 * ever queued to a taskq.  When that would block, when the bio should
-	 * be processed here, or when the zvol already has
-	 * zvol_nowait_max_inflight requests in flight, fail it with EAGAIN:
-	 * its submitter then retries it from a thread that may block (an
-	 * io_uring worker).
+	 * ever queued to a taskq.  When that would block, or when the bio
+	 * should be processed here, fail it with EAGAIN: its submitter then
+	 * retries it from a thread that may block (an io_uring worker).
 	 */
-	if (nowait && (force_sync || (zvol_nowait_max_inflight != 0 &&
-	    (uint_t)atomic_read(&zv->zv_zso->zvo_inflight) >=
-	    zvol_nowait_max_inflight))) {
+	if (nowait && force_sync) {
 		zvol_end_io(bio, rq, SET_ERROR(EAGAIN));
 		goto out;
 	}
@@ -1521,10 +1530,11 @@ zvol_alloc(dev_t dev, const char *name, uint64_t dsobj, uint64_t volsize,
 	cv_init(&zv->zv_removing_cv, NULL, CV_DEFAULT, NULL);
 
 	zv->zv_zso->use_blk_mq = zvol_use_blk_mq;
+	spin_lock_init(&zso->zvo_staged_lock);
+	INIT_LIST_HEAD(&zso->zvo_staged);
 
 	zvol_queue_limits_t limits;
 	zvol_queue_limits_init(&limits, zv, zv->zv_zso->use_blk_mq);
-	zso->zvo_nowait = limits.zql_nowait;
 
 	/*
 	 * The block layer has 3 interfaces for getting BIOs:
@@ -1607,7 +1617,7 @@ zvol_os_remove_minor(zvol_state_t *zv)
 	ASSERT(zv->zv_flags & ZVOL_REMOVING);
 
 	struct zvol_state_os *zso = zv->zv_zso;
-	ASSERT0(atomic_read(&zso->zvo_inflight));
+	ASSERT(list_empty(&zso->zvo_staged));
 	zv->zv_zso = NULL;
 
 	/* Clearing private_data will make new callers return immediately. */
@@ -2037,10 +2047,6 @@ MODULE_PARM_DESC(zvol_use_blk_mq, "Use the blk-mq API for zvols");
 module_param(zvol_nowait, uint, 0644);
 MODULE_PARM_DESC(zvol_nowait,
 	"Let bio-based zvols take non-blocking submissions");
-
-module_param(zvol_nowait_max_inflight, uint, 0644);
-MODULE_PARM_DESC(zvol_nowait_max_inflight,
-	"Requests in flight beyond which non-blocking bios get EAGAIN");
 
 module_param(zvol_blk_mq_blocks_per_thread, uint, 0644);
 MODULE_PARM_DESC(zvol_blk_mq_blocks_per_thread,

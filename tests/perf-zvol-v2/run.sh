@@ -168,23 +168,28 @@ ctxt() {
 	awk '/^ctxt/{print $2}' /proc/stat
 }
 
-# row LABEL RW BS QD NJ [FIO ARGS...]
+# row LABEL RW BS QD NJ [FIO ARGS...]: one fio run; /proc/stat and thread
+# snapshots from 2 s into it to 1 s before its end, while fio runs.
 row() {
-	local label=$1 rw=$2 bs=$3 qd=$4 nj=$5 dir dev
+	local label=$1 rw=$2 bs=$3 qd=$4 nj=$5 dir dev fpid
 	shift 5
 	dir=$OUT/runs/$label
 	mkdir -p "$dir"
 	dev=$(zvol_dev) || die "no zvol device for $label"
-	echo "$(busy) $(ctxt) $(date +%s.%N)" > "$dir/pre.stat"
-	tsnap "$dir/pre.threads.json"
 	fio --name=j --filename="$dev" --ioengine=io_uring --rw="$rw" \
 	    --bs="$bs" --iodepth="$qd" --numjobs="$nj" --direct=1 \
 	    --time_based --runtime="$RT" --norandommap --randrepeat=0 \
 	    --group_reporting --output-format=json --output="$dir/fio.json" \
-	    "$@" > "$dir/fio.stderr" 2>&1
-	echo $? > "$dir/rc"
+	    "$@" > "$dir/fio.stderr" 2>&1 &
+	fpid=$!
+	sleep 2
+	echo "$(busy) $(ctxt) $(date +%s.%N)" > "$dir/pre.stat"
+	tsnap "$dir/pre.threads.json"
+	sleep $((RT - 3))
 	tsnap "$dir/post.threads.json"
 	echo "$(busy) $(ctxt) $(date +%s.%N)" > "$dir/post.stat"
+	wait "$fpid"
+	echo $? > "$dir/rc"
 	python3 -I "$HERE/report.py" line "$dir"
 }
 
@@ -212,6 +217,8 @@ main_rows() {
 	row "$n.osync-4k-randwrite-1x1.r$r" randwrite 4k 1 1 --sync=1
 	row "$n.uring-16k-write-32x1.r$r" write 16k 32 1
 	zpool sync "$POOL"
+	row "$n.libaio-4k-randread-32x1.r$r" randread 4k 32 1 --ioengine=libaio
+	row "$n.psync-4k-randread-1x1.r$r" randread 4k 1 1 --ioengine=psync
 }
 
 mq_rows() {
@@ -263,7 +270,7 @@ diag_rows() {
 	warmup
 	diag_row "$n.diag-4k-read-32x1" read 4k 32 1
 	diag_row "$n.diag-4k-randread-1x1" randread 4k 1 1
-	diag_row "$n.diag-4k-randread-32x8" randread 4k 32 8
+	diag_row "$n.diag-16k-randread-32x1" randread 16k 32 1
 	diag_row "$n.diag-16k-write-32x1" write 16k 32 1
 	zpool sync "$POOL"
 }
