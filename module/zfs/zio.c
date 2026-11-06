@@ -60,6 +60,14 @@ const char *const zio_type_name[ZIO_TYPES] = {
 };
 
 int zio_dva_throttle_enabled = B_TRUE;
+
+/*
+ * Issue the asynchronous writes of a pool that holds no more than its small
+ * share of the dirty data in the ARC (arc_spa_dirty_small()) in the
+ * high-priority write issue taskq, so that the txg sync of a lightly loaded
+ * pool does not wait behind the bulk writes of others.
+ */
+static int zio_taskq_write_light = 1;
 static int zio_deadman_log_all = B_FALSE;
 
 /*
@@ -2250,6 +2258,16 @@ zio_taskq_dispatch_func(zio_t *zio, zio_taskq_type_t q, boolean_t cutinline,
 			cutinline = B_TRUE;
 	} else if (zio->io_priority == ZIO_PRIORITY_SYNC_READ &&
 	    spa->spa_zio_taskq[t][q + 1].stqs_count != 0) {
+		q++;
+	} else if (t == ZIO_TYPE_WRITE && q == ZIO_TASKQ_ISSUE &&
+	    zio_taskq_write_light &&
+	    spa->spa_zio_taskq[t][q + 1].stqs_count != 0 &&
+	    arc_spa_dirty_small(spa)) {
+		/*
+		 * A pool holding little of the dirty data is not the one
+		 * loading the CPUs with bulk writes: issue its asynchronous
+		 * writes, its own txg sync, at high priority.
+		 */
 		q++;
 	}
 
@@ -6698,6 +6716,9 @@ ZFS_MODULE_PARAM(zfs, zfs_, sync_pass_dont_compress, UINT, ZMOD_RW,
 
 ZFS_MODULE_PARAM(zfs, zfs_, sync_pass_rewrite, UINT, ZMOD_RW,
 	"Rewrite new bps starting in this pass");
+
+ZFS_MODULE_PARAM(zfs_zio, zio_, taskq_write_light, INT, ZMOD_RW,
+	"Issue the async writes of lightly dirty pools at high priority");
 
 ZFS_MODULE_PARAM(zfs_zio, zio_, dva_throttle_enabled, INT, ZMOD_RW,
 	"Throttle block allocations in the ZIO pipeline");
