@@ -7212,6 +7212,25 @@ arc_tempreserve_clear(uint64_t reserve)
 	ASSERT((int64_t)arc_tempreserve >= 0);
 }
 
+/*
+ * Whether this pool holds no more than zfs_arc_pool_dirty_percent of the
+ * anonymous data in the ARC, the share below which arc_tempreserve_space()
+ * does not throttle it: some other pool is the one filling the ARC.
+ */
+boolean_t
+arc_spa_dirty_small(spa_t *spa)
+{
+	dsl_pool_t *dp = spa_get_dsl(spa);
+
+	if (dp == NULL)
+		return (B_FALSE);
+	uint64_t anon_size =
+	    zfs_refcount_count(&arc_anon->arcs_size[ARC_BUFC_DATA]) +
+	    zfs_refcount_count(&arc_anon->arcs_size[ARC_BUFC_METADATA]);
+	return (dp->dp_dirty_total <=
+	    anon_size * zfs_arc_pool_dirty_percent / 100);
+}
+
 int
 arc_tempreserve_space(spa_t *spa, uint64_t reserve, uint64_t txg)
 {

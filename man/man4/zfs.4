@@ -2958,6 +2958,15 @@ compression.
 Only effective on Linux.
 Set value only applies to pools imported/created after that.
 .
+.It Sy zio_taskq_write_light Ns = Ns Sy 1 Ns | Ns 0 Pq int
+Issue the asynchronous writes of a pool that holds no more than its small share
+of the dirty data in the ARC (the share exempt from the ARC's dirty-data
+throttle) in the high-priority write issue queue, instead of the bulk queue
+described under
+.Sy zio_taskq_bulk_lowpri .
+The txg sync of a lightly loaded pool, which its synchronous writers may wait
+for, then does not wait behind the bulk writes of other pools.
+.
 .It Sy zio_taskq_write_pct Ns = Ns Sy 25 Ns % Pq uint
 Percentage of online CPUs which will run a write issue thread, for each pool,
 but no fewer threads than
