@@ -26,7 +26,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: wa
+          - name: pw
             pools: "1"
             wl: "rr1 rr4 sw1 sw4"
             wmb: "1024"
@@ -34,23 +34,10 @@ jobs:
             arc: "2147483648"
             dirty: "1610612736"
             phases: >-
-              alone:none sw:write:diag sw-nocomp:write:comp=off
-              sw-nice:write:nice=-20 sw-pct25:write:pct=25
-              sw-pcmeta:write:pc=metadata alone-sep:none:sep
-              sw-sep:write:sep alone2:none
-          - name: wb
-            pools: "1"
-            wl: "rr1 rr4 sw1 sw4"
-            wmb: "1024"
-            rmb: "0"
-            arc: "2147483648"
-            dirty: "1610612736"
-            phases: >-
-              alone:none sw:write:diag sw-c1:write:kn=c1 sw-w:write:kn=w
-              sw-wy:write:kn=wy sw-w2:write:kn=w2 sw-idle:write:idle
-              sw-l:write:kn=l sw-all:write:kn=all,diag alone-all:none:kn=all
-              alone2:none
-          - name: c3
+              alone:none sw:write:diag sw-p6:write:kn=p6 sw-w2:write:kn=w2
+              sw-w2p6:write:kn=w2p6 sw-all2:write:kn=all2,diag
+              alone-all2:none:kn=all2 alone2:none
+          - name: pc
             pools: "3n"
             wl: "rr1 rr4 sw1 sw4"
             wmb: "256"
@@ -59,9 +46,20 @@ jobs:
             dirty: "1610612736"
             fastmb: "1024"
             phases: >-
-              alone:none m3w:write:diag m3w-nocomp:write:comp=off
-              m3w-w:write:kn=w m3w-wy:write:kn=wy m3w-w2:write:kn=w2
-              m3w-idle:write:idle m3w-all:write:kn=all,diag alone2:none
+              alone:none m3w:write:diag m3w-w2:write:kn=w2
+              m3w-w2l:write:kn=w2l,diag m3w-p6:write:kn=p6
+              m3w-all2:write:kn=all2,diag alone2:none
+          - name: tp
+            pools: "0"
+            wl: "tz tl"
+            wmb: "0"
+            rmb: "0"
+            arc: "2147483648"
+            dirty: "1610612736"
+            fastmb: "4096"
+            phases: >-
+              alone:none alone-p6:none:kn=p6 alone-w2:none:kn=w2
+              alone-all2:none:kn=all2 alone2:none
     steps:
       - uses: actions/checkout@v6
         with:

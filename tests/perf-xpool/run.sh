@@ -275,7 +275,8 @@ dump_params() {
 	    zfs_vdev_aggregation_limit_non_rotational zio_taskq_batch_pct \
 	    zfs_arc_evict_threads zvol_request_sync zvol_use_blk_mq \
 	    zfs_txg_history zio_taskq_read zio_taskq_write \
-	    zio_taskq_bulk_lowpri zfs_arc_evict_lane zio_taskq_bulk_yield; do
+	    zio_taskq_bulk_lowpri zfs_arc_evict_lane zio_taskq_bulk_yield \
+	    zio_taskq_write_pct zio_taskq_write_light; do
 		[ -r "/sys/module/zfs/parameters/$p" ] &&
 		    echo "$p $(cat "/sys/module/zfs/parameters/$p")"
 	done
@@ -376,6 +377,14 @@ q2_args() {
 		# Cached reads: a 256 MiB file with primarycache=all.
 		fio_args /fastq/c/f file "$rw" 1 "$nj" "$2"
 		FIO_ARGS+=(--size=256M)
+		;;
+	tz|tl)
+		# Peak async write throughput with zstd or lz4, 128K records,
+		# data that compresses about 2:1; "IOPS" are MiB/s.
+		FIO_ARGS=(--name=t --filename="/fastq/$1/f" --rw=write --bs=1M
+		    --size=1G --ioengine=psync --time_based --runtime="$2"
+		    --buffer_compress_percentage=50 --refill_buffers
+		    --lat_percentiles=1 --percentile_list=50:99:99.9)
 		;;
 	*)
 		fio_args /fastq/fs/f file "$rw" 1 "$nj" "$2"
@@ -663,10 +672,14 @@ FAST_THREADS='^(z_(null|rd|wr|fr|cl|flush|trim)_|dp_sync_taskq)'
 #   r    synchronous read interrupt taskq + bulk taskqs at default priority
 #   r2   r + yield
 #   l    eviction lane only
-#   all  everything
+#   all  everything up to the yield commit (lane included)
+#   p6   write issue threads at 25 % of the CPUs per pool, only
+#   w2p6 w2 + p6
+#   w2l  w2 + async writes of lightly dirty pools at high priority
+#   all2 w2 + p6 + light (no lane)
 qv_knobs() {
 	local wr="sync null scale null" rd="fixed,1,8 null scale null"
-	local low=0 lane=0 yield=0
+	local low=0 lane=0 yield=0 wpct=80 light=0
 	local c1w="sync scale scale null" c2r="fixed,1,8 null scale scale"
 	case $1 in
 	up) ;;
@@ -678,6 +691,10 @@ qv_knobs() {
 	r2) rd=$c2r; low=1; yield=1 ;;
 	l) lane=1 ;;
 	all) wr=$c1w; rd=$c2r; low=1; lane=1; yield=1 ;;
+	p6) wpct=25 ;;
+	w2p6) wr=$c1w; low=1; yield=1; wpct=25 ;;
+	w2l) wr=$c1w; low=1; yield=1; light=1 ;;
+	all2) wr=$c1w; rd=$c2r; low=1; yield=1; wpct=25; light=1 ;;
 	*) die "unknown knob set $1" ;;
 	esac
 	local m=/sys/module/zfs/parameters
@@ -687,6 +704,8 @@ qv_knobs() {
 	echo "$low" > $m/zio_taskq_bulk_lowpri || die "zio_taskq_bulk_lowpri"
 	echo "$lane" > $m/zfs_arc_evict_lane || die "zfs_arc_evict_lane"
 	echo "$yield" > $m/zio_taskq_bulk_yield || die "zio_taskq_bulk_yield"
+	echo "$wpct" > $m/zio_taskq_write_pct || die "zio_taskq_write_pct"
+	echo "$light" > $m/zio_taskq_write_light || die "zio_taskq_write_light"
 }
 
 qv_setup_fast() {
@@ -697,6 +716,14 @@ qv_setup_fast() {
 	    mirror /dev/nullb0 /dev/nullb1 || die "zpool create fastq"
 	zfs create -o recordsize=4K fastq/fs || die "zfs create fastq/fs"
 	prefill /fastq/fs/f 0
+	case " $QV_WL " in
+	*" tz "*|*" tl "*)
+		zfs create -o recordsize=128K -o compression=zstd \
+		    -o sync=standard fastq/tz || die "zfs create fastq/tz"
+		zfs create -o recordsize=128K -o compression=lz4 \
+		    -o sync=standard fastq/tl || die "zfs create fastq/tl"
+		;;
+	esac
 	case " $QV_WL " in
 	*" rc1 "*)
 		zfs create -o recordsize=4K -o primarycache=all fastq/c ||
@@ -1074,10 +1101,11 @@ qv() {
 	    >> "$OUT/setup.txt"
 	qv_setup_fast
 	case $QV_POOLS in
+	0) ;;
 	1) qv_setup_slow1 ;;
 	3) qv_setup_slow3 ;;
 	3n) qv_setup_slow3n ;;
-	*) die "QV_POOLS must be 1, 3 or 3n" ;;
+	*) die "QV_POOLS must be 0, 1, 3 or 3n" ;;
 	esac
 	echo "zfs_arc_max $ARC_MAX zfs_dirty_data_max $Q2_DIRTY_MAX," \
 	    "workloads $QV_WL, slow write file ${QV_SLOW_WRITE_MB} MiB," \

@@ -956,7 +956,9 @@ def qv_default(name, names):
 
 QV_WLN = {"rr1": "4K randread QD1 nj1", "rr4": "4K randread QD1 nj4",
           "sw1": "4K sync write QD1 nj1", "sw4": "4K sync write QD1 nj4",
-          "rc1": "4K cached randread QD1"}
+          "rc1": "4K cached randread QD1",
+          "tz": "1M seq write zstd 128K (IOPS = MiB/s)",
+          "tl": "1M seq write lz4 128K (IOPS = MiB/s)"}
 
 
 def qv_runs(out, name, wl, irate):
