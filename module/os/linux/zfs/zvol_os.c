@@ -48,6 +48,13 @@ static unsigned long zvol_max_discard_blocks = 16384;
 static unsigned int zvol_open_timeout_ms = 1000;
 #endif
 
+/*
+ * Let a bio-based zvol take non-blocking (REQ_NOWAIT) submissions, so that
+ * io_uring submits to it without going through its workers.  Read when a
+ * zvol's block device is created; blk-mq zvols always take them.
+ */
+static unsigned int zvol_nowait = 1;
+
 static unsigned int zvol_blk_mq_threads = 0;
 static unsigned int zvol_blk_mq_actual_threads;
 static boolean_t zvol_use_blk_mq = B_FALSE;
@@ -1182,6 +1189,7 @@ typedef struct zvol_queue_limits {
 	unsigned int	zql_max_discard_sectors;
 	unsigned int	zql_discard_granularity;
 	unsigned int	zql_max_write_zeroes_sectors;
+	boolean_t	zql_nowait;
 } zvol_queue_limits_t;
 
 static void
@@ -1254,6 +1262,7 @@ zvol_queue_limits_init(zvol_queue_limits_t *limits, zvol_state_t *zv,
 	    (zvol_max_discard_blocks * zv->zv_volblocksize) >> 9;
 	limits->zql_discard_granularity = zv->zv_volblocksize;
 	limits->zql_max_write_zeroes_sectors = limits->zql_max_discard_sectors;
+	limits->zql_nowait = !use_blk_mq && zvol_nowait != 0;
 }
 
 #ifdef HAVE_BLK_ALLOC_DISK_2ARG
@@ -1280,6 +1289,8 @@ zvol_queue_limits_convert(zvol_queue_limits_t *limits,
 #ifdef HAVE_BLKDEV_QUEUE_LIMITS_FEATURES
 	qlimits->features =
 	    BLK_FEAT_WRITE_CACHE | BLK_FEAT_FUA | BLK_FEAT_IO_STAT;
+	if (limits->zql_nowait)
+		qlimits->features |= BLK_FEAT_NOWAIT;
 #endif
 }
 #endif
@@ -1302,6 +1313,10 @@ zvol_queue_limits_apply(zvol_queue_limits_t *limits,
 #ifndef HAVE_BLKDEV_QUEUE_LIMITS_FEATURES
 	blk_queue_set_write_cache(queue, B_TRUE);
 	blk_queue_flag_set(QUEUE_FLAG_IO_STAT, queue);
+#ifdef QUEUE_FLAG_NOWAIT
+	if (limits->zql_nowait)
+		blk_queue_flag_set(QUEUE_FLAG_NOWAIT, queue);
+#endif
 #endif
 }
 
@@ -1960,6 +1975,10 @@ MODULE_PARM_DESC(zvol_blk_mq_queue_depth, "Default blk-mq queue depth");
 
 module_param(zvol_use_blk_mq, uint, 0644);
 MODULE_PARM_DESC(zvol_use_blk_mq, "Use the blk-mq API for zvols");
+
+module_param(zvol_nowait, uint, 0644);
+MODULE_PARM_DESC(zvol_nowait,
+	"Let bio-based zvols take non-blocking submissions");
 
 module_param(zvol_blk_mq_blocks_per_thread, uint, 0644);
 MODULE_PARM_DESC(zvol_blk_mq_blocks_per_thread,
