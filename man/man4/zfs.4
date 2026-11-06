@@ -2979,7 +2979,10 @@ The txg sync of a lightly loaded pool, which its synchronous writers may wait
 for, then does not wait behind the bulk writes of other pools.
 .
 .It Sy zio_taskq_write_pct Ns = Ns Sy 25 Ns % Pq uint
-Percentage of online CPUs which will run a write issue thread, for each pool.
+Percentage of online CPUs which will run a write issue thread, for each pool,
+but no fewer threads than
+.Sy zio_taskq_batch_pct
+gives, up to 4.
 These threads compress, encrypt and checksum the asynchronous writes of a txg,
 which are all issued at once, so a pool syncing a large txg keeps that share
 of the CPUs busy for a burst, and the bursts of several pools writing at the
