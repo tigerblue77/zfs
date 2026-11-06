@@ -2917,7 +2917,9 @@ as they are no longer referenced by the filesystem.
 This parameter is only available on Linux.
 .
 .It Sy zio_taskq_batch_pct Ns = Ns Sy 80 Ns % Pq uint
-Percentage of online CPUs which will run a worker thread for I/O.
+Percentage of online CPUs which will run a worker thread for I/O,
+except for the write issue queues, see
+.Sy zio_taskq_write_pct .
 These workers are responsible for I/O work such as compression, encryption,
 checksum and parity calculations.
 Fractional number of CPUs will be rounded down.
@@ -2965,6 +2967,16 @@ running out their scheduler time slice first, which can delay a woken I/O
 completion or application thread by several milliseconds during a burst of
 compression.
 Only effective on Linux.
+Set value only applies to pools imported/created after that.
+.
+.It Sy zio_taskq_write_pct Ns = Ns Sy 25 Ns % Pq uint
+Percentage of online CPUs which will run a write issue thread, for each pool.
+These threads compress, encrypt and checksum the asynchronous writes of a txg,
+which are all issued at once, so a pool syncing a large txg keeps that share
+of the CPUs busy for a burst, and the bursts of several pools writing at the
+same time add up.
+A larger value raises the peak write throughput of one pool with expensive
+compression, at the cost of the latency of other pools and processes.
 Set value only applies to pools imported/created after that.
 .
 .It Sy zio_taskq_write_tpq Ns = Ns Sy 16 Pq uint
