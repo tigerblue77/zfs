@@ -276,7 +276,7 @@ dump_params() {
 	    zfs_arc_evict_threads zvol_request_sync zvol_use_blk_mq \
 	    zfs_txg_history zio_taskq_read zio_taskq_write \
 	    zio_taskq_bulk_lowpri zfs_arc_evict_lane zio_taskq_bulk_yield \
-	    zio_taskq_write_pct zio_taskq_write_light; do
+	    zio_taskq_write_pct zio_taskq_write_light spa_sync_light_pri; do
 		[ -r "/sys/module/zfs/parameters/$p" ] &&
 		    echo "$p $(cat "/sys/module/zfs/parameters/$p")"
 	done
@@ -677,9 +677,11 @@ FAST_THREADS='^(z_(null|rd|wr|fr|cl|flush|trim)_|dp_sync_taskq)'
 #   w2p6 w2 + p6
 #   w2l  w2 + async writes of lightly dirty pools at high priority
 #   all2 w2 + p6 + light (no lane)
+#   w2lc w2l + sync threads of lightly dirty pools at default priority
+#   all3 all2 + that
 qv_knobs() {
 	local wr="sync null scale null" rd="fixed,1,8 null scale null"
-	local low=0 lane=0 yield=0 wpct=80 light=0
+	local low=0 lane=0 yield=0 wpct=80 light=0 slp=0
 	local c1w="sync scale scale null" c2r="fixed,1,8 null scale scale"
 	case $1 in
 	up) ;;
@@ -695,6 +697,8 @@ qv_knobs() {
 	w2p6) wr=$c1w; low=1; yield=1; wpct=25 ;;
 	w2l) wr=$c1w; low=1; yield=1; light=1 ;;
 	all2) wr=$c1w; rd=$c2r; low=1; yield=1; wpct=25; light=1 ;;
+	w2lc) wr=$c1w; low=1; yield=1; light=1; slp=1 ;;
+	all3) wr=$c1w; rd=$c2r; low=1; yield=1; wpct=25; light=1; slp=1 ;;
 	*) die "unknown knob set $1" ;;
 	esac
 	local m=/sys/module/zfs/parameters
@@ -706,6 +710,7 @@ qv_knobs() {
 	echo "$yield" > $m/zio_taskq_bulk_yield || die "zio_taskq_bulk_yield"
 	echo "$wpct" > $m/zio_taskq_write_pct || die "zio_taskq_write_pct"
 	echo "$light" > $m/zio_taskq_write_light || die "zio_taskq_write_light"
+	echo "$slp" > $m/spa_sync_light_pri || die "spa_sync_light_pri"
 }
 
 qv_setup_fast() {

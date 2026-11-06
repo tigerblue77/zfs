@@ -35,8 +35,7 @@ jobs:
             dirty: "1610612736"
             phases: >-
               alone:none sw:write:diag sw-p6:write:kn=p6 sw-w2:write:kn=w2
-              sw-w2p6:write:kn=w2p6 sw-all2:write:kn=all2,diag
-              alone-all2:none:kn=all2 alone2:none
+              sw-all3:write:kn=all3,diag alone-all3:none:kn=all3 alone2:none
           - name: pc
             pools: "3n"
             wl: "rr1 rr4 sw1 sw4"
@@ -46,9 +45,9 @@ jobs:
             dirty: "1610612736"
             fastmb: "1024"
             phases: >-
-              alone:none m3w:write:diag m3w-w2:write:kn=w2
-              m3w-w2l:write:kn=w2l,diag m3w-p6:write:kn=p6
-              m3w-all2:write:kn=all2,diag alone2:none
+              alone:none m3w:write:diag m3w-w2l:write:kn=w2l
+              m3w-w2lc:write:kn=w2lc,diag m3w-all3:write:kn=all3,diag
+              alone2:none
           - name: tp
             pools: "0"
             wl: "tz tl"
@@ -58,8 +57,8 @@ jobs:
             dirty: "1610612736"
             fastmb: "4096"
             phases: >-
-              alone:none alone-p6:none:kn=p6 alone-w2:none:kn=w2
-              alone-all2:none:kn=all2 alone2:none
+              alone:none alone-p6:none:kn=p6 alone-all3:none:kn=all3
+              alone2:none
     steps:
       - uses: actions/checkout@v6
         with:
