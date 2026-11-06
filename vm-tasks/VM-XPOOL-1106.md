@@ -18,7 +18,7 @@ imported.  Use only memory-backed devices (null_blk), nothing on the VM disk.
       libpam0g-dev python3 python3-dev linux-headers-$(uname -r) fio \
       bpftrace dmsetup linux-perf > /var/tmp/xpool-apt.log 2>&1
     git clone -q --branch perf-xpool-cause https://github.com/tigerblue77/zfs \
-      /var/tmp/xpool-src && cd /var/tmp/xpool-src && git checkout -q a98dcbe08e
+      /var/tmp/xpool-src && cd /var/tmp/xpool-src && git checkout -q 6549ab63bd
     sh autogen.sh > /var/tmp/xpool-build.log 2>&1 && ./configure \
       --prefix=/usr --sysconfdir=/etc --localstatedir=/var --disable-pyzfs \
       >> /var/tmp/xpool-build.log 2>&1 && make -j16 >> /var/tmp/xpool-build.log 2>&1
@@ -40,8 +40,8 @@ Device sizes keep the worst case under 9 GiB of RAM (VM 106 has 11 GiB):
       QV_FAST_CPUS=$(($(nproc) / 2))-$(($(nproc) - 1)) \
       QV_PHASES="alone:none sw:write:diag sw-nocomp:write:comp=off \
         sw-pct25:write:pct=25 sw-w2:write:kn=w2 sw-p6:write:kn=p6 \
-        sw-w2p6:write:kn=w2p6 sw-all2:write:kn=all2,diag sw-up2:write \
-        alone-sep:none:sep sw-sep:write:sep alone-all2:none:kn=all2 \
+        sw-w2p6:write:kn=w2p6 sw-all3:write:kn=all3,diag sw-up2:write \
+        alone-sep:none:sep sw-sep:write:sep alone-all3:none:kn=all3 \
         alone2:none" \
       tests/perf-xpool/run.sh qv > /var/tmp/vm1.log 2>&1; tail -1 /var/tmp/vm1.log
 
@@ -52,8 +52,9 @@ Run 2, three slow pools on null_blk (vm3, ~50 min), the CPU load of three HDD po
       ARC_MAX=2147483648 \
       Q2_DIRTY_MAX=1610612736 REPS=3 Q2_RUNTIME=20 DIAG_RUNTIME=20 \
       QV_PHASES="alone:none m3w:write:diag m3w-pct25:write:pct=25 \
-        m3w-w2:write:kn=w2 m3w-w2l:write:kn=w2l m3w-p6:write:kn=p6 \
-        m3w-all2:write:kn=all2,diag m3w-up2:write alone2:none" \
+        m3w-w2:write:kn=w2 m3w-w2l:write:kn=w2l m3w-w2lc:write:kn=w2lc \
+        m3w-p6:write:kn=p6 m3w-all3:write:kn=all3,diag m3w-up2:write \
+        alone2:none" \
       tests/perf-xpool/run.sh qv > /var/tmp/vm3.log 2>&1; tail -1 /var/tmp/vm3.log
 
 Run 3, no slow pool (vm0, ~20 min): the cost of the write issue thread share
@@ -64,7 +65,7 @@ pool, zstd and lz4, 128K records, 2:1 compressible data ("IOPS" = MiB/s):
       QV_POOLS=0 QV_WL="tz tl" FAST_DEV_MB=3072 SIZE_MB=128 ARC_MAX=2147483648 \
       Q2_DIRTY_MAX=1610612736 REPS=3 Q2_RUNTIME=20 DIAG_RUNTIME=20 \
       QV_PHASES="alone:none alone-p6:none:kn=p6 alone-w2:none:kn=w2 \
-        alone-all2:none:kn=all2 alone2:none" \
+        alone-all3:none:kn=all3 alone2:none" \
       tests/perf-xpool/run.sh qv > /var/tmp/vm0.log 2>&1; tail -1 /var/tmp/vm0.log
 
 Before runs 2 and 3, destroy the previous run's devices (section 4, without the last two
@@ -72,8 +73,9 @@ lines), since both use the same device names.  In each run, A = sw/m3w
 (kn=up: master's taskqs and FIFO), B = *-w (bulk at nice 0), *-wy (bulk
 threads yield between tasks), *-w2 (both) and *-all (all tunables), A again
 = *-up2; -p6 (write issue threads at 25 % of the CPUs per pool, every pool),
--w2p6, -w2l (lightly dirty pools issue their async writes at high priority)
-and -all2 (w2 + p6 + light) are the two newest commits; -nocomp, -pct25 (the
+-w2p6, -w2l (lightly dirty pools issue their async writes at high priority),
+-w2lc (w2l + their sync threads at default priority) and -all3 (all
+commits) are the three newest; -nocomp, -pct25 (the
 slow pools only get zio_taskq_batch_pct=25) and -sep say how much of the gap
 is CPU.  On the 4-vCPU runners -w2 closed 37-80 % of the p99.9 excess,
 -w2p6 63-85 %, but p6 (one thread there) cost the fast pool alone 17-29 % of
