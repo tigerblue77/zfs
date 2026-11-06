@@ -127,11 +127,17 @@ typedef struct {
 	int zt_error;
 } zvol_task_t;
 
+/*
+ * With nowait, the allocation does not sleep and may return NULL.
+ */
 zv_request_task_t *
-zv_request_task_create(zv_request_t zvr)
+zv_request_task_create(zv_request_t zvr, boolean_t nowait)
 {
 	zv_request_task_t *task;
-	task = kmem_alloc(sizeof (zv_request_task_t), KM_SLEEP);
+	task = kmem_alloc(sizeof (zv_request_task_t),
+	    nowait ? KM_NOSLEEP : KM_SLEEP);
+	if (task == NULL)
+		return (NULL);
 	taskq_init_ent(&task->ent);
 	task->zvr = zvr;
 	return (task);

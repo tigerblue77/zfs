@@ -23,8 +23,8 @@
 #
 # STRATEGY:
 #
-# For both the normal submit_bio() codepath and the blk-mq codepath, do
-# the following:
+# For both the normal submit_bio() codepath and the blk-mq codepath, and
+# on Linux through io_uring with O_DIRECT, do the following:
 #
 # 1. Create one zvol per CPU
 # 2. In parallel, spawn an fio "write and verify" for each zvol
@@ -52,6 +52,7 @@ typeset tmpdir="$(mktemp -d "$TEST_BASE_DIR/zvol_stress_fio_state.XXXXXX")"
 
 log_must save_tunable VOL_USE_BLK_MQ
 log_must save_tunable VOL_REQUEST_SYNC
+log_must save_tunable VOL_NOWAIT
 
 function create_zvols
 {
@@ -69,8 +70,13 @@ function destroy_zvols
 	done
 }
 
+# $1: fio I/O engine (default: libaio on Linux, psync elsewhere)
+# $2: fio --direct value (default: 0)
 function do_zvol_stress
 {
+	typeset engine=$1
+	typeset direct=${2:-0}
+
 	# Write 10% of each zvol, or 50MB, whichever is less
 	zvol_write_size=$((each_zvol_size / 10))
 	if [ $zvol_write_size -gt $((50 * 1048576)) ] ; then
@@ -78,17 +84,19 @@ function do_zvol_stress
 	fi
 	zvol_write_size_mb=$(($zvol_write_size / 1048576))
 
-	if is_linux ; then
-		engine=libaio
-	else
-		engine=psync
+	if [ -z "$engine" ] ; then
+		if is_linux ; then
+			engine=libaio
+		else
+			engine=psync
+		fi
 	fi
 
 	# Spawn off one fio per zvol in parallel
 	pids=""
 	for i in $(seq $num_zvols) ; do
 		# Spawn one fio per zvol as its own process
-		fio --ioengine=$engine --name=zvol_stress$i --direct=0 \
+		fio --ioengine=$engine --name=zvol_stress$i --direct=$direct \
 			--filename="$ZVOL_DEVDIR/$TESTPOOL/testvol$i" --bs=1048576 \
 			--iodepth=10 --readwrite=randwrite --size=${zvol_write_size} \
 			--verify_async=2 --numjobs=1 --verify=sha1 \
@@ -119,6 +127,7 @@ function cleanup
 	destroy_zvols
 	log_must restore_tunable VOL_USE_BLK_MQ
 	log_must restore_tunable VOL_REQUEST_SYNC
+	log_must restore_tunable VOL_NOWAIT
 
 	# Remove all fio's leftover state files
 	if [ -n "$tmpdir" ] ; then
@@ -147,6 +156,30 @@ set_zvol_sync 0
 create_zvols
 do_zvol_stress
 destroy_zvols
+
+# O_DIRECT through io_uring, whose requests are issued without blocking
+# (REQ_NOWAIT) to bio-based zvols with zvol_nowait and to blk-mq zvols, and
+# from io_uring's workers otherwise or when a bio-based zvol fails them with
+# EAGAIN, as it does in zvol sync mode.  Only if fio and the kernel support
+# io_uring.
+if is_linux && fio --name=probe --ioengine=io_uring --size=64k --bs=4k \
+    --rw=write --filename="$tmpdir/probe" > /dev/null 2>&1 ; then
+	rm -f "$tmpdir/probe"
+	# blk-mq:nowait:sync
+	for mode in 0:1:0 0:0:0 0:1:1 1:1:1 ; do
+		set_blk_mq ${mode%%:*}
+		log_must set_tunable32 VOL_NOWAIT $(echo $mode | cut -d: -f2)
+		set_zvol_sync ${mode##*:}
+		create_zvols
+		do_zvol_stress io_uring 1
+		destroy_zvols
+	done
+	set_blk_mq 1
+	set_zvol_sync 0
+else
+	rm -f "$tmpdir/probe"
+	log_note "fio cannot use io_uring here, skipping the io_uring passes"
+fi
 
 # Same for enabled zvol sync mode
 set_zvol_sync 1
