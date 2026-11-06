@@ -688,6 +688,18 @@ Determines the minimum number of CPUs in a system for block allocator
 per spa instance.
 Set value only applies to pools imported/created after that.
 .
+.It Sy spa_sync_light_pri Ns = Ns Sy 1 Ns | Ns 0 Pq int
+The threads of a pool's
+.Sy dp_sync_taskq ,
+which write out the dirty data of a txg, run at the lowest kernel thread
+priority.
+Run them at the default priority while the pool holds no more than its
+small share of the dirty data in the ARC, as described under
+.Sy zio_taskq_write_light .
+The txg sync of a lightly loaded pool, which its synchronous writers may wait
+for, then keeps up next to pools writing in bulk.
+Only effective on Linux.
+.
 .It Sy spa_upgrade_errlog_limit Ns = Ns Sy 0 Pq uint
 Limits the number of on-disk error log entries that will be converted to the
 new format when enabling the

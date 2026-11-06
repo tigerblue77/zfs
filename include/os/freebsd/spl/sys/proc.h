@@ -101,6 +101,11 @@ do_thread_create(caddr_t stk, size_t stksize, void (*proc)(void *), void *arg,
 #define	thread_create(stk, stksize, proc, arg, len, pp, state, pri) \
 	do_thread_create(stk, stksize, proc, arg, len, pp, state, pri, #proc)
 #define	thread_exit()	kthread_exit()
+#define	thread_set_pri(td, pri) do {	\
+	thread_lock(td);		\
+	sched_prio((td), (pri));	\
+	thread_unlock(td);		\
+} while (0)
 #define	thread_join(x)
 
 int	uread(proc_t *, void *, size_t, uintptr_t);

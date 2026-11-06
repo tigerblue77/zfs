@@ -38,6 +38,7 @@
 #define	thread_create(stk, stksize, func, arg, len, pp, state, pri)	\
 	zk_thread_create(#func, func, arg, stksize, state)
 #define	thread_exit()	zk_thread_exit()
+#define	thread_set_pri(t, pri)	((void) (t), (void) (pri))
 #define	thread_join(t)	zk_thread_join(t)
 
 #define	newproc(f, a, cid, pri, ctp, pid)	(ENOSYS)
