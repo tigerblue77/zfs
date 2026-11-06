@@ -1,0 +1,139 @@
+# Fork-only experiment, not meant for upstream: io_uring rows on a zvol
+# for master (A), zvol-nowait (B) and this branch's zvol code (C), on
+# GitHub-hosted runners, alternating the three trees' kernel modules on one
+# pool of two RAM disks.  tests/perf-zvol-v2/run.sh does the work.  The
+# other workflows are removed from this branch so that a push only runs
+# this one.
+name: perf-zvol-v2
+
+on:
+  push:
+    branches: [perf-zvol-v2]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perf-zvol-v2-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  perf:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 170
+    strategy:
+      fail-fast: false
+      matrix:
+        name: [zv2-a, zv2-b, zv2-c]
+    env:
+      A_SHA: ef0614e724d42b58f7b551a5e718648264b2bd0c
+      B_SHA: ad7529b1bbb16ee89e421813e04da847d8ac8fd4
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          fetch-depth: 20
+      - name: Runner
+        run: |
+          uname -a
+          lscpu | grep -E 'Model name|^CPU\(s\)|Thread|Hypervisor|MHz'
+          free -m
+      - name: Install dependencies
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update -y -q
+          sudo apt-get install -y -q --no-install-recommends \
+            autoconf automake libtool gawk build-essential \
+            libblkid-dev uuid-dev libudev-dev libssl-dev zlib1g-dev \
+            libaio-dev libattr1-dev libelf-dev libtirpc-dev libffi-dev \
+            libcurl4-openssl-dev libpam0g-dev python3 python3-dev \
+            "linux-headers-$(uname -r)" fio linux-tools-common kmod \
+            > apt.log 2>&1 || { tail -30 apt.log; exit 1; }
+          sudo apt-get install -y -q --no-install-recommends \
+            "linux-tools-$(uname -r)" >> apt.log 2>&1 ||
+            echo "linux-tools-$(uname -r) not installed"
+          sudo apt-get install -y -q --no-install-recommends \
+            "linux-modules-extra-$(uname -r)" >> apt.log 2>&1 ||
+            echo "linux-modules-extra-$(uname -r) not installed"
+          modinfo -F filename brd null_blk || true
+          fio --version; perf --version || true
+      - name: Build C (this branch)
+        run: |
+          git log --oneline -6
+          ./autogen.sh > build.log 2>&1 || { tail -40 build.log; exit 1; }
+          ./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var \
+            --disable-pyzfs >> build.log 2>&1 || { tail -60 build.log; exit 1; }
+          make -j"$(nproc)" >> build.log 2>&1 ||
+            { grep -n -m 20 -E 'error|Error' build.log; tail -40 build.log; exit 1; }
+          sudo make install > install.log 2>&1 || { tail -40 install.log; exit 1; }
+          # Ubuntu's own zfs modules out of the way, so that nothing loads them.
+          for d in $(find "/lib/modules/$(uname -r)/kernel" -type d -name zfs); do
+            sudo mv "$d" "/var/tmp/ubuntu-$(basename "$(dirname "$d")")-zfs"
+          done
+          sudo ldconfig
+          sudo depmod -a
+          sudo udevadm control --reload-rules || true
+          ls -la module/spl.ko module/zfs.ko
+      - name: Build A and B modules
+        run: |
+          git fetch -q --depth=5 https://github.com/tigerblue77/zfs zvol-nowait
+          [ "$(git rev-parse FETCH_HEAD)" = "$B_SHA" ] ||
+            { echo "zvol-nowait is not at $B_SHA"; exit 1; }
+          git cat-file -e "$A_SHA^{commit}" || { echo "no $A_SHA"; exit 1; }
+          sudo mkdir -p /var/tmp/zv2/trees
+          sudo chown "$(id -u)" /var/tmp/zv2/trees
+          ln -s "$PWD" /var/tmp/zv2/trees/C
+          for t in A B; do
+            sha=$A_SHA
+            [ "$t" = B ] && sha=$B_SHA
+            git worktree add -q --detach "/var/tmp/zv2/trees/$t" "$sha"
+            (
+              cd "/var/tmp/zv2/trees/$t" &&
+              ./autogen.sh && ./configure --with-config=kernel &&
+              make -j"$(nproc)"
+            ) > "build-$t.log" 2>&1 ||
+              { grep -n -m 20 -E 'error|Error' "build-$t.log"; tail -40 "build-$t.log"; exit 1; }
+            ls -la "/var/tmp/zv2/trees/$t/module/spl.ko" "/var/tmp/zv2/trees/$t/module/zfs.ko"
+            git -C "/var/tmp/zv2/trees/$t" log --oneline -1
+          done
+      - name: Experiment
+        timeout-minutes: 120
+        env:
+          RT: "10"
+          REPS: "2"
+          VARIANTS: >-
+            A=A B=B C=C A2=A
+            C4=C:zvol_nowait_max_inflight=4
+            C16=C:zvol_nowait_max_inflight=16
+            C0=C:zvol_nowait_max_inflight=0
+          MQ_VARIANTS: >-
+            Amq=A:zvol_use_blk_mq=1
+            Amqrs=A:zvol_use_blk_mq=1,zvol_request_sync=1
+            Cmq=C:zvol_use_blk_mq=1
+            Cmqrs=C:zvol_use_blk_mq=1,zvol_request_sync=1
+          DIAG_VARIANTS: "A=A B=B C=C"
+        run: |
+          sudo -E OUT=/var/tmp/zv2/out TREES=/var/tmp/zv2/trees \
+            tests/perf-zvol-v2/run.sh
+      - name: Summary
+        if: always()
+        run: |
+          sudo chmod -R a+rX /var/tmp/zv2/out || true
+          {
+            echo "### ${{ matrix.name }} on $(uname -r), $(nproc) CPUs"
+            grep -m1 'Model name' /var/tmp/zv2/out/system.txt || true
+            grep -E '^(devices|fio-|perf version)' /var/tmp/zv2/out/system.txt || true
+            cat /var/tmp/zv2/out/params.txt 2>/dev/null | sort -u
+            python3 tests/perf-zvol-v2/report.py summary /var/tmp/zv2/out
+          } > summary.txt 2>&1
+          { echo '```'; cat summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          echo "=== PERF-ZVOL-V2 SUMMARY ${{ matrix.name }} ==="
+          cat summary.txt
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: perf-zvol-v2-${{ matrix.name }}
+          path: /var/tmp/zv2/out
+          retention-days: 14
