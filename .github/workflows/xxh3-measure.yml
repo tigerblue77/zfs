@@ -1,0 +1,73 @@
+# Bench only, never for upstream (issue #16503): times the ZFS block
+# checksums against XXH3-64/128 through the same zio_checksum_t calls,
+# over linear and scattered ABDs, in userland, on GitHub-hosted runners.
+# See tests/xxh3-bench/bench.c.
+name: xxh3-measure
+
+on:
+  push:
+    branches:
+      - xxh3-measure
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DEPS: >-
+    build-essential autoconf automake libtool gawk uuid-dev libudev-dev
+    libssl-dev zlib1g-dev libaio-dev libattr1-dev libelf-dev libblkid-dev
+    libtirpc-dev python3 xxhash
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    steps:
+    - name: Runner
+      run: |
+        uname -a
+        lscpu | grep -E 'Model name|Vendor ID|^CPU\(s\)'
+
+  bench:
+    needs: probe
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04-arm, ubuntu-24.04]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v6
+    - name: CPU
+      run: |
+        uname -a
+        lscpu | grep -E 'Model name|Vendor ID|^CPU\(s\)|L1d|L2|L3'
+        grep -m1 -E '^(flags|Features)' /proc/cpuinfo | tr ' ' '\n' | grep -xE 'sse2|ssse3|sse4_1|avx|avx2|avx512f|avx512bw|avx512vl|sha_ni|asimd|sha2|sha512|sve|sve2' | tr '\n' ' '; echo
+    - name: Dependencies
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq $DEPS >/dev/null
+    - name: Build userland (release) and the bench
+      run: |
+        ./autogen.sh >/dev/null
+        ./configure --with-config=user >/dev/null
+        make -j"$(nproc)" >/dev/null
+        tests/xxh3-bench/build.sh . "$RUNNER_TEMP/b"
+    - name: Self-check, and xxhsum on the same bytes
+      run: |
+        "$RUNNER_TEMP/b/bench" -c
+        "$RUNNER_TEMP/b/bench" -w "$RUNNER_TEMP/check.bin" | tee "$RUNNER_TEMP/ours.txt"
+        h3=$(xxhsum -H3 "$RUNNER_TEMP/check.bin" | grep -oE '[0-9a-f]{16}' | head -1)
+        h2=$(xxhsum -H2 "$RUNNER_TEMP/check.bin" | grep -oE '[0-9a-f]{32}' | head -1)
+        xxhsum --version 2>&1 | head -1
+        echo "xxhsum: xxh3-64 $h3 xxh3-128 $h2"
+        n=$(wc -l < "$RUNNER_TEMP/ours.txt")
+        test "$(grep -c "xxh3-64 $h3 xxh3-128 $h2\$" "$RUNNER_TEMP/ours.txt")" -eq "$n"
+    - name: Bench, 9 interleaved rounds
+      run: |
+        "$RUNNER_TEMP/b/bench" -r 9 -t 50 > bench.csv
+        python3 -I tests/xxh3-bench/summarize.py bench.csv | tee -a "$GITHUB_STEP_SUMMARY"
+        python3 -I tests/xxh3-bench/summarize.py --best bench.csv | tee -a "$GITHUB_STEP_SUMMARY"
+    - name: Raw results
+      run: cat bench.csv
