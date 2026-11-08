@@ -1,0 +1,155 @@
+# Test only, never for upstream: checks openzfs/zfs#18743 (ARMv8 Crypto
+# Extensions AES and PMULL GHASH in the ICP) on a GitHub-hosted arm64
+# runner, natively. Userland correctness (FIPS-197 and differential
+# harness, Wycheproof and NIST CAVP GCM vectors through crypto_test),
+# userland AES-GCM/CCM timings, and the kernel module on the runner's own
+# kernel.
+name: arm-aes-check
+
+on:
+  push:
+    branches:
+      - arm-aes-18743-check
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DEPS: >-
+    build-essential autoconf automake libtool gawk uuid-dev libudev-dev
+    libssl-dev zlib1g-dev libaio-dev libattr1-dev libelf-dev libblkid-dev
+    libtirpc-dev python3
+  NIST_GCM_URL: https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/mac/gcmtestvectors.zip
+  NIST_GCM_SHA256: f9fc479e134cde2980b3bb7cddbcb567b2cd96fd753835243ed067699f26a023
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    steps:
+    - name: Runner
+      run: |
+        uname -a
+        lscpu
+        grep -m1 '^Features' /proc/cpuinfo
+
+  correctness:
+    needs: probe
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v6
+    - name: CPU
+      run: |
+        lscpu | grep -E 'Model name|Vendor ID|^CPU\(s\)'
+        grep -m1 '^Features' /proc/cpuinfo
+    - name: Dependencies
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq $DEPS unzip >/dev/null
+    - name: FIPS-197 and differential harness, native
+      run: |
+        gcc --version | head -1
+        .github/arm-aes-check/run-kat.sh .
+    - name: Build userland (debug)
+      run: |
+        ./autogen.sh >/dev/null
+        ./configure --with-config=user --enable-debug >/dev/null
+        make -j"$(nproc)" >/dev/null
+        grep -E 'HAVE_TOOLCHAIN_ARMV8_(AES|PMULL)' zfs_config.h
+    - name: Wycheproof AES-GCM and AES-CCM through crypto_test
+      run: |
+        D=tests/zfs-tests/tests/functional/crypto
+        rc=0
+        for f in aes_gcm_test.txt aes_ccm_test.txt; do
+          echo "=== $f"
+          ./tests/zfs-tests/cmd/crypto_test -c "$D/$f" || rc=1
+        done
+        exit $rc
+    - name: NIST CAVP AES-GCM through crypto_test
+      run: |
+        curl -sSfL -o "$RUNNER_TEMP/gcm.zip" "$NIST_GCM_URL"
+        echo "$NIST_GCM_SHA256  $RUNNER_TEMP/gcm.zip" | sha256sum -c
+        unzip -q -o "$RUNNER_TEMP/gcm.zip" -d "$RUNNER_TEMP/gcm"
+        python3 -I .github/arm-aes-check/nist-gcm2ct.py "$RUNNER_TEMP"/gcm/*.rsp > "$RUNNER_TEMP/nist_gcm.txt"
+        ./tests/zfs-tests/cmd/crypto_test -c "$RUNNER_TEMP/nist_gcm.txt"
+
+  perf:
+    needs: probe
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+    - uses: actions/checkout@v6
+    - name: CPU
+      run: |
+        lscpu | grep -E 'Model name|Vendor ID|^CPU\(s\)|MHz'
+        grep -m1 '^Features' /proc/cpuinfo
+    - name: Dependencies
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq $DEPS >/dev/null
+    - name: Build userland (release)
+      run: |
+        ./autogen.sh >/dev/null
+        ./configure --with-config=user >/dev/null
+        make -j"$(nproc)" >/dev/null
+    # Each crypto_test -p run walks every implementation in turn, so
+    # repeating whole runs interleaves them.
+    - name: AES-GCM, 5 interleaved runs
+      run: |
+        for i in 1 2 3 4 5; do
+          echo "=== run $i"
+          CRYPTO_TEST_NS=1 ./tests/zfs-tests/cmd/crypto_test -p AES-GCM
+        done | tee gcm.log
+        python3 -I .github/arm-aes-check/perf-summary.py gcm.log | tee -a "$GITHUB_STEP_SUMMARY"
+    - name: AES-CCM, 3 interleaved runs
+      run: |
+        for i in 1 2 3; do
+          echo "=== run $i"
+          CRYPTO_TEST_NS=1 ./tests/zfs-tests/cmd/crypto_test -p AES-CCM
+        done | tee ccm.log
+        python3 -I .github/arm-aes-check/perf-summary.py ccm.log | tee -a "$GITHUB_STEP_SUMMARY"
+
+  kmod:
+    needs: probe
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v6
+    - name: Kernel
+      run: |
+        uname -a
+        grep -E 'CONFIG_KERNEL_MODE_NEON|CONFIG_ARM64_SVE=|CONFIG_CRYPTO_AES_ARM64_CE=|CONFIG_CRYPTO_GHASH_ARM64_CE=' "/boot/config-$(uname -r)" || true
+    - name: Dependencies
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq $DEPS "linux-headers-$(uname -r)" >/dev/null
+        grep -wE 'kernel_neon_(begin|end)' "/lib/modules/$(uname -r)/build/Module.symvers" || true
+    - name: Configure and build the modules
+      run: |
+        ./autogen.sh >/dev/null
+        ./configure --with-config=kernel > configure.out 2>&1
+        grep -iE 'kernel fpu|neon|crypto api|WARNING' configure.out || true
+        grep -E 'define (HAVE_KERNEL_NEON|HAVE_KERNEL_FPU_INTERNAL|HAVE_TOOLCHAIN_ARMV8|HAVE_KERNEL_CRYPTO)' zfs_config.h || true
+        make -j"$(nproc)" -C module >/dev/null
+    - name: Load the modules
+      run: |
+        sudo insmod module/spl.ko
+        sudo insmod module/zfs.ko
+        sudo dmesg | grep -iE 'zfs|spl' | tail -n 20
+    - name: What the module selected
+      run: |
+        P=/sys/module/zfs/parameters
+        for p in icp_aes_impl icp_gcm_impl zfs_fletcher_4_impl zfs_vdev_raidz_impl zfs_blake3_impl zfs_sha256_impl zfs_sha512_impl; do
+          [ -e "$P/$p" ] && printf '%-22s %s\n' "$p" "$(cat "$P/$p")"
+        done
+        sudo cat /proc/spl/kstat/zfs/simd
+        for v in "icp_aes_impl armv8-ce" "icp_gcm_impl pmull"; do
+          set -- $v
+          if echo "$2" | sudo tee "$P/$1" >/dev/null 2>&1; then
+            echo "$1=$2 accepted: $(cat "$P/$1")"
+          else
+            echo "$1=$2 refused"
+          fi
+        done
