@@ -492,6 +492,8 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/alloc_class/alloc_class_016_pos.ksh \
 	functional/alloc_class/alloc_class_017_pos.ksh \
 	functional/alloc_class/alloc_class_018_pos.ksh \
+	functional/alloc_class/alloc_class_019_pos.ksh \
+	functional/alloc_class/alloc_class_020_pos.ksh \
 	functional/alloc_class/cleanup.ksh \
 	functional/alloc_class/setup.ksh \
 	functional/anyraid/anyraid_checkpoint.ksh \
@@ -996,6 +998,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/cli_root/zfs_rewrite/zfs_rewrite_skip_clone.ksh \
 	functional/cli_root/zfs_rewrite/zfs_rewrite_skip_snapshot.ksh \
 	functional/cli_root/zfs_rewrite/zfs_rewrite_skip_width.ksh \
+	functional/cli_root/zfs_rewrite/zfs_rewrite_volume.ksh \
 	functional/cli_root/zfs_rollback/cleanup.ksh \
 	functional/cli_root/zfs_rollback/setup.ksh \
 	functional/cli_root/zfs_rollback/zfs_rollback_001_pos.ksh \
@@ -2189,11 +2192,14 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/removal/removal_with_zdb.ksh \
 	functional/removal/removal_with_zil.ksh \
 	functional/removal/remove_attach_mirror.ksh \
+	functional/removal/remove_empty_vdev.ksh \
 	functional/removal/remove_expanded.ksh \
 	functional/removal/remove_indirect.ksh \
 	functional/removal/remove_mirror.ksh \
 	functional/removal/remove_mirror_sanity.ksh \
 	functional/removal/remove_raidz.ksh \
+	functional/removal/remove_raidz_busy.ksh \
+	functional/removal/remove_raidz_empty.ksh \
 	functional/rename_dirs/cleanup.ksh \
 	functional/rename_dirs/rename_dirs_001_pos.ksh \
 	functional/rename_dirs/setup.ksh \
