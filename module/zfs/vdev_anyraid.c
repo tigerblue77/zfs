@@ -1702,8 +1702,8 @@ vdev_anyraid_xlate(vdev_t *cvd, const zfs_range_seg64_t *logical_rs,
 
 			uint64_t b_start =
 			    (logical_rs->rs_start % ltsize) >> ashift;
-			uint64_t b_end =
-			    (logical_rs->rs_end % ltsize) >> ashift;
+			uint64_t b_end = (logical_rs->rs_end -
+			    start_tile_id * ltsize) >> ashift;
 
 			uint64_t start_row = 0;
 			/* avoid underflow */
