@@ -14321,34 +14321,113 @@ rewrite_pool_metadata(const char *pool, rewrite_cb_t *cb)
 	return (error);
 }
 
-/* Print the space still allocated on the top-level vdevs that allocate not. */
-static void
-rewrite_print_noalloc(zpool_handle_t *zhp)
+/*
+ * Return the top-level vdevs of the pool, with fresh stats, or NULL.
+ */
+static nvlist_t **
+rewrite_top_vdevs(zpool_handle_t *zhp, uint_t *children)
 {
 	nvlist_t *config, *nvroot, **child;
 	boolean_t missing;
-	uint_t children;
-	char buf[32];
 
 	if (zpool_refresh_stats(zhp, &missing) != 0 ||
 	    (config = zpool_get_config(zhp, NULL)) == NULL ||
 	    nvlist_lookup_nvlist(config, ZPOOL_CONFIG_VDEV_TREE,
 	    &nvroot) != 0 ||
 	    nvlist_lookup_nvlist_array(nvroot, ZPOOL_CONFIG_CHILDREN, &child,
-	    &children) != 0)
+	    children) != 0)
+		return (NULL);
+	return (child);
+}
+
+/*
+ * Return B_TRUE if the top-level vdev nv is neither a hole nor an indirect
+ * vdev, with *vsp set to its stats.
+ */
+static boolean_t
+rewrite_top_vdev(nvlist_t *nv, vdev_stat_t **vsp)
+{
+	const char *type;
+	uint_t n;
+
+	return (nvlist_lookup_string(nv, ZPOOL_CONFIG_TYPE, &type) == 0 &&
+	    strcmp(type, VDEV_TYPE_HOLE) != 0 &&
+	    strcmp(type, VDEV_TYPE_INDIRECT) != 0 &&
+	    nvlist_lookup_uint64_array(nv, ZPOOL_CONFIG_VDEV_STATS,
+	    (uint64_t **)vsp, &n) == 0);
+}
+
+/*
+ * Return B_TRUE if the allocating property of the vdev nv reads off.
+ */
+static boolean_t
+rewrite_prop_noalloc(zpool_handle_t *zhp, nvlist_t *nv)
+{
+	const char *prop = vdev_prop_to_name(VDEV_PROP_ALLOCATING);
+	nvlist_t *req, *props, *out = NULL, *val;
+	uint64_t guid, value;
+	boolean_t off = B_FALSE;
+
+	if (nvlist_lookup_uint64(nv, ZPOOL_CONFIG_GUID, &guid) != 0)
+		return (B_FALSE);
+	req = fnvlist_alloc();
+	props = fnvlist_alloc();
+	fnvlist_add_uint64(props, prop, VDEV_PROP_ALLOCATING);
+	fnvlist_add_uint64(req, ZPOOL_VDEV_PROPS_GET_VDEV, guid);
+	fnvlist_add_nvlist(req, ZPOOL_VDEV_PROPS_GET_PROPS, props);
+	if (lzc_get_vdev_prop(zpool_get_name(zhp), req, &out) == 0 &&
+	    nvlist_lookup_nvlist(out, prop, &val) == 0 &&
+	    nvlist_lookup_uint64(val, ZPROP_VALUE, &value) == 0)
+		off = (value == 0);
+	nvlist_free(out);
+	fnvlist_free(props);
+	fnvlist_free(req);
+	return (off);
+}
+
+/*
+ * Name on fp the top-level vdevs whose allocating property reads off while
+ * they allocate.  The property is kept with the vdev, but whether the vdev
+ * allocates is kept in the pool configuration, which releases before 2.2 write
+ * without it when they import the pool.  Setting the property again fixes it.
+ */
+static void
+rewrite_print_mismatch(zpool_handle_t *zhp, nvlist_t **child, uint_t children,
+    FILE *fp)
+{
+	for (uint_t c = 0; c < children; c++) {
+		vdev_stat_t *vs;
+
+		if (!rewrite_top_vdev(child[c], &vs) || vs->vs_noalloc ||
+		    !rewrite_prop_noalloc(zhp, child[c]))
+			continue;
+		char *vname = zpool_vdev_name(g_zfs, zhp, child[c],
+		    VDEV_NAME_TYPE_ID);
+		(void) fprintf(fp, "%s: %s: allocating=off in its properties, "
+		    "but it allocates: set allocating=off again\n",
+		    zpool_get_name(zhp), vname);
+		free(vname);
+	}
+}
+
+/*
+ * Print the space still allocated on the top-level vdevs that do not allocate,
+ * and name those that allocate while their property reads off.
+ */
+static void
+rewrite_print_noalloc(zpool_handle_t *zhp)
+{
+	nvlist_t **child;
+	uint_t children;
+	char buf[32];
+
+	if ((child = rewrite_top_vdevs(zhp, &children)) == NULL)
 		return;
 
 	for (uint_t c = 0; c < children; c++) {
-		const char *type;
 		vdev_stat_t *vs;
-		uint_t n;
 
-		if (nvlist_lookup_string(child[c], ZPOOL_CONFIG_TYPE,
-		    &type) != 0 || strcmp(type, VDEV_TYPE_HOLE) == 0 ||
-		    strcmp(type, VDEV_TYPE_INDIRECT) == 0 ||
-		    nvlist_lookup_uint64_array(child[c],
-		    ZPOOL_CONFIG_VDEV_STATS, (uint64_t **)&vs, &n) != 0 ||
-		    !vs->vs_noalloc)
+		if (!rewrite_top_vdev(child[c], &vs) || !vs->vs_noalloc)
 			continue;
 		char *vname = zpool_vdev_name(g_zfs, zhp, child[c],
 		    VDEV_NAME_TYPE_ID);
@@ -14357,6 +14436,33 @@ rewrite_print_noalloc(zpool_handle_t *zhp)
 		    "allocated\n", zpool_get_name(zhp), vname, buf);
 		free(vname);
 	}
+	rewrite_print_mismatch(zhp, child, children, stdout);
+}
+
+/*
+ * With -A, refuse to go on when every top-level vdev allocates: nothing would
+ * be selected, and the vdev meant to be emptied would stay as it is.
+ */
+static int
+rewrite_check_noalloc(zpool_handle_t *zhp)
+{
+	nvlist_t **child;
+	uint_t children;
+
+	/* Without the stats, leave it to the rewrite. */
+	if ((child = rewrite_top_vdevs(zhp, &children)) == NULL)
+		return (0);
+
+	for (uint_t c = 0; c < children; c++) {
+		vdev_stat_t *vs;
+
+		if (rewrite_top_vdev(child[c], &vs) && vs->vs_noalloc)
+			return (0);
+	}
+	(void) fprintf(stderr, "cannot rewrite pool '%s': -A: no top-level "
+	    "vdev has allocating=off\n", zpool_get_name(zhp));
+	rewrite_print_mismatch(zhp, child, children, stderr);
+	return (1);
 }
 
 /*
@@ -14437,6 +14543,11 @@ zpool_do_rewrite(int argc, char **argv)
 		return (1);
 	if ((c = rewrite_pool_allowed(zhp)) != 0) {
 		rewrite_error(pool, REWRITE_POOL, c);
+		zpool_close(zhp);
+		return (1);
+	}
+	if ((cb.rc_flags & ZFS_REWRITE_SKIP_ALLOCATING) &&
+	    rewrite_check_noalloc(zhp) != 0) {
 		zpool_close(zhp);
 		return (1);
 	}

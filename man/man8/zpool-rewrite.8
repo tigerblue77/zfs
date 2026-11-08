@@ -9,7 +9,7 @@
 .\" source.  A copy of the CDDL is also available via the Internet at
 .\" https://opensource.org/license/CDDL-1.0.
 .\"
-.Dd October 15, 2026
+.Dd November 8, 2026
 .Dt ZPOOL-REWRITE 8
 .Os
 .
@@ -45,12 +45,21 @@ property is
 see
 .Xr vdevprops 7 ,
 so that they move to vdevs that allocate.
+If no top-level vdev has its
+.Sy allocating
+property
+.Sy off ,
+the command fails before anything is rewritten.
 .It Fl v
 Print the progress of each dataset and of the metadata of the pool, what was
 left alone and why, the number of snapshots of each dataset, and once done,
 the space still allocated on each top-level vdev whose
 .Sy allocating
 property is
+.Sy off ,
+and the top-level vdevs that allocate although their
+.Sy allocating
+property reads
 .Sy off .
 .El
 .Pp
