@@ -2769,6 +2769,14 @@ rebal_try_move(vdev_anyraid_t *va, struct rebal_node *donor,
     struct rebal_node *receiver, uint32_t *tid)
 {
 	vdev_anyraid_node_t *dvan = va->vd_children[donor->cvd];
+	vdev_anyraid_node_t *rvan = va->vd_children[receiver->cvd];
+
+	/*
+	 * A donor's tiles only return to its freelist once they have been
+	 * moved, so its planned free tiles may not be poppable yet.
+	 */
+	if (anyraid_freelist_alloc(&rvan->van_freelist) >= rvan->van_capacity)
+		return (B_FALSE);
 
 	for (int i = 0; i < dvan->van_freelist.af_next_off; i++) {
 		ASSERT3U(dvan->van_freelist.af_next_off, <=,
@@ -2850,6 +2858,12 @@ vdev_anyraid_setup_rebalance(vdev_t *vd, dmu_tx_t *tx)
 				receiver->alloc++;
 				avl_add(&ft, receiver);
 				avl_add(&at, receiver);
+				avl_remove(&ft, donor);
+				avl_remove(&at, donor);
+				donor->free++;
+				donor->alloc--;
+				avl_add(&ft, donor);
+				avl_add(&at, donor);
 				num_tiles[receiver->cvd]--;
 				break;
 			}
@@ -2857,7 +2871,7 @@ vdev_anyraid_setup_rebalance(vdev_t *vd, dmu_tx_t *tx)
 				break;
 			donor = prev_donor;
 		}
-		if (donor == NULL || donor->alloc == 0)
+		if (!moved)
 			break;
 	}
 
