@@ -85,6 +85,15 @@ A deduplicated block stays where the entry of the deduplication table that
 refers to it has it.
 Intent log blocks are not rewritten: they are freed once the changes they log
 are written.
+Releases of OpenZFS before 2.2 ignore the
+.Sy allocating
+property: if one of them imported the pool meanwhile, the vdev allocates again,
+and its
+.Sy allocating
+property has to be set to
+.Sy off
+again, see
+.Xr vdevprops 7 .
 .Pp
 The metadata of the pool is rewritten in steps of about 16 MiB, each in a
 transaction group of its own, and the datasets in steps as described in
