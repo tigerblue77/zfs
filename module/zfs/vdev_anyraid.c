@@ -2385,7 +2385,7 @@ tasklist_read(vdev_t *vd)
 			kmem_free(vart, sizeof (*vart));
 		}
 		vdev_anyraid_relocate_task_t *vart =
-		    kmem_alloc(sizeof (*vart), KM_SLEEP);
+		    kmem_zalloc(sizeof (*vart), KM_SLEEP);
 		relocate_task_phys_t *rtp = buf + idx;
 		vart->vart_source_disk = rtp->rtp_source_disk;
 		vart->vart_dest_disk = rtp->rtp_dest_disk;
