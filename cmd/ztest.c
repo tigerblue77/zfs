@@ -425,6 +425,7 @@ ztest_func_t ztest_zap_parallel;
 ztest_func_t ztest_zap_rewrite;
 ztest_func_t ztest_meta_rewrite;
 ztest_func_t ztest_pool_rewrite;
+ztest_func_t ztest_vdev_drain;
 ztest_func_t ztest_zil_commit;
 ztest_func_t ztest_zil_remount;
 ztest_func_t ztest_dmu_read_write_zcopy;
@@ -483,6 +484,7 @@ static ztest_info_t ztest_info[] = {
 	ZTI_INIT(ztest_zap_rewrite, 10, &zopt_always),
 	ZTI_INIT(ztest_meta_rewrite, 1, &zopt_often),
 	ZTI_INIT(ztest_pool_rewrite, 1, &zopt_sometimes),
+	ZTI_INIT(ztest_vdev_drain, 1, &zopt_sometimes),
 	ZTI_INIT(ztest_split_pool, 1, &zopt_sometimes),
 	ZTI_INIT(ztest_zil_commit, 1, &zopt_incessant),
 	ZTI_INIT(ztest_zil_remount, 1, &zopt_sometimes),
@@ -563,6 +565,7 @@ static ztest_ds_t *ztest_ds;
 
 static kmutex_t ztest_vdev_lock;
 static boolean_t ztest_device_removal_active = B_FALSE;
+static boolean_t ztest_vdev_drain_active = B_FALSE;
 static boolean_t ztest_pool_scrubbed = B_FALSE;
 static kmutex_t ztest_checkpoint_lock;
 
@@ -6266,6 +6269,361 @@ ztest_pool_rewrite(ztest_ds_t *zd, uint64_t id)
 		fatal(B_FALSE, "dsl_pool_rewrite(%s) = %d", spa_name(spa),
 		    error);
 	}
+}
+
+/*
+ * Is tvd a concrete top-level vdev of the special or dedup class, by its
+ * metaslab group or by its allocation bias?
+ */
+static boolean_t
+ztest_vdev_is_class(spa_t *spa, vdev_t *tvd)
+{
+	metaslab_group_t *mg = tvd->vdev_mg;
+
+	if (!vdev_is_concrete(tvd) || tvd->vdev_islog)
+		return (B_FALSE);
+	return (tvd->vdev_alloc_bias == VDEV_BIAS_SPECIAL ||
+	    tvd->vdev_alloc_bias == VDEV_BIAS_DEDUP ||
+	    (mg != NULL && (mg->mg_class == spa_special_class(spa) ||
+	    mg->mg_class == spa_dedup_class(spa))));
+}
+
+/*
+ * Set the allocating property of the vdev of that guid, as zpool set does.
+ */
+static int
+ztest_vdev_set_allocating(spa_t *spa, uint64_t guid, boolean_t on)
+{
+	nvlist_t *innvl = fnvlist_alloc();
+	nvlist_t *props = fnvlist_alloc();
+	nvlist_t *outnvl = fnvlist_alloc();
+	int error;
+
+	fnvlist_add_uint64(props, vdev_prop_to_name(VDEV_PROP_ALLOCATING), on);
+	fnvlist_add_uint64(innvl, ZPOOL_VDEV_PROPS_SET_VDEV, guid);
+	fnvlist_add_nvlist(innvl, ZPOOL_VDEV_PROPS_SET_PROPS, props);
+	error = vdev_prop_set(spa, innvl, outnvl);
+	fnvlist_free(outnvl);
+	fnvlist_free(props);
+	fnvlist_free(innvl);
+
+	return (error);
+}
+
+/*
+ * Rewrite with these flags the objects of the tests in zd, as zfs rewrite of a
+ * whole file system does: each object named in the directory, under the lock
+ * of the object, which keeps it from being removed, then the directory, the
+ * blocks of dnodes and the accounting objects.  An object is created before
+ * it is named, so one not named yet is still being created, and its blocks
+ * are written after the vdev stopped allocating anyway.
+ */
+static int
+ztest_drain_objset(ztest_ds_t *zd, uint64_t flags, hrtime_t deadline)
+{
+	objset_t *os = zd->zd_os;
+	dmu_rewrite_stats_t drs = { 0 };
+	zap_attribute_t *za = zap_attribute_alloc();
+	uint64_t blkid = 0;
+	zap_cursor_t zc;
+	dnode_t *dn;
+	dmu_tx_t *tx;
+	uint64_t txg;
+	int error = 0;
+
+	for (zap_cursor_init(&zc, os, ZTEST_DIROBJ); error == 0 &&
+	    zap_cursor_retrieve(&zc, za) == 0; zap_cursor_advance(&zc)) {
+		uint64_t obj = za->za_first_integer;
+		uint64_t named;
+
+		if (gethrtime() > deadline) {
+			error = SET_ERROR(ETIME);
+			break;
+		}
+		ztest_object_lock(zd, obj, ZTRL_READER);
+		if (zap_lookup(os, ZTEST_DIROBJ, za->za_name, sizeof (named),
+		    1, &named) != 0 || named != obj ||
+		    dnode_hold(os, obj, FTAG, &dn) != 0) {
+			ztest_object_unlock(zd, obj);
+			continue;
+		}
+		if (DMU_OT_BYTESWAP(dn->dn_type) == DMU_BSWAP_ZAP) {
+			error = zap_rewrite_by_dnode(dn, flags, &drs);
+		} else {
+			uint64_t off = 0;
+			uint64_t end;
+
+			rw_enter(&dn->dn_struct_rwlock, RW_READER);
+			end = (dn->dn_maxblkid + 1) * dn->dn_datablksz;
+			rw_exit(&dn->dn_struct_rwlock);
+			error = dmu_rewrite_range(dn, &off, end, flags, 0,
+			    &drs);
+		}
+		dnode_rele(dn, FTAG);
+		ztest_object_unlock(zd, obj);
+	}
+	zap_cursor_fini(&zc);
+	zap_attribute_free(za);
+
+	if (error == 0) {
+		VERIFY0(dnode_hold(os, ZTEST_DIROBJ, FTAG, &dn));
+		error = zap_rewrite_by_dnode(dn, flags, &drs);
+		dnode_rele(dn, FTAG);
+	}
+	/* Let the dnodes dirtied so far be written first, as they are. */
+	if (error == 0)
+		txg_wait_synced(dmu_objset_pool(os), 0);
+	if (error == 0)
+		error = dmu_rewrite_meta_dnode(os, &blkid, flags, 0, &drs);
+	if (error == 0) {
+		VERIFY3U(blkid, ==, UINT64_MAX);
+		tx = dmu_tx_create(os);
+		error = dmu_tx_assign(tx, DMU_TX_WAIT);
+		if (error != 0) {
+			dmu_tx_abort(tx);
+			return (error);
+		}
+		txg = dmu_tx_get_txg(tx);
+		(void) dmu_objset_rewrite_used(os, flags, tx);
+		dmu_tx_commit(tx);
+		txg_wait_synced(dmu_objset_pool(os), txg);
+	}
+
+	return (error);
+}
+
+/* Destroy a snapshot, which keeps the blocks that a rewrite moved. */
+static int
+ztest_drain_snapshot_destroy(const char *name, void *arg)
+{
+	(void) arg;
+
+	if (strchr(name, '@') != NULL)
+		(void) dsl_destroy_snapshot(name, B_FALSE);
+	return (0);
+}
+
+/*
+ * Empty a special or dedup vdev while the other threads go on, as zpool
+ * rewrite -A does before zpool remove: make it non-allocating, rewrite with
+ * ZFS_REWRITE_SKIP_ALLOCATING the objects of the datasets of the tests, their
+ * dnodes and accounting objects, and the MOS, half of the time destroy the
+ * snapshots of those datasets, then remove the vdev if nothing is left on
+ * it.  It must then become a hole, and allocation_classes must be active
+ * exactly while a special or dedup vdev is left.  Otherwise, as when a
+ * snapshot, a dataset that is not walked, a deduplicated block or a
+ * checkpoint keeps blocks on it, or when the removal is refused, it allocates
+ * again.  A vdev left non-allocating by a pass that was killed is drained
+ * first.  The rewrite runs without ztest_vdev_lock: the vdev is looked up by
+ * its guid again afterwards, since other threads may have removed it.
+ */
+void
+ztest_vdev_drain(ztest_ds_t *zd, uint64_t id)
+{
+	(void) zd, (void) id;
+	spa_t *spa = ztest_spa;
+	dsl_pool_t *dp = spa_get_dsl(spa);
+	vdev_t *rvd = spa->spa_root_vdev;
+	uint64_t flags = ZFS_REWRITE_SKIP_ALLOCATING;
+	hrtime_t deadline = ztest_shared->zs_thread_stop;
+	boolean_t removed = B_FALSE;
+	boolean_t noalloc = B_FALSE;
+	boolean_t left;
+	uint64_t guid = 0;
+	uint64_t vdev_id = 0;
+	uint64_t alloc = UINT64_MAX;
+	vdev_t *vd;
+	int error = 0;
+
+	if (ztest_opts.zo_mmp_test)
+		return;
+
+	mutex_enter(&ztest_vdev_lock);
+	if (ztest_device_removal_active || ztest_vdev_drain_active) {
+		mutex_exit(&ztest_vdev_lock);
+		return;
+	}
+
+	spa_config_enter(spa, SCL_VDEV, FTAG, RW_READER);
+	for (uint64_t c = 0, n = 0; c < rvd->vdev_children; c++) {
+		vdev_t *tvd = rvd->vdev_child[c];
+
+		if (!ztest_vdev_is_class(spa, tvd) || tvd->vdev_mg == NULL ||
+		    tvd->vdev_removing)
+			continue;
+		if (tvd->vdev_noalloc || ztest_random(++n) == 0) {
+			guid = tvd->vdev_guid;
+			vdev_id = tvd->vdev_id;
+			noalloc = tvd->vdev_noalloc;
+		}
+		if (noalloc)
+			break;
+	}
+	spa_config_exit(spa, SCL_VDEV, FTAG);
+	if (guid == 0) {
+		mutex_exit(&ztest_vdev_lock);
+		return;
+	}
+
+	if (!noalloc) {
+		/* See ztest_vdev_add_remove() about spa_reset_logs(). */
+		(void) pthread_rwlock_wrlock(&ztest_name_lock);
+		error = ztest_vdev_set_allocating(spa, guid, B_FALSE);
+		(void) pthread_rwlock_unlock(&ztest_name_lock);
+
+		switch (error) {
+		case 0:
+		case EEXIST:	/* Generic zil_reset() error */
+		case EBUSY:	/* Replay required */
+		case EACCES:	/* Crypto key not loaded */
+			break;
+		case ENOSPC:	/* The property was not written. */
+			ztest_record_enospc(FTAG);
+			break;
+		default:
+			fatal(B_FALSE, "allocating=off on vdev %llu = %d",
+			    (u_longlong_t)vdev_id, error);
+		}
+
+		spa_config_enter(spa, SCL_VDEV, FTAG, RW_READER);
+		vd = spa_lookup_by_guid(spa, guid, B_FALSE);
+		noalloc = (vd != NULL && vd->vdev_noalloc);
+		spa_config_exit(spa, SCL_VDEV, FTAG);
+		if (!noalloc) {
+			mutex_exit(&ztest_vdev_lock);
+			return;
+		}
+	}
+	ztest_vdev_drain_active = B_TRUE;
+	mutex_exit(&ztest_vdev_lock);
+
+	if (ztest_opts.zo_verbose >= 3) {
+		(void) printf("draining vdev %llu\n", (u_longlong_t)vdev_id);
+	}
+
+	for (int d = 0; error == 0 && d < ztest_opts.zo_datasets; d++)
+		error = ztest_drain_objset(&ztest_ds[d], flags, deadline);
+
+	if (error == 0) {
+		dsl_pool_rewrite_t dpr = { 0 };
+
+		dpr.dpr_flags = flags;
+		(void) pthread_rwlock_rdlock(&ztest_name_lock);
+		while (error == 0 && dpr.dpr_phase != DSL_POOL_REWRITE_DONE) {
+			if (gethrtime() > deadline)
+				error = SET_ERROR(ETIME);
+			else
+				error = dsl_pool_rewrite(dp, &dpr);
+		}
+		(void) pthread_rwlock_unlock(&ztest_name_lock);
+	}
+
+	switch (error) {
+	case 0:
+	case ETIME:	/* The pass is over. */
+	case EDQUOT:
+	case EIO:
+	case ECKSUM:
+	case ZFS_ERR_CHECKPOINT_EXISTS:
+	case ZFS_ERR_DEVRM_IN_PROGRESS:
+		break;
+	case ENOSPC:
+		ztest_record_enospc(FTAG);
+		break;
+	default:
+		fatal(B_FALSE, "draining vdev %llu = %d",
+		    (u_longlong_t)vdev_id, error);
+	}
+
+	/*
+	 * Half of the time, destroy the snapshots of the datasets, which keep
+	 * the old blocks.  This is what lets the vdev be emptied, most of the
+	 * time.  The other threads take and destroy theirs again.
+	 */
+	if (ztest_random(2) == 0) {
+		(void) pthread_rwlock_wrlock(&ztest_name_lock);
+		for (int d = 0; d < ztest_opts.zo_datasets; d++) {
+			(void) dmu_objset_find(ztest_ds[d].zd_name,
+			    ztest_drain_snapshot_destroy, NULL,
+			    DS_FIND_SNAPSHOTS);
+		}
+		(void) pthread_rwlock_unlock(&ztest_name_lock);
+	}
+
+	/* Let the old blocks be freed, and their frees no longer deferred. */
+	txg_wait_synced(dp, 0);
+	txg_wait_synced(dp, 0);
+
+	mutex_enter(&ztest_vdev_lock);
+	spa_config_enter(spa, SCL_VDEV, FTAG, RW_READER);
+	vd = spa_lookup_by_guid(spa, guid, B_FALSE);
+	if (vd != NULL && vd == vd->vdev_top && vdev_is_concrete(vd) &&
+	    vd->vdev_noalloc && !vd->vdev_removing) {
+		mutex_enter(&vd->vdev_stat_lock);
+		alloc = vd->vdev_stat.vs_alloc;
+		mutex_exit(&vd->vdev_stat_lock);
+	} else {
+		vd = NULL;
+	}
+	spa_config_exit(spa, SCL_VDEV, FTAG);
+
+	/* Nothing allocates on it: once empty, it stays empty. */
+	if (vd != NULL && alloc == 0 && !ztest_device_removal_active) {
+		error = spa_vdev_remove(spa, guid, B_FALSE);
+		switch (error) {
+		case 0:
+			removed = B_TRUE;
+			break;
+		case ZFS_ERR_CHECKPOINT_EXISTS:
+		case ZFS_ERR_DISCARDING_CHECKPOINT:
+		case ZFS_ERR_RAIDZ_EXPAND_IN_PROGRESS:
+		case EBUSY:	/* Missing data, or a removal under way */
+		case EIO:	/* Not readable */
+			break;
+		default:
+			fatal(B_FALSE, "spa_vdev_remove(%llu) of an empty "
+			    "vdev = %d", (u_longlong_t)vdev_id, error);
+		}
+	}
+
+	if (removed) {
+		spa_config_enter(spa, SCL_VDEV, FTAG, RW_READER);
+		VERIFY3U(vdev_id, <, rvd->vdev_children);
+		if (rvd->vdev_child[vdev_id]->vdev_ops != &vdev_hole_ops) {
+			fatal(B_FALSE, "empty vdev %llu removed as %s, not as "
+			    "a hole", (u_longlong_t)vdev_id,
+			    rvd->vdev_child[vdev_id]->vdev_ops->vdev_op_type);
+		}
+		left = B_FALSE;
+		for (uint64_t c = 0; c < rvd->vdev_children; c++)
+			left |= ztest_vdev_is_class(spa, rvd->vdev_child[c]);
+		spa_config_exit(spa, SCL_VDEV, FTAG);
+		if (spa_feature_is_active(spa,
+		    SPA_FEATURE_ALLOCATION_CLASSES) != left) {
+			fatal(B_FALSE, "allocation_classes %s with%s special "
+			    "or dedup vdev left", left ? "enabled" : "active",
+			    left ? "" : " no");
+		}
+		if (ztest_opts.zo_verbose >= 3) {
+			(void) printf("drained vdev %llu removed as a hole%s\n",
+			    (u_longlong_t)vdev_id, left ? "" :
+			    ", allocation_classes enabled");
+		}
+	} else if (vd != NULL) {
+		error = ztest_vdev_set_allocating(spa, guid, B_TRUE);
+		if (error == ENOSPC)
+			ztest_record_enospc(FTAG);
+		else if (error != 0 && error != ENODEV)
+			fatal(B_FALSE, "allocating=on on vdev %llu = %d",
+			    (u_longlong_t)vdev_id, error);
+		if (ztest_opts.zo_verbose >= 3) {
+			(void) printf("drained vdev %llu kept, %llu bytes "
+			    "left\n", (u_longlong_t)vdev_id,
+			    (u_longlong_t)alloc);
+		}
+	}
+	ztest_vdev_drain_active = B_FALSE;
+	mutex_exit(&ztest_vdev_lock);
 }
 
 /*
