@@ -48,6 +48,15 @@ static unsigned long zvol_max_discard_blocks = 16384;
 static unsigned int zvol_open_timeout_ms = 1000;
 #endif
 
+/*
+ * Let a bio-based zvol take non-blocking (REQ_NOWAIT) submissions, so that
+ * io_uring submits to it without going through its workers.  Off by default:
+ * a single submitter with a deep queue then does all the submission work
+ * itself and loses throughput.  Read when a zvol's block device is created;
+ * blk-mq zvols always take them.
+ */
+static unsigned int zvol_nowait = 0;
+
 static unsigned int zvol_blk_mq_threads = 0;
 static unsigned int zvol_blk_mq_actual_threads;
 static boolean_t zvol_use_blk_mq = B_FALSE;
@@ -501,6 +510,7 @@ zvol_request_impl(zvol_state_t *zv, struct bio *bio, struct request *rq,
 	fstrans_cookie_t cookie = spl_fstrans_mark();
 	uint64_t offset = io_offset(bio, rq);
 	uint64_t size = io_size(bio, rq);
+	boolean_t nowait = (rq == NULL && io_is_nowait(bio, rq));
 	int rw;
 
 	if (unlikely(!ZVOL_OP_IS_SUPPORTED(ZVOL_OP(bio, rq)))) {
@@ -548,6 +558,17 @@ zvol_request_impl(zvol_state_t *zv, struct bio *bio, struct request *rq,
 	if (force_sync && rq != NULL && io_is_nowait(bio, rq))
 		force_sync = 0;
 
+	/*
+	 * A non-blocking bio is still in its submitter's task, and is only
+	 * ever queued to a taskq.  When that would block, or when the bio
+	 * should be processed here, fail it with EAGAIN: its submitter then
+	 * retries it from a thread that may block (an io_uring worker).
+	 */
+	if (nowait && force_sync) {
+		zvol_end_io(bio, rq, SET_ERROR(EAGAIN));
+		goto out;
+	}
+
 	zv_request_t zvr = {
 		.zv = zv,
 		.bio = bio,
@@ -591,7 +612,12 @@ zvol_request_impl(zvol_state_t *zv, struct bio *bio, struct request *rq,
 		 * concurrently opened.  Will be released after the i/o
 		 * completes.
 		 */
-		rw_enter(&zv->zv_suspend_lock, RW_READER);
+		if (!nowait) {
+			rw_enter(&zv->zv_suspend_lock, RW_READER);
+		} else if (!rw_tryenter(&zv->zv_suspend_lock, RW_READER)) {
+			zvol_end_io(bio, rq, SET_ERROR(EAGAIN));
+			goto out;
+		}
 
 		/*
 		 * Open a ZIL if this is the first time we have written to this
@@ -599,6 +625,11 @@ zvol_request_impl(zvol_state_t *zv, struct bio *bio, struct request *rq,
 		 * than zv_state_lock so that we don't need to acquire an
 		 * additional lock in this path.
 		 */
+		if (zv->zv_zilog == NULL && nowait) {
+			rw_exit(&zv->zv_suspend_lock);
+			zvol_end_io(bio, rq, SET_ERROR(EAGAIN));
+			goto out;
+		}
 		if (zv->zv_zilog == NULL) {
 			rw_exit(&zv->zv_suspend_lock);
 			rw_enter(&zv->zv_suspend_lock, RW_WRITER);
@@ -646,18 +677,24 @@ zvol_request_impl(zvol_state_t *zv, struct bio *bio, struct request *rq,
 		if (io_is_discard(bio, rq) || io_is_write_zeroes(bio, rq)) {
 			if (force_sync) {
 				zvol_discard(&zvr);
-			} else {
-				task = zv_request_task_create(zvr);
+			} else if ((task = zv_request_task_create(zvr,
+			    nowait)) != NULL) {
 				taskq_dispatch_ent(ztqs->tqs_taskq[tq_idx],
 				    zvol_discard_task, task, 0, &task->ent);
+			} else {
+				rw_exit(&zv->zv_suspend_lock);
+				zvol_end_io(bio, rq, SET_ERROR(EAGAIN));
 			}
 		} else {
 			if (force_sync) {
 				zvol_write(&zvr);
-			} else {
-				task = zv_request_task_create(zvr);
+			} else if ((task = zv_request_task_create(zvr,
+			    nowait)) != NULL) {
 				taskq_dispatch_ent(ztqs->tqs_taskq[tq_idx],
 				    zvol_write_task, task, 0, &task->ent);
+			} else {
+				rw_exit(&zv->zv_suspend_lock);
+				zvol_end_io(bio, rq, SET_ERROR(EAGAIN));
 			}
 		}
 	} else {
@@ -671,15 +708,23 @@ zvol_request_impl(zvol_state_t *zv, struct bio *bio, struct request *rq,
 			goto out;
 		}
 
-		rw_enter(&zv->zv_suspend_lock, RW_READER);
+		if (!nowait) {
+			rw_enter(&zv->zv_suspend_lock, RW_READER);
+		} else if (!rw_tryenter(&zv->zv_suspend_lock, RW_READER)) {
+			zvol_end_io(bio, rq, SET_ERROR(EAGAIN));
+			goto out;
+		}
 
 		/* See comment in WRITE case above. */
 		if (force_sync) {
 			zvol_read(&zvr);
-		} else {
-			task = zv_request_task_create(zvr);
+		} else if ((task = zv_request_task_create(zvr,
+		    nowait)) != NULL) {
 			taskq_dispatch_ent(ztqs->tqs_taskq[tq_idx],
 			    zvol_read_task, task, 0, &task->ent);
+		} else {
+			rw_exit(&zv->zv_suspend_lock);
+			zvol_end_io(bio, rq, SET_ERROR(EAGAIN));
 		}
 	}
 
@@ -1157,6 +1202,7 @@ typedef struct zvol_queue_limits {
 	unsigned int	zql_max_discard_sectors;
 	unsigned int	zql_discard_granularity;
 	unsigned int	zql_max_write_zeroes_sectors;
+	boolean_t	zql_nowait;
 } zvol_queue_limits_t;
 
 static void
@@ -1229,6 +1275,7 @@ zvol_queue_limits_init(zvol_queue_limits_t *limits, zvol_state_t *zv,
 	    (zvol_max_discard_blocks * zv->zv_volblocksize) >> 9;
 	limits->zql_discard_granularity = zv->zv_volblocksize;
 	limits->zql_max_write_zeroes_sectors = limits->zql_max_discard_sectors;
+	limits->zql_nowait = !use_blk_mq && zvol_nowait != 0;
 }
 
 #ifdef HAVE_BLK_ALLOC_DISK_2ARG
@@ -1255,6 +1302,8 @@ zvol_queue_limits_convert(zvol_queue_limits_t *limits,
 #ifdef HAVE_BLKDEV_QUEUE_LIMITS_FEATURES
 	qlimits->features =
 	    BLK_FEAT_WRITE_CACHE | BLK_FEAT_FUA | BLK_FEAT_IO_STAT;
+	if (limits->zql_nowait)
+		qlimits->features |= BLK_FEAT_NOWAIT;
 #endif
 }
 #endif
@@ -1277,6 +1326,10 @@ zvol_queue_limits_apply(zvol_queue_limits_t *limits,
 #ifndef HAVE_BLKDEV_QUEUE_LIMITS_FEATURES
 	blk_queue_set_write_cache(queue, B_TRUE);
 	blk_queue_flag_set(QUEUE_FLAG_IO_STAT, queue);
+#ifdef QUEUE_FLAG_NOWAIT
+	if (limits->zql_nowait)
+		blk_queue_flag_set(QUEUE_FLAG_NOWAIT, queue);
+#endif
 #endif
 }
 
@@ -1935,6 +1988,10 @@ MODULE_PARM_DESC(zvol_blk_mq_queue_depth, "Default blk-mq queue depth");
 
 module_param(zvol_use_blk_mq, uint, 0644);
 MODULE_PARM_DESC(zvol_use_blk_mq, "Use the blk-mq API for zvols");
+
+module_param(zvol_nowait, uint, 0644);
+MODULE_PARM_DESC(zvol_nowait,
+	"Let bio-based zvols take non-blocking submissions");
 
 module_param(zvol_blk_mq_blocks_per_thread, uint, 0644);
 MODULE_PARM_DESC(zvol_blk_mq_blocks_per_thread,
