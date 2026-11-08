@@ -5199,7 +5199,9 @@ zfs_rewrite_log_history(const char *name, const char *what, boolean_t first,
  *
  * A volume, or a range of it, is rewritten by zvol_rewrite() in one call, as
  * the counterpart of the file rewrite.  The volume can be in use, and does not
- * need to be exposed as a device.
+ * need to be exposed as a device.  A volume counts as two objects, its data
+ * and the ZAP of its properties, or as one for a range, which leaves the ZAP
+ * alone.
  *
  * A file system is rewritten whole: all its objects, the objects of its own
  * and those no path reaches included, then the blocks of its dnodes, its
@@ -5216,8 +5218,9 @@ zfs_rewrite_log_history(const char *name, const char *what, boolean_t first,
  *         previous call)
  * }
  *
- * outnvl, for a file system: {
- *     "rewrite_cursor" -> nvlist (absent once the rewrite is done)
+ * outnvl: {
+ *     "rewrite_cursor" -> nvlist (file systems only, absent once the rewrite
+ *         is done)
  *     "rewrite_objects" -> uint64_t (objects rewritten)
  *     "rewrite_marked" -> uint64_t (bytes marked for rewrite)
  *     "rewrite_shared" -> uint64_t (blocks left alone: snapshots share them)
@@ -5279,14 +5282,14 @@ zfs_ioc_dataset_rewrite(const char *name, nvlist_t *innvl, nvlist_t *outnvl)
 	if ((zvol && cursor != NULL) || (!zvol && (off != 0 || len != 0)))
 		return (SET_ERROR(EINVAL));
 	zfs_rewrite_log_history(name, "", first, B_FALSE, zrf.zrf_flags, 0);
-	if (zvol) {
-		error = zvol_rewrite(name, off, len, zrf.zrf_flags);
-		zfs_rewrite_log_history(name, "", B_FALSE, B_TRUE,
-		    zrf.zrf_flags, error);
-		return (error);
-	}
 
-	if (getzfsvfs(name, &zfsvfs) == 0) {
+	if (zvol) {
+		error = zvol_rewrite(name, off, len, zrf.zrf_flags,
+		    &zrf.zrf_stats);
+		zrf.zrf_phase = ZFS_REWRITE_FS_DONE;
+		if (error == 0)
+			zrf.zrf_objects = (off == 0 && len == 0) ? 2 : 1;
+	} else if (getzfsvfs(name, &zfsvfs) == 0) {
 		if (zfs_enter(zfsvfs, FTAG) != 0) {
 			error = SET_ERROR(EBUSY);
 		} else {
