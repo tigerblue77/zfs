@@ -111,6 +111,10 @@ with three held cells, at most 3 h 35 min.
 
 - Disposable VM, release builds, no other build, test or benchmark running.
   Builds run `nice -n 10 ionice -c3`, one tree at a time.
+- STEPS 3 to 5 are a performance A/B: run them only while the other two test
+  VMs are idle (you are told when). Every run records the guest's steal time
+  and load average (`steal_pct`, `load1` in `results.tsv`; STEP 7 prints them
+  per segment).
 - Post nothing, push nothing, install nothing (no package, no `make
   install`), no `zfs-tests.sh`, never reboot.
 - Work only under `/var/tmp/numa-p99-1108` (W) and `/var/log/numa-p99-1108`
@@ -930,7 +934,8 @@ pct() { zpool list -Hp -o size,alloc "$P" | awk '{ printf "%.1f", 100 * $2 / $1 
 u=$(pct)
 awk -v u="$u" 'BEGIN { exit !(u + 0 <= 60) }' ||
     { echo "pool $u % full before $label: stopping"; exit 3; }
-cpu() { awk '/^cpu / { print $2 + $3 + $4 + $7 + $8 + $9, $5 + $6 }' /proc/stat; }
+# busy (steal included, as on 6 November), idle + iowait, steal
+cpu() { awk '/^cpu / { print $2 + $3 + $4 + $7 + $8 + $9, $5 + $6, $9 }' /proc/stat; }
 tx() { awk '$1 ~ /^dmu_tx_(delay|dirty_throttle|dirty_over_max)$/ { s += $3 }
     $1 == "dmu_tx_quota" { q = $3 } END { print s + 0, q + 0 }' /proc/spl/kstat/zfs/dmu_tx; }
 zs() { awk '$1 == "zil_commit_stall_count" { print $3 + 0 }' /proc/spl/kstat/zfs/zil; }
@@ -941,7 +946,8 @@ snapcpu() {
 }
 python3 -I "$L/p99.py" sample "$o.samples" 45 &
 spid=$!
-read -r b0 i0 < <(cpu)
+la=$(cut -d' ' -f1 /proc/loadavg)
+read -r b0 i0 s0 < <(cpu)
 read -r t0 q0 < <(tx)
 z0=$(zs) g0=$(tg)
 "${pre[@]}" fio --name=t --directory="$MNT/$ds" --filename_format='f.$jobnum' \
@@ -991,7 +997,7 @@ snapcpu 1
 echo "$w0 $w1" > "$o.win"
 wait "$fpid"
 [ -n "$wpid" ] && wait "$wpid"
-read -r b1 i1 < <(cpu)
+read -r b1 i1 s1 < <(cpu)
 read -r t1 q1 < <(tx)
 z1=$(zs) g1=$(tg)
 kill "$spid" 2> /dev/null
@@ -1016,8 +1022,10 @@ read -r iops mib p50 p99 p999 < <(python3 -I "$L/p99.py" fio "$o.fio.json" "$rw"
 busy=$(awk -v b="$((b1 - b0))" -v i="$((i1 - i0))" \
     'BEGIN { printf "%.0f", 100 * b / (b + i) }')
 peak=$(cat "$o.peak" 2> /dev/null || echo -)
+steal=$(awk -v s="$((s1 - s0))" -v t="$((b1 - b0 + i1 - i0))" \
+    'BEGIN { printf "%.1f", (t > 0 ? 100 * s / t : 0) }')
 line="$label $arm $round $cell $mode $ds $rw $nj $place $iops $mib $p50 $p99 $p999"
-line="$line $busy $perf_cols $((t1 - t0)) $((q1 - q0)) $((z1 - z0)) $((g1 - g0)) $peak"
+line="$line $busy $perf_cols $((t1 - t0)) $((q1 - q0)) $((z1 - z0)) $((g1 - g0)) $peak $steal $la"
 echo "$line" >> "$L/results.tsv"
 echo "$label $(python3 -I "$L/p99.py" run "$o" "$iops")" >> "$L/extras.tsv"
 echo "$line"
@@ -1100,7 +1108,7 @@ baec99d9571cfef9d2f4e7f81d9731d8d69c7cbc14a3fb8211f4653d1f61e0a5  p99.py
 8ebe47d568429758937497386f6a058c1b90e5d4fa7f290757b36b236fa88462  load.sh
 69bc34b7e53a003398553451e9a9115c6f46d20f6236509864dd2f8fad548b9d  placement.sh
 2a28e08fa0938dd23ae0d4991ff5ec88e70f5ff43698c9a58ceefa3658af78ab  setup.sh
-0ccef268509bc1c52891492a0037a708d71d9d1076cd53979dfa0558d10a9f1d  run.sh
+d2f21567122a073d713fd0729dd93dff0754c3992af6d7425f7b6d074215cf6c  run.sh
 d7039e2aa88d7de214578da4ae174ab04d04ca0a719942ac8a519945957d7e05  seg.sh
 74df87c9de841b19ab42ca9dd947136721b97bff60c9ff02ec4d548b96fbdab7  phase1.sh
 5d4de079ea1a450363ac3db9b323eacea9c87d3138599080106962ef3d71c512  phase2.sh
@@ -1122,7 +1130,7 @@ for e in node-loads node-load-misses node-stores node-store-misses \
 	    grep -q -E '^[0-9]+,' && EV=${EV:+$EV,}$e
 done
 echo "EV=$EV" >> $L/env.sh && echo "EV=$EV"
-echo "label build round cell mode ds rw jobs place iops MiBps p50_us p99_us p999_us cpu_pct remote_pct hitm_s throttles quota zilstall txgs peak_pct" > $L/results.tsv
+echo "label build round cell mode ds rw jobs place iops MiBps p50_us p99_us p999_us cpu_pct remote_pct hitm_s throttles quota zilstall txgs peak_pct steal_pct load1" > $L/results.tsv
 echo "label $(python3 -I $L/p99.py extras-header)" > $L/extras.tsv
 ```
 
@@ -1220,6 +1228,13 @@ for a in B1n0 B0; do [ -f $L/raw/place.trace.$a.r1.txt ] && { echo "-- $a"; cat 
 echo "== segments"; grep -h -E '^(loaded|segment|round|trace round|pool|no cell)' $L/phase1.log $L/phase2.log 2>/dev/null
 echo "== phase 1 summary"; cat $L/summary.txt
 echo "== pool usage peak (write runs)"; awk 'NR > 1 && $22 != "-" { if ($22 + 0 > m) m = $22 + 0 } END { print m + 0 " %" }' $L/results.tsv
+echo "== noise per segment: steal % of CPU time and load1 before each run, min..max"
+awk 'NR > 1 { k = $5 " " $2 " r" $3; s = $23 + 0; l = $24 + 0
+    if (!(k in n)) { o[++m] = k; s0[k] = s1[k] = s; l0[k] = l1[k] = l }
+    n[k]++; if (s < s0[k]) s0[k] = s; if (s > s1[k]) s1[k] = s
+    if (l < l0[k]) l0[k] = l; if (l > l1[k]) l1[k] = l }
+    END { for (i = 1; i <= m; i++) { k = o[i]
+        printf "%s: steal %.1f..%.1f %%, load1 %.2f..%.2f\n", k, s0[k], s1[k], l0[k], l1[k] } }' $L/results.tsv
 echo "== phase 2"; cat $L/diag.txt 2>/dev/null || echo "(not run)"
 for c in $(cat $L/held.txt); do
 	for a in A B1 B1n0 B0; do
@@ -1254,6 +1269,11 @@ this document (what and why). Reply with the whole of `REPORT.txt`.
   `/proc/stat` and `/proc/schedstat`; `quota` (`dmu_tx_quota`), `zilstall`
   (`zil_commit_stall_count`) and `txgs` per run; `peak` the highest pool
   usage the watchdog saw.
+- **Noise.** `steal` is the share of the guest's CPU time the hypervisor
+  gave to others during a run (a busy host shows here; `cpu_pct` still
+  counts it as busy, as on 6 November), `load1` the guest's load average
+  just before the run. A segment whose steal stands out from the others is
+  suspect; say which.
 - **Phase 2**, per held cell and arm: `rq/wakeup` is the delay from a
   thread's wakeup to its running (p50, p99, max over the 2 s trace), `on-CPU
   ms by node` where the group ran and on how many CPUs, `off:` where it slept
@@ -1277,4 +1297,4 @@ this document (what and why). Reply with the whole of `REPORT.txt`.
   - For `swrite`, compare the `zil-commit` and `io-wait` time of `fio` and the
     `wrint` run-queue wait: the log block completions run on `z_wr_int`.
 
-sha256 of this file without this last line and the blank line before it: 4d8ae9d81893dae7b5621e3c3971f768ddee169f1285e70fd8ad4b12fa017221
+sha256 of this file without this last line and the blank line before it: 74f4dd5337d40dfe877529af25afb2ab04d1a5f070fd983c2508c5c107ee13e9
