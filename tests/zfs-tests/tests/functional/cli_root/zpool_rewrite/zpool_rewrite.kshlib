@@ -80,7 +80,8 @@ function rewrite_remove_empty # pool vdev
 
 #
 # Verify that the vdev removed from pool $1 became a hole: no indirect vdev,
-# and the device_removal and obsolete_counts features not active.
+# and the device_removal and obsolete_counts features not active, nor
+# allocation_classes, the special mirror having been the only class vdev.
 #
 function rewrite_check_hole # pool
 {
@@ -89,4 +90,5 @@ function rewrite_check_hole # pool
 	log_must eval "zdb -C $1 | grep -q \"type: 'hole'\""
 	log_must [ "$(get_pool_prop feature@device_removal $1)" = enabled ]
 	log_mustnot [ "$(get_pool_prop feature@obsolete_counts $1)" = active ]
+	log_must [ "$(get_pool_prop feature@allocation_classes $1)" = enabled ]
 }
