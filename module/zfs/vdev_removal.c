@@ -79,8 +79,9 @@
  * 4) Top-level vdevs of any type that have no allocated space are turned
  *    into a hole vdev like log vdevs, without copying any data and without
  *    an indirect vdev (spa_vdev_remove_empty).  The distributed spares of a
- *    draid vdev are removed with it, and the feature references taken when
- *    the vdev was added or expanded are given back.
+ *    draid vdev are removed with it, the feature references taken when the
+ *    vdev was added or expanded are given back, and allocation_classes
+ *    returns to enabled once no special or dedup vdev is left.
  *
  *   The following constraints currently apply to primary device removal,
  *   as described by 3):
@@ -2567,7 +2568,9 @@ typedef struct vdev_remove_empty_features {
 
 /*
  * Give back the feature references that the vdev took when it was added or
- * expanded, in the txg that writes the hole.
+ * expanded, in the txg that writes the hole.  The vdev may also have been the
+ * last special or dedup vdev, which allocation_classes is active for, as in
+ * vdev_remove_complete_sync().
  */
 static void
 vdev_remove_empty_features_sync(void *arg, dmu_tx_t *tx)
@@ -2583,6 +2586,7 @@ vdev_remove_empty_features_sync(void *arg, dmu_tx_t *tx)
 		spa_feature_decr(spa, SPA_FEATURE_ANYRAID, tx);
 	for (uint64_t i = 0; i < vref->vref_raidz_expansions; i++)
 		spa_feature_decr(spa, SPA_FEATURE_RAIDZ_EXPANSION, tx);
+	spa_deactivate_allocation_classes(spa, tx);
 
 	kmem_free(vref, sizeof (*vref));
 }
@@ -2612,12 +2616,6 @@ vdev_remove_empty_features(vdev_t *vd, uint64_t txg)
 	} else if (vd->vdev_ops == &vdev_anyraid_ops) {
 		/* As counted by spa_create() and spa_vdev_add(). */
 		vref->vref_anyraid = B_TRUE;
-	}
-
-	if (!vref->vref_draid && !vref->vref_anyraid &&
-	    vref->vref_raidz_expansions == 0) {
-		kmem_free(vref, sizeof (*vref));
-		return;
 	}
 
 	dmu_tx_t *tx = dmu_tx_create_assigned(spa->spa_dsl_pool, txg);
