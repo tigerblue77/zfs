@@ -518,6 +518,7 @@ static const char *aes_impl[] = {
 	"generic",
 	"x86_64",
 	"aesni",
+	"armv8-ce",
 };
 
 static const char *aes_gcm_impl[][2] = {
@@ -531,6 +532,9 @@ static const char *aes_gcm_impl[][2] = {
 	{ "aesni",   "avx" },
 	{ "x86_64",  "avx2" },
 	{ "aesni",   "avx2" },
+	{ "armv8-ce", "generic" },
+	{ "generic", "pmull" },
+	{ "armv8-ce", "pmull" },
 };
 
 /* signature of function to call after setting implementation params */
