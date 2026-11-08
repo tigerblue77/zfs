@@ -68,6 +68,7 @@ gcm_pmull_mul(uint64_t *x_in, uint64_t *y, uint64_t *res)
 	uint64_t hi = ntohll(y[0]);
 	uint64_t lo = ntohll(y[1]);
 	uint64_t carry = hi >> 63;
+	kfpu_ctx_t kctx;
 
 	Htable[0] = (lo << 1) ^ carry;
 	Htable[1] = ((hi << 1) | (lo >> 63)) ^
@@ -78,9 +79,9 @@ gcm_pmull_mul(uint64_t *x_in, uint64_t *y, uint64_t *res)
 	res[0] = x_in[0];
 	res[1] = x_in[1];
 
-	kfpu_begin();
+	kfpu_begin(&kctx);
 	gcm_gmult_v8(res, Htable);
-	kfpu_end();
+	kfpu_end(&kctx);
 }
 
 static boolean_t

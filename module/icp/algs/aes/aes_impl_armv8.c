@@ -57,12 +57,14 @@ extern ASMABI void aes_v8_decrypt(const uint32_t ct[4], uint32_t pt[4],
 static void
 aes_armv8_generate(aes_key_t *key, const uint32_t *keyarr32, int keybits)
 {
-	kfpu_begin();
+	kfpu_ctx_t kctx;
+
+	kfpu_begin(&kctx);
 	(void) aes_v8_set_encrypt_key(keyarr32, keybits,
 	    &(key->encr_ks.ks32[0]));
 	(void) aes_v8_set_decrypt_key(keyarr32, keybits,
 	    &(key->decr_ks.ks32[0]));
-	kfpu_end();
+	kfpu_end(&kctx);
 }
 
 /*
@@ -83,9 +85,11 @@ static void
 aes_armv8_encrypt(const uint32_t rk[], int Nr, const uint32_t pt[4],
     uint32_t ct[4])
 {
-	kfpu_begin();
+	kfpu_ctx_t kctx;
+
+	kfpu_begin(&kctx);
 	aes_v8_encrypt(pt, ct, rk, Nr);
-	kfpu_end();
+	kfpu_end(&kctx);
 }
 
 /*
@@ -106,9 +110,11 @@ static void
 aes_armv8_decrypt(const uint32_t rk[], int Nr, const uint32_t ct[4],
     uint32_t pt[4])
 {
-	kfpu_begin();
+	kfpu_ctx_t kctx;
+
+	kfpu_begin(&kctx);
 	aes_v8_decrypt(ct, pt, rk, Nr);
-	kfpu_end();
+	kfpu_end(&kctx);
 }
 
 static boolean_t
