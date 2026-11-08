@@ -390,10 +390,12 @@ mkpool() { # raidz | mirror
 	else
 		truncate -s "$DEV" "$D/m0" "$D/m1" "$D/n0" "$D/n1" "$D/d0" ||
 		    stop "truncate"
-		run "zpool create $P, two mirrors and a disk" $ZP create -f \
+		run "zpool create $P, two mirrors" $ZP create -f \
 		    -o ashift=12 -o cachefile="$CF" -O mountpoint="$M" \
 		    -O compression=lz4 -O xattr=sa -O atime=off $P \
-		    mirror "$D/m0" "$D/m1" mirror "$D/n0" "$D/n1" "$D/d0"
+		    mirror "$D/m0" "$D/m1" mirror "$D/n0" "$D/n1"
+		# A separate add: listed after a mirror, d0 would join it.
+		run "zpool add $P, a plain disk" $ZP add -f $P "$D/d0"
 	fi
 	$ZP status $P >> "$O/log.txt"
 	$ZP events -c > /dev/null
