@@ -103,7 +103,10 @@ jobs:
         env:
           RT: "10"
           REPS: "2"
-          VARIANTS: "A=A B=B C=C A2=A"
+          VARIANTS: >-
+            A=A B=B C=C A2=A
+            C4=C:zvol_nowait_max_inflight=4
+            C16=C:zvol_nowait_max_inflight=16
           MQ_VARIANTS: >-
             Amq=A:zvol_use_blk_mq=1
             Amqrs=A:zvol_use_blk_mq=1,zvol_request_sync=1
