@@ -2046,7 +2046,7 @@ vdev_anyraid_mapped(vdev_t *vd, uint64_t offset, uint64_t txg)
 {
 	vdev_anyraid_t *va = vd->vdev_tsd;
 	anyraid_tile_t search;
-	search.at_tile_id = offset / va->vd_tile_size;
+	search.at_tile_id = offset / (va->vd_tile_size * va->vd_width);
 
 	rw_enter(&va->vd_lock, RW_READER);
 	anyraid_tile_t *tile = avl_find(&va->vd_tile_map, &search, NULL);
@@ -2400,8 +2400,8 @@ tasklist_read(vdev_t *vd)
 		 * resume offset.
 		 */
 		if (i >= done && vart->vart_task <= var->var_task) {
-			uint64_t ms_per_tile = va->vd_tile_size >>
-			    vd->vdev_ms_shift;
+			uint64_t ms_per_tile = (va->vd_tile_size *
+			    va->vd_width) >> vd->vdev_ms_shift;
 			uint64_t start = vart->vart_tile * ms_per_tile;
 			uint64_t end = start + ms_per_tile;
 			for (uint64_t m = start; m < end; m++) {
@@ -3617,7 +3617,8 @@ vdev_anyraid_check_contract(vdev_t *tvd, vdev_t *lvd, dmu_tx_t *tx)
 	 */
 	anyraid_tile_t *at = avl_last(&va->vd_tile_map);
 	uint32_t highest_tile = at->at_tile_id;
-	if (updated_asize / va->vd_tile_size <= highest_tile) {
+	if (updated_asize / (va->vd_tile_size * va->vd_width) <=
+	    highest_tile) {
 		/*
 		 * In this case we do have room to generate a full movement
 		 * plan, but we end up with not enough tiles to actually back
