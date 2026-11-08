@@ -5158,6 +5158,42 @@ zfs_dataset_rewrite_check(const char *name, uint64_t flags, boolean_t *zvolp)
 }
 
 /*
+ * A rewrite of a dataset or of the metadata of a pool takes one ioctl per
+ * step, about one a second for as long as it lasts, so these ioctls are not
+ * logged in the history, which they would fill.  As for a scrub or a vdev
+ * removal, internal events record instead that the rewrite starts, before its
+ * first step, and that it ends, done or stopped by an error, after its last.
+ * A rewrite done lets the command that ran it log itself once, as an ioctl
+ * that is logged does.
+ */
+static void
+zfs_rewrite_log_history(const char *name, const char *what, boolean_t first,
+    boolean_t last, uint64_t flags, int error)
+{
+	spa_t *spa;
+
+	if ((!first && !last) || spa_open(name, &spa, FTAG) != 0)
+		return;
+	if (first) {
+		spa_history_log_internal(spa, "rewrite", NULL,
+		    "%s%s: started, flags 0x%llx", name, what,
+		    (u_longlong_t)flags);
+	}
+	if (last && error != 0) {
+		spa_history_log_internal(spa, "rewrite", NULL,
+		    "%s%s: stopped, error %d", name, what, error);
+	} else if (last) {
+		spa_history_log_internal(spa, "rewrite", NULL, "%s%s: done",
+		    name, what);
+		char *s = tsd_get(zfs_allow_log_key);
+		if (s != NULL)
+			kmem_strfree(s);
+		(void) tsd_set(zfs_allow_log_key, kmem_strdup(spa_name(spa)));
+	}
+	spa_close(spa, FTAG);
+}
+
+/*
  * Rewrite a dataset as-is without modification, so that its blocks are
  * reallocated as if they were read and written back.
  *
@@ -5201,6 +5237,7 @@ static int
 zfs_ioc_dataset_rewrite(const char *name, nvlist_t *innvl, nvlist_t *outnvl)
 {
 	zfs_rewrite_fs_t zrf = { 0 };
+	boolean_t first = B_TRUE;
 	nvlist_t *cursor = NULL;
 	zfsvfs_t *zfsvfs;
 	uint64_t off = 0;
@@ -5217,26 +5254,37 @@ zfs_ioc_dataset_rewrite(const char *name, nvlist_t *innvl, nvlist_t *outnvl)
 		(void) nvlist_lookup_uint64(innvl, DATASET_REWRITE_FLAGS,
 		    &zrf.zrf_flags);
 		if (nvlist_lookup_nvlist(innvl, DATASET_REWRITE_CURSOR,
-		    &cursor) == 0 &&
-		    (nvlist_lookup_uint64(cursor, "phase", &zrf.zrf_phase) ||
-		    nvlist_lookup_uint64(cursor, "object", &zrf.zrf_object) ||
-		    nvlist_lookup_uint64(cursor, "offset", &zrf.zrf_offset)))
-			return (SET_ERROR(EINVAL));
+		    &cursor) == 0) {
+			first = B_FALSE;
+			if (nvlist_lookup_uint64(cursor, "phase",
+			    &zrf.zrf_phase) ||
+			    nvlist_lookup_uint64(cursor, "object",
+			    &zrf.zrf_object) ||
+			    nvlist_lookup_uint64(cursor, "offset",
+			    &zrf.zrf_offset))
+				return (SET_ERROR(EINVAL));
+		}
 	}
 	if ((zrf.zrf_flags & ~ZFS_REWRITE_VALID_FLAGS) != 0 ||
 	    zrf.zrf_phase >= ZFS_REWRITE_FS_DONE)
 		return (SET_ERROR(EINVAL));
 
 	error = zfs_dataset_rewrite_check(name, zrf.zrf_flags, &zvol);
-	if (error != 0)
+	if (error != 0) {
+		zfs_rewrite_log_history(name, "", B_FALSE, !first,
+		    zrf.zrf_flags, error);
 		return (error);
+	}
 	/* A range only applies to a volume, a cursor to a file system. */
-	if (zvol && cursor != NULL)
+	if ((zvol && cursor != NULL) || (!zvol && (off != 0 || len != 0)))
 		return (SET_ERROR(EINVAL));
-	if (zvol)
-		return (zvol_rewrite(name, off, len, zrf.zrf_flags));
-	if (off != 0 || len != 0)
-		return (SET_ERROR(EINVAL));
+	zfs_rewrite_log_history(name, "", first, B_FALSE, zrf.zrf_flags, 0);
+	if (zvol) {
+		error = zvol_rewrite(name, off, len, zrf.zrf_flags);
+		zfs_rewrite_log_history(name, "", B_FALSE, B_TRUE,
+		    zrf.zrf_flags, error);
+		return (error);
+	}
 
 	if (getzfsvfs(name, &zfsvfs) == 0) {
 		if (zfs_enter(zfsvfs, FTAG) != 0) {
@@ -5285,6 +5333,9 @@ zfs_ioc_dataset_rewrite(const char *name, nvlist_t *innvl, nvlist_t *outnvl)
 	/* Report damaged data as I/O does. */
 	if (error == ECKSUM)
 		error = SET_ERROR(EIO);
+	zfs_rewrite_log_history(name, "", B_FALSE,
+	    error != 0 || zrf.zrf_phase == ZFS_REWRITE_FS_DONE, zrf.zrf_flags,
+	    error);
 	return (error);
 }
 
@@ -5316,6 +5367,7 @@ static int
 zfs_ioc_pool_rewrite(const char *pool, nvlist_t *innvl, nvlist_t *outnvl)
 {
 	dsl_pool_rewrite_t dpr = { 0 };
+	boolean_t first = B_TRUE;
 	nvlist_t *cursor;
 	spa_t *spa;
 	int error;
@@ -5325,6 +5377,7 @@ zfs_ioc_pool_rewrite(const char *pool, nvlist_t *innvl, nvlist_t *outnvl)
 		    &dpr.dpr_flags);
 		if (nvlist_lookup_nvlist(innvl, POOL_REWRITE_CURSOR,
 		    &cursor) == 0) {
+			first = B_FALSE;
 			if (nvlist_lookup_uint64(cursor, "phase",
 			    &dpr.dpr_phase) != 0 ||
 			    nvlist_lookup_uint64(cursor, "object",
@@ -5343,6 +5396,8 @@ zfs_ioc_pool_rewrite(const char *pool, nvlist_t *innvl, nvlist_t *outnvl)
 	error = spa_open(pool, &spa, FTAG);
 	if (error != 0)
 		return (error);
+	zfs_rewrite_log_history(pool, " metadata", first, B_FALSE,
+	    dpr.dpr_flags, 0);
 	error = dsl_pool_rewrite(spa_get_dsl(spa), &dpr);
 	spa_close(spa, FTAG);
 
@@ -5362,6 +5417,9 @@ zfs_ioc_pool_rewrite(const char *pool, nvlist_t *innvl, nvlist_t *outnvl)
 	/* Report damaged metadata as I/O does. */
 	if (error == ECKSUM)
 		error = SET_ERROR(EIO);
+	zfs_rewrite_log_history(pool, " metadata", B_FALSE,
+	    error != 0 || dpr.dpr_phase == DSL_POOL_REWRITE_DONE,
+	    dpr.dpr_flags, error);
 	return (error);
 }
 
@@ -8466,16 +8524,16 @@ zfs_ioctl_init(void)
 	    POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY, B_TRUE, B_TRUE,
 	    zfs_keys_ddt_prune, ARRAY_SIZE(zfs_keys_ddt_prune));
 
-	/* Called once per step: not logged in the history each time. */
+	/* Called once per step: see zfs_rewrite_log_history(). */
 	zfs_ioctl_register("dataset_rewrite", ZFS_IOC_DATASET_REWRITE,
 	    zfs_ioc_dataset_rewrite, zfs_secpolicy_config, DATASET_NAME,
-	    POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY, B_FALSE, B_TRUE,
+	    POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY, B_FALSE, B_FALSE,
 	    zfs_keys_dataset_rewrite, ARRAY_SIZE(zfs_keys_dataset_rewrite));
 
-	/* Called once per step: not logged in the history each time. */
+	/* Called once per step: see zfs_rewrite_log_history(). */
 	zfs_ioctl_register("pool_rewrite", ZFS_IOC_POOL_REWRITE,
 	    zfs_ioc_pool_rewrite, zfs_secpolicy_config, POOL_NAME,
-	    POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY, B_FALSE, B_TRUE,
+	    POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY, B_FALSE, B_FALSE,
 	    zfs_keys_pool_rewrite, ARRAY_SIZE(zfs_keys_pool_rewrite));
 
 	/* IOCTLS that use the legacy function signature */
