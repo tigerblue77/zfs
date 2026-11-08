@@ -1424,6 +1424,72 @@ const zio_vsd_ops_t vdev_anyraid_vsd_ops = {
 	.vsd_free = vdev_anyraid_map_free_vsd,
 };
 
+/*
+ * How many more width-wide stripes the free tiles can hold, with at most one
+ * tile per child in each stripe.
+ */
+static uint64_t
+anyraid_free_stripes(const uint64_t *nfree, int children, uint_t width)
+{
+	uint64_t lo = 0, hi = 0;
+	for (int c = 0; c < children; c++)
+		hi += nfree[c];
+	hi /= width;
+	while (lo < hi) {
+		uint64_t mid = (lo + hi + 1) / 2, sum = 0;
+		for (int c = 0; c < children; c++)
+			sum += MIN(nfree[c], mid);
+		if (sum >= width * mid)
+			lo = mid;
+		else
+			hi = mid - 1;
+	}
+	return (lo);
+}
+
+/*
+ * A new stripe should avoid children that cannot be written, but only when
+ * that costs no capacity: the asize assumes the free tiles can still form
+ * every remaining stripe.
+ */
+static boolean_t
+anyraid_skip_unwriteable(vdev_t *vd, uint_t width)
+{
+	vdev_anyraid_t *va = vd->vdev_tsd;
+	int children = vd->vdev_children;
+	boolean_t any = B_FALSE;
+
+	for (int c = 0; c < children; c++) {
+		if (!vdev_writeable(vd->vdev_child[c]))
+			any = B_TRUE;
+	}
+	if (!any)
+		return (B_FALSE);
+
+	uint64_t *nfree = kmem_alloc(sizeof (*nfree) * children, KM_SLEEP);
+	for (int c = 0; c < children; c++) {
+		vdev_anyraid_node_t *van = va->vd_children[c];
+		uint64_t alloc = anyraid_freelist_alloc(&van->van_freelist);
+		nfree[c] = van->van_capacity > alloc ?
+		    van->van_capacity - alloc : 0;
+	}
+	uint64_t before = anyraid_free_stripes(nfree, children, width);
+	uint_t chosen = 0;
+	for (vdev_anyraid_node_t *van = avl_first(&va->vd_children_tree);
+	    van != NULL && chosen < width;
+	    van = AVL_NEXT(&va->vd_children_tree, van)) {
+		if (nfree[van->van_id] == 0 ||
+		    !vdev_writeable(vd->vdev_child[van->van_id]))
+			continue;
+		nfree[van->van_id]--;
+		chosen++;
+	}
+	boolean_t skip = chosen == width && before > 0 &&
+	    anyraid_free_stripes(nfree, children, width) == before - 1;
+	kmem_free(nfree, sizeof (*nfree) * children);
+	return (skip);
+}
+
 static void
 vdev_anyraid_io_start(zio_t *zio)
 {
@@ -1463,8 +1529,14 @@ vdev_anyraid_io_start(zio_t *zio)
 		ASSERT3U(width, <=, avl_numnodes(&va->vd_children_tree));
 		vdev_anyraid_node_t **vans = kmem_alloc(sizeof (*vans) * width,
 		    KM_SLEEP);
+		boolean_t skip = anyraid_skip_unwriteable(vd, width);
 		for (int i = 0; i < width; i++) {
 			vans[i] = avl_first(&va->vd_children_tree);
+			while (skip && !vdev_writeable(
+			    vd->vdev_child[vans[i]->van_id])) {
+				vans[i] = AVL_NEXT(&va->vd_children_tree,
+				    vans[i]);
+			}
 			ASSERT(vans[i] &&
 			    anyraid_freelist_alloc(&vans[i]->van_freelist) <
 			    vans[i]->van_capacity);
