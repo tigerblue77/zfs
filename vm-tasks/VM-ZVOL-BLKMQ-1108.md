@@ -174,10 +174,10 @@ Expected: `A 2796b5da69ab267f96479f6e09c00613d628d450 zfs_znode (Linux):
 Optimize hold insertion`, `B dbd66096d17bf7801a669664789e9f4e8767df3a zvol:
 queue REQ_NOWAIT requests to blk-mq zvols`; `3 files changed, 30
 insertions(+), 2 deletions(-)`; `io_is_nowait calls:` 0 for A and 1 for B;
-`build rc=0` twice; `ZFS_DEBUG defines: 1` twice (a release build: 2 would be
-a debug build); both built for `uname -r`; two different `zfs.ko`
-srcversions. On a failed build quote `grep -nE 'error:|Error [0-9]'
-$L/build-<n>.log | head -20` and stop.
+`build rc=0` twice; `ZFS_DEBUG defines: 1` twice (a release build; a debug
+build of these trees prints 3); both built for `uname -r`; two different
+`zfs.ko` srcversions. On a failed build quote `grep -nE 'error:|Error
+[0-9]' $L/build-<n>.log | head -20` and stop.
 
 ## STEP 2: the scripts (1 min)
 
