@@ -509,18 +509,20 @@ zvol_rewrite_find(objset_t *os, const char *name, boolean_t owned,
 /*
  * Rewrite one piece of a volume.  If the volume has a zvol_state_t, hold its
  * suspend lock, so that it can not go away, and exclude I/O to the piece.
- * The txg the piece was dirtied in is returned in *txgp, if it was.
+ * The txg the piece was dirtied in is returned in *txgp, if it was, and its
+ * counters are added to *stats.
  */
 static int
 zvol_rewrite_chunk(objset_t *os, dnode_t *dn, uint64_t off, uint64_t len,
-    uint64_t flags, uint64_t *txgp)
+    uint64_t flags, uint64_t *txgp, dmu_rewrite_stats_t *stats)
 {
 	char name[ZFS_MAX_DATASET_NAME_LEN];
 	zvol_state_t *zv;
 	zfs_locked_range_t *lr = NULL;
 	uint64_t lo;
 	uint64_t hi;
-	dmu_rewrite_stats_t drs = { 0 };
+	uint64_t read = stats->drs_read;
+	uint64_t marked = stats->drs_marked;
 	dmu_tx_t *tx;
 	int error;
 
@@ -559,14 +561,15 @@ zvol_rewrite_chunk(objset_t *os, dnode_t *dn, uint64_t off, uint64_t len,
 		dmu_tx_abort(tx);
 	} else {
 		*txgp = dmu_tx_get_txg(tx);
-		error = dmu_rewrite_by_dnode(dn, off, len, flags, tx, &drs);
+		error = dmu_rewrite_by_dnode(dn, off, len, flags, tx, stats);
 		dmu_tx_commit(tx);
 	}
 
 	if (zv != NULL) {
-		dataset_kstats_update_read_kstats(&zv->zv_kstat, drs.drs_read);
+		dataset_kstats_update_read_kstats(&zv->zv_kstat,
+		    stats->drs_read - read);
 		dataset_kstats_update_write_kstats(&zv->zv_kstat,
-		    drs.drs_marked);
+		    stats->drs_marked - marked);
 		zfs_rangelock_exit(lr);
 		rw_exit(&zv->zv_suspend_lock);
 	}
@@ -585,11 +588,14 @@ zvol_rewrite_chunk(objset_t *os, dnode_t *dn, uint64_t off, uint64_t len,
  * rolled back, received into, shrunk or sent itself, nor the pool exported,
  * until the rewrite is done.  It does not return before the rewritten data is
  * on stable storage.  A rewrite of the whole volume includes the ZAP of its
- * properties, the blocks of its dnodes and the block of its objset.
+ * properties, the blocks of its dnodes and the block of its objset.  The
+ * counters of the rewrite are added to *stats, unless stats is NULL.
  */
 int
-zvol_rewrite(const char *name, uint64_t off, uint64_t len, uint64_t flags)
+zvol_rewrite(const char *name, uint64_t off, uint64_t len, uint64_t flags,
+    dmu_rewrite_stats_t *stats)
 {
+	dmu_rewrite_stats_t drs = { 0 };
 	dsl_pool_t *dp;
 	dsl_dataset_t *ds;
 	objset_t *os;
@@ -605,6 +611,8 @@ zvol_rewrite(const char *name, uint64_t off, uint64_t len, uint64_t flags)
 
 	if ((flags & ~ZFS_REWRITE_VALID_FLAGS) != 0)
 		return (SET_ERROR(EINVAL));
+	if (stats == NULL)
+		stats = &drs;
 
 	error = dsl_pool_hold(name, FTAG, &dp);
 	if (error != 0)
@@ -712,7 +720,7 @@ zvol_rewrite(const char *name, uint64_t off, uint64_t len, uint64_t flags)
 		}
 
 		n = MIN(MIN(stop, noff) - off, chunk - P2PHASE(off, chunk));
-		error = zvol_rewrite_chunk(os, dn, off, n, flags, &txg);
+		error = zvol_rewrite_chunk(os, dn, off, n, flags, &txg, stats);
 		last_txg = MAX(last_txg, txg);
 		if (error != 0)
 			break;
@@ -730,18 +738,18 @@ zvol_rewrite(const char *name, uint64_t off, uint64_t len, uint64_t flags)
 	 * rewrite dirtied the dnode, and the blocks above it, already.
 	 */
 	if (error == 0 && whole && end >= volsize) {
-		dmu_rewrite_stats_t drs = { 0 };
+		uint64_t marked = stats->drs_marked;
 		uint64_t blkid = 0;
 		dnode_t *zdn;
 
 		error = dnode_hold(os, ZVOL_ZAP_OBJ, FTAG, &zdn);
 		if (error == 0) {
-			error = zap_rewrite_by_dnode(zdn, flags, &drs);
+			error = zap_rewrite_by_dnode(zdn, flags, stats);
 			dnode_rele(zdn, FTAG);
 		}
 		if (error == 0)
 			error = dmu_rewrite_meta_dnode(os, &blkid, flags, 0,
-			    &drs);
+			    stats);
 		if (error == 0) {
 			dmu_tx_t *tx = dmu_tx_create(os);
 
@@ -751,7 +759,7 @@ zvol_rewrite(const char *name, uint64_t off, uint64_t len, uint64_t flags)
 			} else {
 				/* This group follows those of the marks. */
 				if (dmu_objset_rewrite_used(os, flags, tx) ||
-				    drs.drs_marked != 0)
+				    stats->drs_marked != marked)
 					last_txg = MAX(last_txg,
 					    dmu_tx_get_txg(tx));
 				dmu_tx_commit(tx);

@@ -23,7 +23,8 @@
 #	   extended attributes in spill blocks, files of other users with
 #	   quotas and cloned blocks, and a volume.
 #	2. Set allocating=off on the special mirror, run zpool rewrite -A -v,
-#	   and verify that nothing stays allocated on the special mirror.
+#	   and verify that it reports what it marked in the volume, and that
+#	   nothing stays allocated on the special mirror.
 #	3. Verify the data after an export and import, and that zdb finds no
 #	   leak.
 #	4. Remove the special mirror, and verify that it became a hole, with
@@ -119,6 +120,9 @@ for ds in $POOL $FS $UNMOUNTED $ENC $VOL; do
 	log_must grep -q "^$ds: done" $VDIR/out
 done
 log_must grep -q "^$POOL: pool metadata: done" $VDIR/out
+# The volume, rewritten in one step: its data and the ZAP of its properties.
+log_must grep -q "^$VOL: done, 2 objects, " $VDIR/out
+log_mustnot grep -q "^$VOL: done, .* 0B marked" $VDIR/out
 log_must grep -q "^$POOL: $SPECIAL (allocating=off):" $VDIR/out
 log_mustnot ismounted $UNMOUNTED
 if ! rewrite_wait_empty $POOL $SPECIAL 60; then

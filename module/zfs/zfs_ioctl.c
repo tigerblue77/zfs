@@ -5139,7 +5139,7 @@ zfs_ioc_zvol_rewrite(const char *name, nvlist_t *innvl, nvlist_t *outnvl)
 		(void) nvlist_lookup_uint64(innvl, ZVOL_REWRITE_FLAGS, &flags);
 	}
 
-	return (zvol_rewrite(name, off, len, flags));
+	return (zvol_rewrite(name, off, len, flags, NULL));
 }
 
 /*
@@ -5237,7 +5237,8 @@ zfs_rewrite_log_history(const char *name, const char *what, boolean_t first,
  * of its dnodes, its accounting objects and its objset.  This is done in
  * steps, each call doing about 64 MiB or a second of it, so that a mounted
  * file system is entered, and an unmounted one owned, for that long at most;
- * see zfs_rewrite_fs().  A volume is rewritten whole by zvol_rewrite().
+ * see zfs_rewrite_fs().  A volume is rewritten whole by zvol_rewrite(), in one
+ * call, which counts as two objects: its data and the ZAP of its properties.
  *
  * innvl: {
  *     "rewrite_flags" -> uint64_t (optional, ZFS_REWRITE_* flags)
@@ -5296,14 +5297,13 @@ zfs_ioc_dataset_rewrite(const char *name, nvlist_t *innvl, nvlist_t *outnvl)
 		return (error);
 	}
 	zfs_rewrite_log_history(name, "", first, B_FALSE, zrf.zrf_flags, 0);
-	if (zvol) {
-		error = zvol_rewrite(name, 0, 0, zrf.zrf_flags);
-		zfs_rewrite_log_history(name, "", B_FALSE, B_TRUE,
-		    zrf.zrf_flags, error);
-		return (error);
-	}
 
-	if (getzfsvfs(name, &zfsvfs) == 0) {
+	if (zvol) {
+		error = zvol_rewrite(name, 0, 0, zrf.zrf_flags, &zrf.zrf_stats);
+		zrf.zrf_phase = ZFS_REWRITE_FS_DONE;
+		if (error == 0)
+			zrf.zrf_objects = 2;
+	} else if (getzfsvfs(name, &zfsvfs) == 0) {
 		if (zfs_enter(zfsvfs, FTAG) != 0) {
 			error = SET_ERROR(EBUSY);
 		} else {
