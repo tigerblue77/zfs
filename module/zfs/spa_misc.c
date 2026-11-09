@@ -2455,12 +2455,12 @@ bp_get_dsize(spa_t *spa, const blkptr_t *bp)
  * block keeps the DVAs of a flat DDT entry, which can be more than zp asks
  * for.  A gang block's DVAs have the size of its header, and a block on an
  * indirect vdev, or on a vdev that takes no allocations, would move, so they
- * are not current.  Holes allocate nothing, and an embedded block is current
- * if it was compressed as zp would compress it.
+ * are not current.  Holes and embedded blocks allocate nothing, so an
+ * embedded block is current if its compression is.
  *
- * A block stored uncompressed may be one that compression did not shrink, so
- * it is not taken as one to compress.  The compression level is not recorded
- * in the block pointer, and is not compared.
+ * A block stored uncompressed, embedded or not, may be one that compression
+ * did not shrink, so it is not taken as one to compress.  The compression
+ * level is not recorded in the block pointer, and is not compared.
  */
 boolean_t
 bp_rewrite_is_current(spa_t *spa, const blkptr_t *bp, const zio_prop_t *zp,
@@ -2468,16 +2468,18 @@ bp_rewrite_is_current(spa_t *spa, const blkptr_t *bp, const zio_prop_t *zp,
 {
 	if (BP_IS_GANG(bp))
 		return (B_FALSE);
-	/* A rewrite embeds the data again only if it compresses it alike. */
+
+	enum zio_compress compress = BP_GET_COMPRESS(bp);
+	boolean_t compress_current = (compress == ZIO_COMPRESS_OFF ||
+	    compress == zp->zp_compress);
+
 	if (BP_IS_EMBEDDED(bp))
 		return (BPE_GET_ETYPE(bp) != BP_EMBEDDED_TYPE_DATA ||
-		    BP_GET_COMPRESS(bp) == zp->zp_compress);
+		    compress_current);
 	if (BP_GET_NDVAS(bp) == 0)
 		return (B_TRUE);
 
-	enum zio_compress compress = BP_GET_COMPRESS(bp);
-	if (BP_GET_CHECKSUM(bp) != zp->zp_checksum ||
-	    (compress != ZIO_COMPRESS_OFF && compress != zp->zp_compress) ||
+	if (BP_GET_CHECKSUM(bp) != zp->zp_checksum || !compress_current ||
 	    BP_GET_DEDUP(bp) != zp->zp_dedup)
 		return (B_FALSE);
 
