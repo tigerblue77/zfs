@@ -3983,6 +3983,7 @@ zfs_ioc_create(const char *fsname, nvlist_t *innvl, nvlist_t *outnvl)
 	zfs_creat_t zct = { 0 };
 	nvlist_t *nvprops = NULL;
 	nvlist_t *hidden_args = NULL;
+	int (*checkfunc)(void *arg, dmu_tx_t *tx) = NULL;
 	void (*cbfunc)(objset_t *os, void *arg, cred_t *cr, dmu_tx_t *tx);
 	dmu_objset_type_t type;
 	boolean_t is_insensitive = B_FALSE;
@@ -3998,6 +3999,7 @@ zfs_ioc_create(const char *fsname, nvlist_t *innvl, nvlist_t *outnvl)
 		break;
 
 	case DMU_OST_ZVOL:
+		checkfunc = zvol_create_check;
 		cbfunc = zvol_create_cb;
 		break;
 
@@ -4064,7 +4066,8 @@ zfs_ioc_create(const char *fsname, nvlist_t *innvl, nvlist_t *outnvl)
 	}
 
 	error = dmu_objset_create(fsname, type,
-	    is_insensitive ? DS_FLAG_CI_DATASET : 0, dcp, cbfunc, &zct);
+	    is_insensitive ? DS_FLAG_CI_DATASET : 0, dcp, checkfunc, cbfunc,
+	    &zct);
 
 	nvlist_free(zct.zct_zplprops);
 	dsl_crypto_params_free(dcp, !!error);

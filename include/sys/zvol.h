@@ -38,6 +38,7 @@ extern int zvol_check_volsize(uint64_t, uint64_t);
 extern int zvol_check_volblocksize(const char *, uint64_t);
 extern int zvol_get_stats(objset_t *, nvlist_t *);
 extern boolean_t zvol_is_zvol(const char *);
+extern int zvol_create_check(void *, dmu_tx_t *);
 extern void zvol_create_cb(objset_t *, void *, cred_t *, dmu_tx_t *);
 extern int zvol_set_volsize(const char *, uint64_t);
 extern int zvol_set_volthreading(const char *, boolean_t);

@@ -1166,6 +1166,7 @@ dmu_objset_create_impl(spa_t *spa, dsl_dataset_t *ds, blkptr_t *bp,
 typedef struct dmu_objset_create_arg {
 	const char *doca_name;
 	cred_t *doca_cred;
+	int (*doca_usercheck)(void *arg, dmu_tx_t *tx);
 	void (*doca_userfunc)(objset_t *os, void *arg,
 	    cred_t *cr, dmu_tx_t *tx);
 	void *doca_userarg;
@@ -1235,6 +1236,9 @@ dmu_objset_create_check(void *arg, dmu_tx_t *tx)
 	}
 	dsl_dataset_rele(parentds, FTAG);
 	dsl_dir_rele(pdd, FTAG);
+
+	if (doca->doca_usercheck != NULL)
+		error = doca->doca_usercheck(doca->doca_userarg, tx);
 
 	return (error);
 }
@@ -1331,7 +1335,8 @@ dmu_objset_create_sync(void *arg, dmu_tx_t *tx)
 
 int
 dmu_objset_create(const char *name, dmu_objset_type_t type, uint64_t flags,
-    dsl_crypto_params_t *dcp, dmu_objset_create_sync_func_t func, void *arg)
+    dsl_crypto_params_t *dcp, dmu_objset_create_check_func_t checkfunc,
+    dmu_objset_create_sync_func_t func, void *arg)
 {
 	dmu_objset_create_arg_t doca;
 	dsl_crypto_params_t tmp_dcp = { 0 };
@@ -1342,6 +1347,7 @@ dmu_objset_create(const char *name, dmu_objset_type_t type, uint64_t flags,
 	doca.doca_name = name;
 	doca.doca_cred = cr;
 	doca.doca_flags = flags;
+	doca.doca_usercheck = checkfunc;
 	doca.doca_userfunc = func;
 	doca.doca_userarg = arg;
 	doca.doca_type = type;

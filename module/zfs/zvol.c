@@ -211,6 +211,28 @@ zvol_find_by_name(const char *name, int mode)
 }
 
 /*
+ * zvol_check_volblocksize() checked in open context that the feature a block
+ * size above 128K needs is enabled, but a disable may have started since.
+ * The volume activates large_blocks only when it writes its first block, so
+ * check again in the sync task that creates it.
+ */
+int
+zvol_create_check(void *arg, dmu_tx_t *tx)
+{
+	zfs_creat_t *zct = arg;
+	uint64_t volblocksize;
+
+	if (nvlist_lookup_uint64(zct->zct_props,
+	    zfs_prop_to_name(ZFS_PROP_VOLBLOCKSIZE), &volblocksize) != 0)
+		volblocksize = zfs_prop_default_numeric(ZFS_PROP_VOLBLOCKSIZE);
+	if (volblocksize > SPA_OLD_MAXBLOCKSIZE &&
+	    !spa_feature_is_enabled(dmu_tx_pool(tx)->dp_spa,
+	    SPA_FEATURE_LARGE_BLOCKS))
+		return (SET_ERROR(ENOTSUP));
+	return (0);
+}
+
+/*
  * ZFS_IOC_CREATE callback handles dmu zvol and zap object creation.
  */
 void

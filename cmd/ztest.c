@@ -4721,7 +4721,7 @@ ztest_dataset_create_encrypted(char *dsname, uint64_t encryption)
 	fnvlist_free(crypto_args);
 	fnvlist_free(props);
 
-	int err = dmu_objset_create(dsname, DMU_OST_OTHER, 0, dcp,
+	int err = dmu_objset_create(dsname, DMU_OST_OTHER, 0, dcp, NULL,
 	    ztest_objset_create_cb, NULL);
 	dsl_crypto_params_free(dcp, !!err);
 	return (err);
@@ -4746,7 +4746,7 @@ ztest_dataset_create(char *dsname)
 			rand = ZIO_CRYPT_ON;
 		err = ztest_dataset_create_encrypted(dsname, rand);
 	} else {
-		err = dmu_objset_create(dsname, DMU_OST_OTHER, 0, NULL,
+		err = dmu_objset_create(dsname, DMU_OST_OTHER, 0, NULL, NULL,
 		    ztest_objset_create_cb, NULL);
 	}
 
@@ -4935,7 +4935,7 @@ ztest_dmu_objset_create_destroy(ztest_ds_t *zd, uint64_t id)
 	 * Verify that we cannot create an existing dataset.
 	 */
 	VERIFY3U(EEXIST, ==,
-	    dmu_objset_create(name, DMU_OST_OTHER, 0, NULL, NULL, NULL));
+	    dmu_objset_create(name, DMU_OST_OTHER, 0, NULL, NULL, NULL, NULL));
 
 	/*
 	 * Verify that we can hold an objset that is also owned.
