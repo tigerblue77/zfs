@@ -90,3 +90,4 @@ pkgconfig_DATA += %D%/libzfs.pc
 
 dist_noinst_DATA += %D%/libzfs.abi %D%/libzfs.suppr
 dist_noinst_DATA += %D%/THIRDPARTYLICENSE.openssl %D%/THIRDPARTYLICENSE.openssl.descrip
+# labels test
