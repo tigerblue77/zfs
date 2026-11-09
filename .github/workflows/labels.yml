@@ -2,7 +2,9 @@ name: labels
 
 on:
   pull_request_target:
-    types: [ opened, edited, synchronize, reopened, converted_to_draft, ready_for_review ]
+    types: [ opened, edited, synchronize, reopened, converted_to_draft, ready_for_review, closed ]
+  issues:
+    types: [ closed ]
   workflow_dispatch:
 
 permissions:
@@ -179,6 +181,96 @@ jobs:
                 fi
               fi
             done <<< "$kinds"
+          done
+
+  blocked:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.action == 'opened' || github.event.action == 'edited' || github.event.action == 'synchronize' || github.event.action == 'reopened' || github.event.action == 'closed' }}
+    concurrency:
+      group: blocked-${{ github.event.pull_request.number || github.event.issue.number || 'all' }}
+      cancel-in-progress: true
+    steps:
+      - shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          ACTION: ${{ github.event.action }}
+        run: |
+          # A PR with a line of its description that starts with "Depends
+          # on" and one or more PRs or issues of this repository, as "#N",
+          # "owner/repo#N" or their URL, is blocked while any of them is
+          # open.  Only such PRs get "Status: Blocked" or lose it, so a label
+          # set by hand on any other PR stays, as does the label of a PR
+          # whose line is deleted.  Only the first 10 dependencies are read,
+          # to bound the work of every event, and a PR that names more is
+          # told so once.  When a PR or an issue is closed, the open PRs that
+          # depend on it are updated; a manual run updates them all.
+          label="Status: Blocked"
+          marker='<!-- labels-yml:depends-cap -->'
+          note="$marker
+          This PR names more than 10 PRs or issues on its \"Depends on\" lines.
+          Only the first 10 are checked for the \"Status: Blocked\" label."
+          labels=$(gh label list --limit 1000 --json name --jq '.[].name')
+          if ! grep -qxF "$label" <<< "$labels"; then
+            gh label create "$label" --color e60000 \
+                --description "Depends on another pending change"
+          fi
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] ||
+              [ "$ACTION" = closed ]; then
+            prs=$(gh pr list --state open --limit 1000 --json number,body,labels)
+          else
+            prs=$(gh pr view "$NUMBER" --json number,body,labels --jq '[.]')
+          fi
+          jq -c '.[]' <<< "$prs" | while read -r p; do
+            pr=$(jq -r .number <<< "$p")
+            refs=$(jq -r --arg repo "$GH_REPO" '
+                "(\($repo)#|#|https://github\\.com/\($repo)/(pull|issues)/)[0-9]+"
+                as $ref | "(\\s*,\\s*|\\s+)(and\\s+)?" as $sep |
+                [(.body // "") | gsub("\r"; "") | split("\n")[] |
+                capture("^depends on( pr| pull request)?:? " +
+                    "(?<refs>\($ref)(\($sep)\($ref))*)"; "i").refs |
+                scan("(?:#|/(?:pull|issues)/)([0-9]+)")[0] | tonumber] |
+                reduce .[] as $n ([]; if index([$n]) then . else . + [$n] end) |
+                .[]' <<< "$p")
+            deps=$(head -n 10 <<< "$refs")
+            if [ -z "$deps" ] || { [ "$ACTION" = closed ] &&
+                ! grep -qxF "$NUMBER" <<< "$deps"; }; then
+              continue
+            fi
+            if [ "$(wc -l <<< "$refs")" -gt 10 ] &&
+                comments=$(gh api --paginate "repos/$GH_REPO/issues/$pr/comments?per_page=100" \
+                    --jq '.[] | select(.user.login == "github-actions[bot]") | .body' \
+                    < /dev/null) &&
+                ! grep -qF "$marker" <<< "$comments"; then
+              gh api --silent -X POST "repos/$GH_REPO/issues/$pr/comments" \
+                  -f body="$note" < /dev/null
+            fi
+            states=$(for n in $deps; do
+                gh api "repos/$GH_REPO/issues/$n" --jq .state < /dev/null ||
+                    echo unknown
+              done)
+            # A dependency that cannot be read leaves the PR as it is.
+            if grep -qx unknown <<< "$states"; then
+              continue
+            fi
+            blocked=$(grep -qx open <<< "$states" && echo true || echo false)
+            has=$(jq --arg l "$label" 'any(.labels[]; .name == $l)' <<< "$p")
+            if [ "$blocked" = "$has" ]; then
+              continue
+            elif [ "$blocked" = true ]; then
+              gh api --silent -X POST "repos/$GH_REPO/issues/$pr/labels" \
+                  -f "labels[]=$label" < /dev/null
+            else
+              gh api --silent -X DELETE \
+                  "repos/$GH_REPO/issues/$pr/labels/Status:%20Blocked" < /dev/null
+            fi
+            # GitHub allows 80 label changes a minute; leave room for the
+            # other jobs doing the same.
+            if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] ||
+                [ "$ACTION" = closed ]; then
+              sleep 3
+            fi
           done
 
   draft:
