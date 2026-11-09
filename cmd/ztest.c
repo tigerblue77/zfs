@@ -6927,7 +6927,13 @@ ztest_scrub_impl(spa_t *spa)
 	while (dsl_scan_scrubbing(spa_get_dsl(spa)))
 		txg_wait_synced(spa_get_dsl(spa), 0);
 
-	if (spa_approx_errlog_size(spa) > 0)
+	/*
+	 * Without redundancy, ztest_fault_inject() injects no damage but
+	 * makes a leaf fail I/O, and each block that a failed read or
+	 * write was for still goes into the error log.  zdb checks every
+	 * block after each pass, unless -M is used.
+	 */
+	if (MAXFAULTS(ztest_shared) > 0 && spa_approx_errlog_size(spa) > 0)
 		return (ECKSUM);
 
 	ztest_pool_scrubbed = B_TRUE;
