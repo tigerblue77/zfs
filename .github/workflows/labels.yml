@@ -154,9 +154,10 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           # A PR that changes nothing but CI, tests, documentation or the
-          # build and packaging gets the label of each of these it changes.
-          # Labels are only added, so labels set by hand stay.  A manual run
-          # labels every open PR.
+          # build and packaging gets the label of each of these it changes,
+          # and any PR the components of the files it changes.  Labels are
+          # only added, so labels set by hand stay.  A manual run labels
+          # every open PR.
           labels=$(gh label list --limit 1000 --json name --jq '.[].name')
           for l in "Component: CI" "Component: Test Suite" \
               "Type: Documentation" "Type: Building"; do
@@ -164,6 +165,9 @@ jobs:
               gh label create "$l" --color ededed
             fi
           done
+          # Component labels that are archived, or missing, are not added.
+          active=$(gh api --paginate "repos/$GH_REPO/labels?per_page=100" \
+              --jq '.[] | select(.archived_at == null) | .name')
           if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
             prs=$(gh pr list --state open --limit 1000 --json number,labels)
           else
@@ -172,9 +176,9 @@ jobs:
           jq -r '.[] | [.number, ([.labels[].name] | join(","))] | @tsv' \
               <<< "$prs" |
           while IFS=$'\t' read -r pr have; do
-            kinds=$(gh api --paginate "repos/$GH_REPO/pulls/$pr/files" \
-                --jq '.[].filename' < /dev/null |
-                awk '/^\.github\// { print "Component: CI"; next }
+            files=$(gh api --paginate "repos/$GH_REPO/pulls/$pr/files" \
+                --jq '.[].filename' < /dev/null)
+            kinds=$(awk '/^\.github\// { print "Component: CI"; next }
                     /^tests\// { print "Component: Test Suite"; next }
                     /^man\// || /\.md$/ { print "Type: Documentation"; next }
                     /^(config|contrib\/debian|rpm)\// || /(^|\/)Makefile\.am$/ ||
@@ -182,12 +186,33 @@ jobs:
                     /^(zfs\.release\.in|module\/(Kbuild\.in|Makefile\.(bsd|in)))$/ ||
                     /^scripts\/(dkms\.mkconf|dkms\.postbuild|kmodtool|make_gitrev\.sh)$/ {
                         print "Type: Building"; next }
-                    { print "code" }' | sort -u)
+                    { print "code" }' <<< "$files" | sort -u)
             if [ -z "$kinds" ] || grep -qx code <<< "$kinds"; then
-              continue
+              kinds=
             fi
+            # The component of each file outside tests/ and man/ that has one.
+            kinds+=$'\n'$(awk '/^(tests|man)\// { next }
+                /zvol/ { print "Component: ZVOL" }
+                /dsl_crypt|zio_crypt|libzfs_crypto|^contrib\/pam_zfs_key\// {
+                    print "Component: Encryption" }
+                /dmu_(send|recv|redact)|libzfs_sendrecv|^cmd\/zstream\// {
+                    print "Component: Send/Recv" }
+                /^cmd\/zed\/|zfs-zed/ { print "Component: ZED" }
+                /^contrib\/dracut\/|^config\/user-dracut\.m4$/ {
+                    print "Component: Dracut" }
+                /^etc\/systemd\/|^config\/user-systemd\.m4$/ {
+                    print "Component: Systemd" }
+                /libzfs_share|zfs-share/ { print "Component: Share" }
+                /compatibility\.d\/grub/ { print "Component: GRUB" }
+                /^(rpm|contrib\/debian)\/|^config\/(deb|rpm|tgz)\.am$/ ||
+                    /^scripts\/(dkms\.|kmodtool$)/ {
+                    print "Component: Packaging" }
+                /^module\/os\/[^\/]+\/spl\/spl[-_][kv]mem/ ||
+                    /^include\/os\/[^\/]+\/spl\/sys\/[kv]mem/ {
+                    print "Component: Memory Management" }' <<< "$files" |
+                sort -u | { grep -xF "$active" || true; })
             while read -r l; do
-              if ! tr ',' '\n' <<< "$have" | grep -qxF "$l"; then
+              if [ -n "$l" ] && ! tr ',' '\n' <<< "$have" | grep -qxF "$l"; then
                 gh api --silent -X POST "repos/$GH_REPO/issues/$pr/labels" \
                     -f "labels[]=$l" < /dev/null
                 # GitHub allows 80 label changes a minute; leave room for

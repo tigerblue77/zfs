@@ -162,6 +162,8 @@ Available via `specific_os` or `ZTS_OS_OVERRIDE`:
   - `Component: CI`, `Component: Test Suite`, `Type: Documentation` and
     `Type: Building`, for PRs that change only CI, tests, documentation or
     the build and packaging
+  - component labels that are not archived, from the paths of the files
+    each PR changes
   - type and priority labels, from the boxes ticked in the PR template,
     for PRs that have none of that kind
   - type and component labels, from the issues each PR closes, for PRs
