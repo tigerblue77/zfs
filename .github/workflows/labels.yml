@@ -321,28 +321,107 @@ jobs:
         run: |
           # An open PR gets "Status: Reviewed" once someone other than its
           # author, and not a bot, has submitted a review of it, whatever
-          # its verdict, so that PRs reviewed by anyone stand out.  It is
-          # never removed.  A review event cannot label a PR from a fork,
-          # hence a periodic run over all open PRs.
-          label="Status: Reviewed"
-          if ! gh label list --limit 1000 --json name --jq '.[].name' |
-              grep -qxF "$label"; then
-            gh label create "$label" --color 0e8a16 \
-                --description "Reviewed by someone other than its author"
-          fi
+          # its verdict, so that PRs reviewed by anyone stand out.  It gets
+          # "Status: Revision Needed" when the last verdict of a maintainer
+          # (an owner, member or collaborator) asks for changes to its head
+          # commit, which no push has replaced yet; a push removes it.
+          # Neither label is removed here.  A review event cannot label a
+          # PR from a fork, hence a periodic run over all open PRs.
+          labels=$(gh label list --limit 1000 --json name --jq '.[].name')
+          for l in "Status: Reviewed|0e8a16|Reviewed by someone other than its author" \
+              "Status: Revision Needed|e60000|Changes are required for the PR to be accepted"; do
+            IFS='|' read -r name color desc <<< "$l"
+            if ! grep -qxF "$name" <<< "$labels"; then
+              gh label create "$name" --color "$color" --description "$desc"
+            fi
+          done
           gh pr list --state open --limit 1000 --label labels-test \
-              --json number,author,reviews,labels --jq '.[] |
-              select(.reviews != [] and all(.labels[]; .name != "Status: Reviewed")) |
-              "\(.number)\t\(.author.login)"' |
-          while IFS=$'\t' read -r pr author; do
+              --json number,author,headRefOid,reviews,labels --jq '.[] |
+              select(.reviews != []) | [.number, .author.login, .headRefOid,
+              ([.labels[].name] | join(","))] | @tsv' |
+          while IFS=$'\t' read -r pr author head have; do
             # gh lists only the first 100 reviews, and does not tell bots.
-            if gh api --paginate "repos/$GH_REPO/pulls/$pr/reviews" < /dev/null |
-                jq -s -e --arg a "$author" 'add // [] | any(.[]; .state != "PENDING" and
-                .user.type != "Bot" and .user.login != $a)' > /dev/null; then
+            new=$(gh api --paginate "repos/$GH_REPO/pulls/$pr/reviews" < /dev/null |
+                jq -rs --arg a "$author" --arg head "$head" 'add // [] |
+                (select(any(.[]; .state != "PENDING" and
+                    .user.type != "Bot" and .user.login != $a)) |
+                    "Status: Reviewed"),
+                ([.[] | select(.author_association == "OWNER" or
+                    .author_association == "MEMBER" or
+                    .author_association == "COLLABORATOR") |
+                    select(.state == "APPROVED" or .state == "DISMISSED" or
+                    .state == "CHANGES_REQUESTED")] | last |
+                    select(.state == "CHANGES_REQUESTED" and .commit_id == $head) |
+                    "Status: Revision Needed")') || continue
+            add=()
+            while read -r l; do
+              if [ -n "$l" ] && ! tr ',' '\n' <<< "$have" | grep -qxF "$l"; then
+                add+=(-f "labels[]=$l")
+              fi
+            done <<< "$new"
+            if [ ${#add[@]} -ne 0 ]; then
               gh api --silent -X POST "repos/$GH_REPO/issues/$pr/labels" \
-                  -f "labels[]=$label" < /dev/null
+                  "${add[@]}" < /dev/null
               # GitHub allows 80 label changes a minute; leave room for the
               # other jobs doing the same.
+              sleep 3
+            fi
+          done
+
+  conflict:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event.action == 'synchronize' || github.event.action == 'reopened' }}
+    concurrency:
+      group: conflict-${{ github.event.pull_request.number || 'all' }}
+      cancel-in-progress: true
+    steps:
+      - shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          # "Status: Merge Conflict" while GitHub reports that a PR
+          # conflicts with its base, removed once it can be merged again;
+          # only this job sets it.  GitHub works this out in the background:
+          # a PR it reports as UNKNOWN is left as it is, and after a push it
+          # is asked again for up to a minute.  The periodic and manual
+          # runs check every open PR, as a change to the base can make them
+          # conflict.
+          label="Status: Merge Conflict"
+          if ! gh label list --limit 1000 --json name --jq '.[].name' |
+              grep -qxF "$label"; then
+            gh label create "$label" --color d93f0b \
+                --description "Conflicts with its base branch"
+          fi
+          if [ -n "$PR" ]; then
+            for _ in 1 2 3 4 5 6; do
+              prs=$(gh pr view "$PR" --json number,mergeable,labels --jq '[.]')
+              if [ "$(jq -r '.[].mergeable' <<< "$prs")" != UNKNOWN ]; then
+                break
+              fi
+              sleep 10
+            done
+          else
+            prs=$(gh pr list --state open --limit 1000 --label labels-test \
+                --json number,mergeable,labels)
+          fi
+          jq -r --arg l "$label" '.[] |
+              [.number, .mergeable, any(.labels[]; .name == $l)] | @tsv' \
+              <<< "$prs" |
+          while IFS=$'\t' read -r pr state has; do
+            if [ "$state" = CONFLICTING ] && [ "$has" = false ]; then
+              gh api --silent -X POST "repos/$GH_REPO/issues/$pr/labels" \
+                  -f "labels[]=$label" < /dev/null
+            elif [ "$state" = MERGEABLE ] && [ "$has" = true ]; then
+              gh api --silent -X DELETE \
+                  "repos/$GH_REPO/issues/$pr/labels/Status:%20Merge%20Conflict" < /dev/null
+            else
+              continue
+            fi
+            # GitHub allows 80 label changes a minute; leave room for the
+            # other jobs doing the same.
+            if [ -z "$PR" ]; then
               sleep 3
             fi
           done
