@@ -43,9 +43,11 @@ The fix is fork branch `ztest-scrub-maxfaults0`, one commit on upstream
 master `47d0a32206`: `ztest_scrub_impl()` treats the error log as damage
 only when `MAXFAULTS()` is above 0. With no redundancy ztest injects no
 damage, and the `zdb -bcc` run after each pass still checks every block.
-Local runs on a 4-vCPU machine have not reproduced the failure so far, so
-this task is the A/B: same command, both trees, interleaved, with counts per
-failure class.
+On a 4-vCPU machine the exact command has not failed this way so far; with
+an aid that makes every `ztest_scrub()` wait for its scrub and reach the
+check, master did, after a closed fd, and `zdb -bcc` found that pool clean.
+This task is the A/B without any aid: same command, both trees,
+interleaved, with counts per failure class.
 
 A third run of 8/11 failed with `ztest_dmu_read_write()
 VERIFY0(error) failed (5)` (`EIO`) on a single-vdev pool whose vdev showed
@@ -470,8 +472,11 @@ order:
    zdb) and its size, the first three function names of its backtrace, and
    which known failure it is, if one: the `vdev_removal.c:1574` VERIFY, the
    `zil.c:873` ASSERT in `zil_free_lwb()`, the `ztest_dataset_open` ENOSPC,
-   the deadman abort of a suspended pool, zdb's post-run check
-   (`dump_zpool`); otherwise "new".
+   the `range_tree.c:663` ASSERT `segment already in tree` under
+   `zil_parse()` in a dataset destroy (#19524), the deadman abort of a
+   suspended pool, zdb's post-run check (`dump_zpool`); otherwise "new".
+   For a `suspended` run, add the last three lines of `grep -a -E
+   'injecting fault|failed probe' $W/logs/<tree>-r<N>-s<K>.log`.
 4. Every deviation from this document, and anything that looked wrong.
 
 Then append the logs:
@@ -507,12 +512,18 @@ change the timing that the failure depends on. It then says only that the
 failure is rare under this load; the cause rests on the read-outs of 8/11
 and the code.
 
-**The branch must not fail more otherwise.** On the branch, a run that
-master aborts at a scrub goes on past it. A rise of `zdb` (damage found
-after a pass) or `suspended` on the branch would mean that something real
-hides behind the error log, and the fix would need another look. A class
-that shows once on either tree is noise at these counts; the same class
-several times on the branch only is not.
+**What else the branch may show.** On the branch, a run that master aborts
+at a scrub goes on past it, into what that abort hid. Local runs (with an
+aid that makes every `ztest_scrub()` reach its check) showed two such
+outcomes, neither caused by the fix: `suspended`, when the injected fault
+was a closed fd (a reopen keeps the closed fd, so with no redundancy the
+pool cannot resume until the pass ends; the log shows `failed probe` after
+the injection), and the #19524 ASSERT above (a pool that suspends while the
+ZIL creates its chain leaves a freed log block in the on-disk ZIL header).
+So the branch need not fail less in total. What would count against the fix
+is `zdb` on the branch only: damage found after a pass, which would mean
+that something real hid behind the error log. A class that shows once on
+either tree is noise at these counts.
 
 **`EIO`** is not addressed by the fix. Its read-out says whether it comes
 with an injected fault (an injection line in the log, a top-level vdev with
