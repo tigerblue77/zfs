@@ -163,3 +163,4 @@ INSTALL_DATA_HOOKS += man-install-data-hook
 man-install-data-hook:
 	cd $(DESTDIR)$(mandir) && $(SED) $(ac_inplace) 's/^\.Os$$/.Os OpenZFS/' $(subst %D%/,,$(dist_man_MANS) $(nodist_man_MANS))
 endif
+# labels test D
