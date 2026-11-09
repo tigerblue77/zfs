@@ -2450,13 +2450,16 @@ bp_get_dsize(spa_t *spa, const blkptr_t *bp)
 /*
  * Return B_TRUE if writing the block again in the given txg, with the write
  * properties zp, would leave it as it is: same checksum, compression, number
- * of copies and dedup, and on every DVA the same allocation class and the
- * allocated size that its physical size would get there.  A deduplicated
- * block keeps the DVAs of a flat DDT entry, which can be more than zp asks
- * for.  A gang block's DVAs have the size of its header, and a block on an
- * indirect vdev, or on a vdev that takes no allocations, would move, so they
- * are not current.  Holes and embedded blocks allocate nothing, so an
- * embedded block is current if its compression is.
+ * of copies and dedup, and on every DVA the same allocation class and, on a
+ * RAID-Z vdev, the logical width that the vdev has in that txg.  A block
+ * written at another width is not current even where the new width stores it
+ * in the same space: left in place, it would split the space that rewriting
+ * the blocks around it frees.  A deduplicated block keeps the DVAs of its DDT
+ * entry, and their width, and those of a flat entry can be more than zp asks
+ * for.  A gang block, and a block on an indirect vdev or on a vdev that takes
+ * no allocations, would move, so they are not current.  Holes and embedded
+ * blocks allocate nothing, so an embedded block is current if its compression
+ * is.
  *
  * A block stored uncompressed, embedded or not, may be one that compression
  * did not shrink, so it is not taken as one to compress.  The compression
@@ -2495,6 +2498,8 @@ bp_rewrite_is_current(spa_t *spa, const blkptr_t *bp, const zio_prop_t *zp,
 		return (B_FALSE);
 
 	boolean_t same = B_TRUE;
+	boolean_t dedup = BP_GET_DEDUP(bp);
+	uint64_t birth = BP_GET_PHYSICAL_BIRTH(bp);
 	uint64_t psize = BP_GET_PSIZE(bp);
 
 	spa_config_enter(spa, SCL_VDEV, FTAG, RW_READER);
@@ -2508,8 +2513,8 @@ bp_rewrite_is_current(spa_t *spa, const blkptr_t *bp, const zio_prop_t *zp,
 		same = vd != NULL && vdev_is_concrete(vd) &&
 		    !vd->vdev_noalloc && !vd->vdev_removing &&
 		    vd->vdev_mg != NULL && vd->vdev_mg->mg_class == mc &&
-		    DVA_GET_ASIZE(dva) ==
-		    vdev_psize_to_asize_txg(vd, psize, txg);
+		    (dedup || vd->vdev_ops != &vdev_raidz_ops ||
+		    vdev_raidz_same_logical_width(vd, birth, txg));
 	}
 
 	spa_config_exit(spa, SCL_VDEV, FTAG);
