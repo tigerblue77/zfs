@@ -337,7 +337,7 @@ extern void zfs_log_clone_range(zilog_t *zilog, dmu_tx_t *tx, int txtype,
     const blkptr_t *bps, size_t nbps);
 extern void zfs_xvattr_set(znode_t *zp, xvattr_t *xvap, dmu_tx_t *tx);
 extern void zfs_upgrade(zfsvfs_t *zfsvfs, dmu_tx_t *tx);
-extern void zfs_log_setsaxattr(zilog_t *zilog, dmu_tx_t *tx, int txtype,
+extern boolean_t zfs_log_setsaxattr(zilog_t *zilog, dmu_tx_t *tx, int txtype,
     znode_t *zp, const char *name, const void *value, size_t size);
 
 extern void zfs_znode_update_vfs(struct znode *);

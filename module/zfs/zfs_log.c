@@ -36,6 +36,7 @@
 #include <sys/dmu.h>
 #include <sys/dbuf.h>
 #include <sys/spa.h>
+#include <sys/zfeature.h>
 #include <sys/zfs_fuid.h>
 #include <sys/dsl_dataset.h>
 #include <sys/zfs_vnops.h>
@@ -757,20 +758,32 @@ zfs_log_setattr(zilog_t *zilog, dmu_tx_t *tx, int txtype,
 	zil_itx_assign(zilog, itx, tx);
 }
 
+static void
+zfs_log_setsaxattr_done(void *arg, int error)
+{
+	(void) error;
+	spa_feature_rele(arg, SPA_FEATURE_ZILSAXATTR);
+}
+
 /*
- * Handles TX_SETSAXATTR transactions.
+ * Handles TX_SETSAXATTR transactions, if zilsaxattr is enabled.  The record
+ * holds the feature until it is written or its txg syncs, so that it cannot
+ * be disabled before zil_create() activates it on the dataset.  Returns
+ * whether the record was logged.
  */
-void
+boolean_t
 zfs_log_setsaxattr(zilog_t *zilog, dmu_tx_t *tx, int txtype,
     znode_t *zp, const char *name, const void *value, size_t size)
 {
+	spa_t		*spa = dmu_objset_spa(ZTOZSB(zp)->z_os);
 	itx_t		*itx;
 	lr_setsaxattr_t	*lr;
 	size_t		recsize = sizeof (lr_setsaxattr_t);
 	int		namelen;
 
-	if (zil_replaying(zilog, tx) || zp->z_unlinked)
-		return;
+	if (zil_replaying(zilog, tx) || zp->z_unlinked ||
+	    !spa_feature_hold(spa, SPA_FEATURE_ZILSAXATTR))
+		return (B_FALSE);
 
 	namelen = strlen(name) + 1;
 	recsize += (namelen + size);
@@ -786,7 +799,10 @@ zfs_log_setsaxattr(zilog_t *zilog, dmu_tx_t *tx, int txtype,
 	}
 
 	itx->itx_sync = (zp->z_sync_cnt != 0);
+	itx->itx_callback = zfs_log_setsaxattr_done;
+	itx->itx_callback_data = spa;
 	zil_itx_assign(zilog, itx, tx);
+	return (B_TRUE);
 }
 
 /*
