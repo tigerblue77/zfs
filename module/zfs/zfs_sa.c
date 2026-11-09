@@ -243,15 +243,6 @@ zfs_sa_set_xattr(znode_t *zp, const char *name, const void *value, size_t vsize)
 
 	zilog = zfsvfs->z_log;
 
-	/*
-	 * Users enable ZIL logging of xattr=sa operations by enabling the
-	 * SPA_FEATURE_ZILSAXATTR feature on the pool. Feature is activated
-	 * during zil_process_commit_list/zil_create, if enabled.
-	 */
-	if (spa_feature_is_enabled(zfsvfs->z_os->os_spa,
-	    SPA_FEATURE_ZILSAXATTR) && zfs_zil_saxattr)
-		logsaxattr = 1;
-
 	tx = dmu_tx_create(zfsvfs->z_os);
 	dmu_tx_hold_sa_create(tx, size);
 	dmu_tx_hold_sa(tx, zp->z_sa_hdl, B_TRUE);
@@ -264,9 +255,15 @@ zfs_sa_set_xattr(znode_t *zp, const char *name, const void *value, size_t vsize)
 		sa_bulk_attr_t bulk[3];
 		uint64_t ctime[2];
 
-		if (logsaxattr)
-			zfs_log_setsaxattr(zilog, tx, TX_SETSAXATTR, zp, name,
-			    value, vsize);
+		/*
+		 * Users enable ZIL logging of xattr=sa operations by enabling
+		 * the SPA_FEATURE_ZILSAXATTR feature on the pool. Feature is
+		 * activated during zil_process_commit_list/zil_create.
+		 */
+		if (zfs_zil_saxattr) {
+			logsaxattr = zfs_log_setsaxattr(zilog, tx,
+			    TX_SETSAXATTR, zp, name, value, vsize);
+		}
 
 		zfs_tstamp_update_setup(zp, STATE_CHANGED, NULL, ctime);
 		SA_ADD_BULK_ATTR(bulk, count, SA_ZPL_DXATTR(zfsvfs),

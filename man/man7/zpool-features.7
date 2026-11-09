@@ -129,6 +129,11 @@ until it ends.
 A file system or volume whose intent log has not been replayed since the pool
 was imported needs
 .Sy block_cloning .
+An extended attribute stored with
+.Sy xattr Ns = Ns Sy sa
+needs
+.Sy zilsaxattr
+until its intent log record is written or its transaction group has synced.
 .Pp
 The state of supported features is exposed through pool properties of the form
 .Sy feature Ns @ Ns Ar short-name .
