@@ -988,6 +988,7 @@ vdev_anyraid_open(vdev_t *vd, uint64_t *asize, uint64_t *max_asize,
 	 */
 	uint64_t *num_tiles = kmem_zalloc(vd->vdev_children *
 	    sizeof (*num_tiles), KM_SLEEP);
+	uint_t holders = 0;
 	for (int c = 0; c < vd->vdev_children; c++) {
 		vdev_t *cvd = vd->vdev_child[c];
 
@@ -996,15 +997,36 @@ vdev_anyraid_open(vdev_t *vd, uint64_t *asize, uint64_t *max_asize,
 			vdev_set_min_asize(cvd);
 			casize = MIN(max_size, cvd->vdev_asize -
 			    VDEV_ANYRAID_TOTAL_MAP_SIZE);
-		} else {
-			ASSERT(child_capacities);
+		} else if (child_capacities != NULL) {
 			casize = child_capacities[c] * var->vd_tile_size;
+		} else {
+			/*
+			 * A new vdev records no capacity for a child that
+			 * failed to open; vdev_create() fails the vdev anyway.
+			 */
+			casize = 0;
 		}
 
 		num_tiles[c] = casize / var->vd_tile_size;
+		if (num_tiles[c] != 0)
+			holders++;
 		avl_remove(&var->vd_children_tree, var->vd_children[c]);
 		var->vd_children[c]->van_capacity = num_tiles[c];
 		avl_add(&var->vd_children_tree, var->vd_children[c]);
+	}
+
+	/*
+	 * Each tile is mirrored on nparity + 1 children: with fewer children
+	 * that can hold one, calculate_asize() cannot form a stripe.
+	 */
+	if (holders < var->vd_nparity + 1) {
+		vd->vdev_stat.vs_aux = VDEV_AUX_NO_REPLICAS;
+		if (child_capacities) {
+			kmem_free(child_capacities,
+			    sizeof (*child_capacities) * vd->vdev_children);
+		}
+		kmem_free(num_tiles, vd->vdev_children * sizeof (*num_tiles));
+		return (SET_ERROR(ENXIO));
 	}
 	*asize = calculate_asize(vd, num_tiles);
 
@@ -1020,8 +1042,10 @@ vdev_anyraid_open(vdev_t *vd, uint64_t *asize, uint64_t *max_asize,
 		if (cvd->vdev_open_error == 0) {
 			cmasize = MIN(max_size, cvd->vdev_max_asize -
 			    VDEV_ANYRAID_TOTAL_MAP_SIZE);
-		} else {
+		} else if (child_capacities != NULL) {
 			cmasize = (child_capacities[c] + 1) * var->vd_tile_size;
+		} else {
+			cmasize = 0;
 		}
 
 		num_tiles[c] = cmasize / var->vd_tile_size;
