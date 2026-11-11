@@ -1,0 +1,126 @@
+name: zfs-qemu-cache
+
+# Save in the Actions cache what each zfs-qemu.yml job would otherwise
+# download before testing: the runner's packages (qemu-1-setup.sh) and the
+# image of its OS (qemu-2-start.sh).  The jobs then download less, and still
+# start when the Ubuntu archive or an image server is down.
+#
+# Only the default branch saves: every branch and pull request can restore
+# its caches, while a pull request's own would serve that pull request only.
+# Each run computes the current keys, and stops there when the cache has
+# them all; otherwise it downloads and saves what is missing, one entry
+# after the other.
+
+on:
+  schedule:
+    - cron: '23 */6 * * *'
+  push:
+    branches: [ master ]
+    paths:
+      - .github/workflows/zfs-qemu-cache.yml
+      - .github/workflows/zfs-qemu.yml
+      - .github/workflows/scripts/qemu-1-setup.sh
+      - .github/workflows/scripts/qemu-2-start.sh
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  refresh:
+    name: Refresh
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      QEMU_CACHE: /var/tmp/qemu-cache
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Find missing caches
+      id: plan
+      env:
+        GH_TOKEN: ${{ github.token }}
+        ZTS_OS_OVERRIDE: ${{ vars.ZTS_OS_OVERRIDE }}
+      run: |
+        scripts=.github/workflows/scripts
+        tmp=$(mktemp -d)
+
+        # The OSes that zfs-qemu.yml tests by default
+        if jq -e 'type == "array"' <<< "$ZTS_OS_OVERRIDE" >/dev/null 2>&1 ; then
+          jq -r '.[]' <<< "$ZTS_OS_OVERRIDE" > "$tmp/os"
+        else
+          sed -n "/^ *\*)$/,/;;/s/.*os_selection='\(.*\)'.*/\1/p" \
+            .github/workflows/zfs-qemu.yml | jq -r '.[]' > "$tmp/os"
+        fi
+        if [ ! -s "$tmp/os" ] ; then
+          echo "::error::No default OS list in zfs-qemu.yml"
+          exit 1
+        fi
+
+        # The keys of the current packages and images, and the saved ones
+        "$scripts/qemu-1-setup.sh" --cache-key | sed -n 's/^apt-key=//p' > "$tmp/apt"
+        while read -r os ; do
+          "$scripts/qemu-2-start.sh" --cache-key "$os" \
+            < /dev/null > "$tmp/$os" 2> "$tmp/$os.log" &
+        done < "$tmp/os"
+        wait
+        cat "$tmp"/*.log
+        gh api --paginate -X GET "repos/$GITHUB_REPOSITORY/actions/caches" \
+          -f ref="$GITHUB_REF" -f key=qemu- -f per_page=100 \
+          --jq '.actions_caches[].key' > "$tmp/saved"
+
+        # A key ending in "-unverified" has no server date to compare with.
+        missing="$RUNNER_TEMP/missing"
+        : > "$missing"
+        key=$(cat "$tmp/apt")
+        grep -qxF "$key" "$tmp/saved" ||
+          echo "apt $key $scripts/qemu-1-setup.sh" >> "$missing"
+        while read -r os ; do
+          key=$(sed -n 's/^image-key=//p' "$tmp/$os")
+          case "$key" in ""|*-unverified) continue ;; esac
+          grep -qxF "$key" "$tmp/saved" ||
+            echo "image $key $scripts/qemu-2-start.sh --download $os" >> "$missing"
+        done < "$tmp/os"
+        echo "Entries to save: $(wc -l < "$missing")"
+        cat "$missing"
+        echo "missing=$(wc -l < "$missing")" >> "$GITHUB_OUTPUT"
+
+    # The toolkit that actions/cache@v6 is built on, in the same version, to
+    # save several entries from one step, with its dependencies as they were
+    # on 1 Nov 2026.
+    - name: Install the cache toolkit
+      if: steps.plan.outputs.missing != '0'
+      run: |
+        npm install --prefix "$RUNNER_TEMP/toolkit" --ignore-scripts \
+          --no-audit --no-fund --before=2026-11-01 @actions/cache@6.1.0
+
+    - name: Download and save
+      if: steps.plan.outputs.missing != '0'
+      uses: actions/github-script@v9
+      with:
+        script: |
+          const { RUNNER_TEMP, QEMU_CACHE } = process.env
+          const { saveCache } = await import(
+            `${RUNNER_TEMP}/toolkit/node_modules/@actions/cache/lib/cache.js`)
+          const fs = require('fs')
+          const lines = fs.readFileSync(`${RUNNER_TEMP}/missing`, 'utf8')
+          for (const line of lines.trim().split('\n')) {
+            const [name, key, command, ...args] = line.split(' ')
+            const path = `${QEMU_CACHE}/${name}`
+            await io.rmRF(path)
+            const status = await exec.exec(command, args,
+              { ignoreReturnCode: true })
+            if (status === 0)
+              await saveCache([path], key)
+            else
+              core.warning(`${line}: exit status ${status}, not saved`)
+            await io.rmRF(path)
+          }
