@@ -21,6 +21,7 @@ on:
       - .github/workflows/zfs-qemu.yml
       - .github/workflows/scripts/qemu-1-setup.sh
       - .github/workflows/scripts/qemu-2-start.sh
+  create:
   workflow_dispatch:
     inputs:
       simulate_outage:
