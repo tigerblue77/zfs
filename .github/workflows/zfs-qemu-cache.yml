@@ -21,6 +21,7 @@ on:
       - .github/workflows/zfs-qemu.yml
       - .github/workflows/scripts/qemu-1-setup.sh
       - .github/workflows/scripts/qemu-2-start.sh
+  create:
   workflow_dispatch:
 
 concurrency:
@@ -36,9 +37,6 @@ env:
 jobs:
   plan:
     name: Plan
-    if: >-
-      github.event_name != 'workflow_dispatch' ||
-      github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -53,7 +51,7 @@ jobs:
       id: plan
       env:
         GH_TOKEN: ${{ github.token }}
-        ZTS_OS_OVERRIDE: ${{ vars.ZTS_OS_OVERRIDE }}
+        ZTS_OS_OVERRIDE: '["debian13", "freebsd15-1r"]'
       run: |
         scripts=.github/workflows/scripts
         tmp=$(mktemp -d)
@@ -99,6 +97,21 @@ jobs:
         cat "$tmp/missing"
         echo "missing=$(jq -sc . "$tmp/missing")" >> "$GITHUB_OUTPUT"
 
+
+    - name: Packages the fixed pattern selects (test only)
+      run: |
+        eval "$(sed -n '/^unneeded=/,/chromium"$/p' .github/workflows/scripts/qemu-1-setup.sh)"
+        dpkg-query -f '${binary:Package}\n' -W > /tmp/all
+        grep -E "'$unneeded'" /tmp/all > /tmp/old || true
+        grep -E "$unneeded" /tmp/all > /tmp/new || true
+        echo "selected: old $(wc -l < /tmp/old), new $(wc -l < /tmp/new)"
+        diff /tmp/old /tmp/new || true
+        grep -i -E "chromium|edge" /tmp/all || true
+        apt-get -s remove $(cat /tmp/old) | grep '^Remv' | sort > /tmp/remv-old
+        apt-get -s remove $(cat /tmp/new) | grep '^Remv' | sort > /tmp/remv-new
+        echo "removed: old $(wc -l < /tmp/remv-old), new $(wc -l < /tmp/remv-new)"
+        diff /tmp/remv-old /tmp/remv-new && echo "same removal"
+
   save:
     name: Save
     needs: [ plan ]
@@ -128,3 +141,147 @@ jobs:
       with:
         path: ${{ env.QEMU_CACHE }}/${{ matrix.cache }}
         key: ${{ matrix.key }}
+
+  # Test only: what the next scheduled run would do, once the entries above
+  # are saved.
+  replan:
+    name: Plan again (test only)
+    needs: [ plan, save ]
+    if: always()
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    steps:
+    - uses: actions/checkout@v6
+    - name: Find missing caches again, warm (test only)
+      env:
+        GH_TOKEN: ${{ github.token }}
+        ZTS_OS_OVERRIDE: '["debian13", "freebsd15-1r"]'
+      run: |
+        scripts=.github/workflows/scripts
+        tmp=$(mktemp -d)
+
+        # The OSes that zfs-qemu.yml tests by default
+        if jq -e 'type == "array"' <<< "$ZTS_OS_OVERRIDE" >/dev/null 2>&1 ; then
+          jq -r '.[]' <<< "$ZTS_OS_OVERRIDE" > "$tmp/os"
+        else
+          sed -n "/^ *\*)$/,/;;/s/.*os_selection='\(.*\)'.*/\1/p" \
+            .github/workflows/zfs-qemu.yml | jq -r '.[]' > "$tmp/os"
+        fi
+        if [ ! -s "$tmp/os" ] ; then
+          echo "::error::No default OS list in zfs-qemu.yml"
+          exit 1
+        fi
+
+        # The keys of the current packages and images, and the saved ones
+        "$scripts/qemu-1-setup.sh" --cache-key | sed -n 's/^apt-key=//p' > "$tmp/apt"
+        while read -r os ; do
+          "$scripts/qemu-2-start.sh" --cache-key "$os" \
+            < /dev/null > "$tmp/$os" 2> "$tmp/$os.log" &
+        done < "$tmp/os"
+        wait
+        cat "$tmp"/*.log
+        gh api --paginate -X GET "repos/$GITHUB_REPOSITORY/actions/caches" \
+          -f ref="$GITHUB_REF" -f key=qemu- -f per_page=100 \
+          --jq '.actions_caches[].key' > "$tmp/saved"
+
+        # A key ending in "-unverified" has no server date to compare with.
+        : > "$tmp/missing"
+        key=$(cat "$tmp/apt")
+        grep -qxF "$key" "$tmp/saved" ||
+          jq -nc --arg key "$key" '{cache: "apt", key: $key, os: ""}' \
+            >> "$tmp/missing"
+        while read -r os ; do
+          key=$(sed -n 's/^image-key=//p' "$tmp/$os")
+          case "$key" in ""|*-unverified) continue ;; esac
+          grep -qxF "$key" "$tmp/saved" ||
+            jq -nc --arg key "$key" --arg os "$os" \
+              '{cache: "image", key: $key, os: $os}' >> "$tmp/missing"
+        done < "$tmp/os"
+        echo "Entries to save: $(wc -l < "$tmp/missing")"
+        cat "$tmp/missing"
+        echo "missing=$(jq -sc . "$tmp/missing")" >> "$GITHUB_OUTPUT"
+
+    - name: Keys to look up (test only)
+      id: check
+      run: |
+        .github/workflows/scripts/qemu-1-setup.sh --cache-key >> "$GITHUB_OUTPUT"
+        .github/workflows/scripts/qemu-2-start.sh --cache-key debian13 |
+          sed 's/^image-/debian13-/' >> "$GITHUB_OUTPUT"
+        .github/workflows/scripts/qemu-2-start.sh --cache-key freebsd15-1r |
+          sed 's/^image-/freebsd-/' >> "$GITHUB_OUTPUT"
+    - name: Look up packages (test only)
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ env.QEMU_CACHE }}/apt
+        key: ${{ steps.check.outputs.apt-key }}
+        lookup-only: true
+        fail-on-cache-miss: true
+    - name: Look up debian13 image (test only)
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ env.QEMU_CACHE }}/image
+        key: ${{ steps.check.outputs.debian13-key }}
+        lookup-only: true
+        fail-on-cache-miss: true
+    - name: Look up freebsd15-1r image (test only)
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ env.QEMU_CACHE }}/image
+        key: ${{ steps.check.outputs.freebsd-key }}
+        lookup-only: true
+        fail-on-cache-miss: true
+    - name: Find missing caches during an outage (test only)
+      env:
+        GH_TOKEN: ${{ github.token }}
+        ZTS_OS_OVERRIDE: '["debian13", "freebsd15-1r"]'
+      run: |
+        for h in azure.archive.ubuntu.com archive.ubuntu.com security.ubuntu.com \
+            cloud-images.ubuntu.com cloud.debian.org download.freebsd.org ; do
+          echo "127.0.0.1 $h" | sudo tee -a /etc/hosts
+        done
+        scripts=.github/workflows/scripts
+        tmp=$(mktemp -d)
+
+        # The OSes that zfs-qemu.yml tests by default
+        if jq -e 'type == "array"' <<< "$ZTS_OS_OVERRIDE" >/dev/null 2>&1 ; then
+          jq -r '.[]' <<< "$ZTS_OS_OVERRIDE" > "$tmp/os"
+        else
+          sed -n "/^ *\*)$/,/;;/s/.*os_selection='\(.*\)'.*/\1/p" \
+            .github/workflows/zfs-qemu.yml | jq -r '.[]' > "$tmp/os"
+        fi
+        if [ ! -s "$tmp/os" ] ; then
+          echo "::error::No default OS list in zfs-qemu.yml"
+          exit 1
+        fi
+
+        # The keys of the current packages and images, and the saved ones
+        "$scripts/qemu-1-setup.sh" --cache-key | sed -n 's/^apt-key=//p' > "$tmp/apt"
+        while read -r os ; do
+          "$scripts/qemu-2-start.sh" --cache-key "$os" \
+            < /dev/null > "$tmp/$os" 2> "$tmp/$os.log" &
+        done < "$tmp/os"
+        wait
+        cat "$tmp"/*.log
+        gh api --paginate -X GET "repos/$GITHUB_REPOSITORY/actions/caches" \
+          -f ref="$GITHUB_REF" -f key=qemu- -f per_page=100 \
+          --jq '.actions_caches[].key' > "$tmp/saved"
+
+        # A key ending in "-unverified" has no server date to compare with.
+        : > "$tmp/missing"
+        key=$(cat "$tmp/apt")
+        grep -qxF "$key" "$tmp/saved" ||
+          jq -nc --arg key "$key" '{cache: "apt", key: $key, os: ""}' \
+            >> "$tmp/missing"
+        while read -r os ; do
+          key=$(sed -n 's/^image-key=//p' "$tmp/$os")
+          case "$key" in ""|*-unverified) continue ;; esac
+          grep -qxF "$key" "$tmp/saved" ||
+            jq -nc --arg key "$key" --arg os "$os" \
+              '{cache: "image", key: $key, os: $os}' >> "$tmp/missing"
+        done < "$tmp/os"
+        echo "Entries to save: $(wc -l < "$tmp/missing")"
+        cat "$tmp/missing"
+        echo "missing=$(jq -sc . "$tmp/missing")" >> "$GITHUB_OUTPUT"
+
