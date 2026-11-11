@@ -25,7 +25,11 @@ concurrency:
 jobs:
   test-config:
     name: Setup
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || github.repository != 'openzfs/zfs'
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.repository != 'openzfs/zfs' ||
+      github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -135,6 +139,7 @@ jobs:
       REUSED_JOB: >-
         ${{ github.run_attempt == '1' &&
         fromJSON(needs.test-config.outputs.reused_jobs)[matrix.os] || '' }}
+      QEMU_CACHE: /var/tmp/qemu-cache
     steps:
     - name: Reuse successful fork job
       if: env.REUSED_JOB != ''
@@ -147,15 +152,41 @@ jobs:
       with:
         ref: ${{ github.event.pull_request.head.sha }}
 
+    - name: Find cache keys
+      id: keys
+      if: env.REUSED_JOB == ''
+      run: |
+        .github/workflows/scripts/qemu-1-setup.sh --cache-key >> "$GITHUB_OUTPUT"
+        .github/workflows/scripts/qemu-2-start.sh --cache-key ${{ matrix.os }} >> "$GITHUB_OUTPUT"
+
+    - name: Restore runner packages
+      if: env.REUSED_JOB == ''
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ env.QEMU_CACHE }}/apt
+        key: ${{ steps.keys.outputs.apt-key }}
+        restore-keys: ${{ steps.keys.outputs.apt-restore-keys }}
+
     - name: Setup QEMU
       if: env.REUSED_JOB == ''
       timeout-minutes: 60
       run: .github/workflows/scripts/qemu-1-setup.sh
 
+    - name: Restore OS image
+      id: image
+      if: env.REUSED_JOB == '' && steps.keys.outputs.image-key != ''
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ env.QEMU_CACHE }}/image
+        key: ${{ steps.keys.outputs.image-key }}
+        restore-keys: ${{ steps.keys.outputs.image-restore-keys }}
+
     - name: Start build machine
       if: env.REUSED_JOB == ''
       timeout-minutes: 20
       run: .github/workflows/scripts/qemu-2-start.sh ${{ matrix.os }}
+      env:
+        IMAGE_CACHE_HIT: ${{ steps.image.outputs.cache-hit }}
 
     - name: Install dependencies
       if: env.REUSED_JOB == ''
@@ -196,6 +227,83 @@ jobs:
     - name: Test Summary
       if: always() && env.REUSED_JOB == ''
       run: .github/workflows/scripts/qemu-8-summary.sh '${{ steps.artifact-upload.outputs.artifact-url }}'
+
+  # Save what the qemu-vm jobs download before testing, so that they need
+  # not download it again, and can start while a download server is down.
+  # Only pushes and manual runs of the default branch save: every branch
+  # and pull request can restore their caches, while a pull request's
+  # could be restored by none but itself, and would take room from them.
+  cache-packages:
+    name: Cache runner packages
+    if: >-
+      github.ref_name == github.event.repository.default_branch &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    env:
+      QEMU_CACHE: /var/tmp/qemu-cache
+    steps:
+    - uses: actions/checkout@v6
+    - name: Find cache key
+      id: keys
+      run: .github/workflows/scripts/qemu-1-setup.sh --cache-key >> "$GITHUB_OUTPUT"
+    - name: Look up runner packages
+      id: lookup
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ env.QEMU_CACHE }}/apt
+        key: ${{ steps.keys.outputs.apt-key }}
+        lookup-only: true
+    - name: Setup QEMU
+      if: steps.lookup.outputs.cache-hit != 'true'
+      timeout-minutes: 60
+      run: .github/workflows/scripts/qemu-1-setup.sh
+    - name: Save runner packages
+      if: steps.lookup.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ env.QEMU_CACHE }}/apt
+        key: ${{ steps.keys.outputs.apt-key }}
+
+  cache-images:
+    name: Cache image
+    needs: [ test-config ]
+    if: >-
+      github.ref_name == github.event.repository.default_branch &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      needs.test-config.outputs.test_os != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJson(needs.test-config.outputs.test_os) }}
+    runs-on: ubuntu-24.04
+    env:
+      QEMU_CACHE: /var/tmp/qemu-cache
+    steps:
+    - uses: actions/checkout@v6
+    - name: Find cache key
+      id: keys
+      run: .github/workflows/scripts/qemu-2-start.sh --cache-key ${{ matrix.os }} >> "$GITHUB_OUTPUT"
+    - name: Look up OS image
+      id: lookup
+      # Not when the server gave no size and date to put in the key
+      if: >-
+        steps.keys.outputs.image-key != '' &&
+        !endsWith(steps.keys.outputs.image-key, '-unverified')
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ env.QEMU_CACHE }}/image
+        key: ${{ steps.keys.outputs.image-key }}
+        lookup-only: true
+    - name: Download OS image
+      if: steps.lookup.outcome == 'success' && steps.lookup.outputs.cache-hit != 'true'
+      timeout-minutes: 20
+      run: .github/workflows/scripts/qemu-2-start.sh --download ${{ matrix.os }}
+    - name: Save OS image
+      if: steps.lookup.outcome == 'success' && steps.lookup.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ env.QEMU_CACHE }}/image
+        key: ${{ steps.keys.outputs.image-key }}
 
   cleanup:
     if: >-

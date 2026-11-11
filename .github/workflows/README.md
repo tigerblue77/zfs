@@ -62,13 +62,40 @@ the PR's changed files and picks one of:
 | default   | cross-platform sample                      |
 
 Pushes to `openzfs/zfs` skip the matrix entirely; only PRs (and pushes to
-forks) build.
+forks) build. Pushes to the default branch refresh the download caches
+below.
 
 Authors can force a specific ci_type by adding `ZFS-CI-Type: <type>` to
 the most recent commit message. The `ZTS_OS_OVERRIDE` repository variable
 can also alter the selection. The `workflow_dispatch` trigger accepts
 `fedora_kernel_ver` (Fedora-only run with a chosen kernel) and
 `specific_os` (pin the matrix to one OS).
+
+### Caching downloads
+
+Each `qemu-vm` job restores from the Actions cache what it would
+otherwise download before testing: the runner's packages and package
+lists (`qemu-1-setup.sh`), and the image of its OS, with FreeBSD's
+`src.txz` (`qemu-2-start.sh`). With them, a job still starts when the
+Ubuntu archive or an image server cannot be reached; it then installs
+the cached packages, and uses the image last cached from the same URLs.
+
+- The package cache is keyed on the runner image version and the hash
+  of `qemu-1-setup.sh`; a miss restores the newest one for the same
+  runner OS, and apt downloads only what changed.
+- The image cache is keyed on the OS, its URLs, and the size and date
+  the server reports for each file. A job uses the cached image without
+  downloading it when the key matches, and otherwise downloads it,
+  falling back to the newest image cached for the same URLs.
+- AlmaLinux images are not cached: the images of all default OSes
+  (11 GB) exceed the 10 GB cache of a repository, and AlmaLinux's
+  cost the most per OS (2.8 GB).
+
+Only the `Cache runner packages` and `Cache image` jobs save caches, on
+pushes and manual runs of the default branch, whose caches every branch
+and PR can restore. A cache saved by a PR could only be restored by that
+PR. These jobs download and save only what the cache does not already
+hold under the current key.
 
 ### Reusing fork QEMU results
 
