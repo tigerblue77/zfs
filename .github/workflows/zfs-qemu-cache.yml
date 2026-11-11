@@ -22,6 +22,11 @@ on:
       - .github/workflows/scripts/qemu-1-setup.sh
       - .github/workflows/scripts/qemu-2-start.sh
   workflow_dispatch:
+    inputs:
+      simulate_outage:
+        type: boolean
+        default: false
+        description: "(test only) Make the Ubuntu, Debian and FreeBSD servers unreachable"
 
 concurrency:
   group: ${{ github.workflow }}
@@ -34,15 +39,20 @@ permissions:
 jobs:
   refresh:
     name: Refresh
-    if: >-
-      github.event_name != 'workflow_dispatch' ||
-      github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
       QEMU_CACHE: /var/tmp/qemu-cache
     steps:
     - uses: actions/checkout@v6
+
+    - name: Simulate an outage (test only)
+      if: github.event.inputs.simulate_outage == 'true'
+      run: |
+        for h in azure.archive.ubuntu.com archive.ubuntu.com security.ubuntu.com \
+            cloud-images.ubuntu.com cloud.debian.org download.freebsd.org ; do
+          echo "127.0.0.1 $h" | sudo tee -a /etc/hosts
+        done
 
     - name: Find missing caches
       id: plan
