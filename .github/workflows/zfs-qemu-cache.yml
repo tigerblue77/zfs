@@ -203,33 +203,28 @@ jobs:
         cat "$tmp/missing"
         echo "missing=$(jq -sc . "$tmp/missing")" >> "$GITHUB_OUTPUT"
 
-    - name: Keys to look up (test only)
-      id: check
-      run: |
-        .github/workflows/scripts/qemu-1-setup.sh --cache-key >> "$GITHUB_OUTPUT"
-        .github/workflows/scripts/qemu-2-start.sh --cache-key debian13 |
-          sed 's/^image-/debian13-/' >> "$GITHUB_OUTPUT"
-        .github/workflows/scripts/qemu-2-start.sh --cache-key freebsd15-1r |
-          sed 's/^image-/freebsd-/' >> "$GITHUB_OUTPUT"
-    - name: Look up packages (test only)
+    - name: Look up entry 0 saved by this run (test only)
+      if: ${{ fromJson(needs.plan.outputs.missing)[0] != null }}
       uses: actions/cache/restore@v6
       with:
-        path: ${{ env.QEMU_CACHE }}/apt
-        key: ${{ steps.check.outputs.apt-key }}
+        path: ${{ env.QEMU_CACHE }}/${{ fromJson(needs.plan.outputs.missing)[0].cache }}
+        key: ${{ fromJson(needs.plan.outputs.missing)[0].key }}
         lookup-only: true
         fail-on-cache-miss: true
-    - name: Look up debian13 image (test only)
+    - name: Look up entry 1 saved by this run (test only)
+      if: ${{ fromJson(needs.plan.outputs.missing)[1] != null }}
       uses: actions/cache/restore@v6
       with:
-        path: ${{ env.QEMU_CACHE }}/image
-        key: ${{ steps.check.outputs.debian13-key }}
+        path: ${{ env.QEMU_CACHE }}/${{ fromJson(needs.plan.outputs.missing)[1].cache }}
+        key: ${{ fromJson(needs.plan.outputs.missing)[1].key }}
         lookup-only: true
         fail-on-cache-miss: true
-    - name: Look up freebsd15-1r image (test only)
+    - name: Look up entry 2 saved by this run (test only)
+      if: ${{ fromJson(needs.plan.outputs.missing)[2] != null }}
       uses: actions/cache/restore@v6
       with:
-        path: ${{ env.QEMU_CACHE }}/image
-        key: ${{ steps.check.outputs.freebsd-key }}
+        path: ${{ env.QEMU_CACHE }}/${{ fromJson(needs.plan.outputs.missing)[2].cache }}
+        key: ${{ fromJson(needs.plan.outputs.missing)[2].key }}
         lookup-only: true
         fail-on-cache-miss: true
     - name: Find missing caches during an outage (test only)
