@@ -1,0 +1,128 @@
+# Bench only, never for upstream: fletcher4 per implementation, native
+# and byteswap, master against the fletcher4 NEON branch, on a
+# GitHub-hosted arm64 runner.  See bench/fl4bench.c.
+name: bench-fletcher4
+
+on:
+  push:
+    branches:
+      - bench-fletcher4-neon-1112
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  MASTER_SHA: 91bb4127d167893d770467b36f56bf159f9717dd
+  BRANCH_SHA: 9aa50bac666e6f7e1dd265a51dd63ce8c839c2bc
+  DEPS: >-
+    build-essential autoconf automake libtool gawk uuid-dev libudev-dev
+    libssl-dev zlib1g-dev libaio-dev libattr1-dev libelf-dev libblkid-dev
+    libtirpc-dev python3
+
+jobs:
+  bench:
+    strategy:
+      fail-fast: false
+      matrix:
+        rep: [1, 2]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        path: src
+    - name: CPU
+      run: |
+        uname -a
+        lscpu
+        grep -m1 -E '^Features' /proc/cpuinfo
+        grep -m1 -E '^CPU part' /proc/cpuinfo
+    - name: Dependencies
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq $DEPS >/dev/null
+    - name: Fetch both trees
+      run: |
+        for t in master:$MASTER_SHA branch:$BRANCH_SHA; do
+          d=${t%%:*}; sha=${t#*:}
+          git init -q "$d"
+          git -C "$d" fetch -q --depth=1 \
+            "https://github.com/${{ github.repository }}" "$sha"
+          git -C "$d" checkout -q FETCH_HEAD
+          echo "$d $(git -C "$d" log -1 --format='%H %s')"
+        done
+    - name: Build userland (release) and the bench, both trees
+      run: |
+        for d in master branch; do
+          (cd "$d" && ./autogen.sh >/dev/null &&
+            ./configure --with-config=user >/dev/null &&
+            make -j"$(nproc)" >/dev/null)
+          sh src/bench/build.sh "$d" "$RUNNER_TEMP/$d"
+        done
+    - name: Unit test test_fletcher on this CPU, branch tree
+      run: make -C branch unit T=fletcher
+    - name: Bench, 11 rounds alternating master and branch
+      run: |
+        for r in $(seq 0 10); do
+          "$RUNNER_TEMP/master/fl4bench" -L master -o "$r" >> master.csv
+          "$RUNNER_TEMP/branch/fl4bench" -L branch -o "$r" >> branch.csv
+        done
+    - name: Kernel-style fastest selection, 20 runs per build, alternating
+      run: |
+        for i in 1 2 3 4; do
+          "$RUNNER_TEMP/master/fl4bench" -L master -S 5 >> master.csv
+          "$RUNNER_TEMP/branch/fl4bench" -L branch -S 5 >> branch.csv
+        done
+    - name: Summary
+      run: |
+        python3 -I src/bench/summarize.py master.csv branch.csv |
+          tee -a "$GITHUB_STEP_SUMMARY"
+    - name: Raw results
+      run: cat master.csv branch.csv
+
+  kmod:
+    strategy:
+      fail-fast: false
+      matrix:
+        tree: [master, branch]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+    - name: Kernel
+      run: |
+        uname -a
+        lscpu | grep -E 'Model name|Vendor ID|^CPU\(s\)'
+        grep -E 'CONFIG_KERNEL_MODE_NEON' "/boot/config-$(uname -r)" || true
+    - name: Dependencies
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq $DEPS "linux-headers-$(uname -r)" >/dev/null
+        grep -wE 'kernel_neon_(begin|end)' \
+          "/lib/modules/$(uname -r)/build/Module.symvers" || true
+    - name: Fetch the tree
+      run: |
+        if [ "${{ matrix.tree }}" = master ]; then sha=$MASTER_SHA; else sha=$BRANCH_SHA; fi
+        git init -q zfs
+        git -C zfs fetch -q --depth=1 \
+          "https://github.com/${{ github.repository }}" "$sha"
+        git -C zfs checkout -q FETCH_HEAD
+        git -C zfs log -1 --format='%H %s'
+    - name: Configure and build the modules
+      working-directory: zfs
+      run: |
+        ./autogen.sh >/dev/null
+        ./configure --with-config=kernel > configure.out 2>&1
+        grep -iE 'kernel fpu|neon|WARNING' configure.out || true
+        make -j"$(nproc)" -C module >/dev/null
+    - name: Load the modules
+      working-directory: zfs
+      run: |
+        sudo insmod module/spl.ko
+        sudo insmod module/zfs.ko
+        sudo dmesg | grep -iE 'zfs|spl' | tail -n 5
+    - name: What the module selected
+      run: |
+        cat /sys/module/zfs/parameters/zfs_fletcher_4_impl
+        sudo cat /proc/spl/kstat/zfs/fletcher_4_bench
+        sudo cat /proc/spl/kstat/zfs/simd
