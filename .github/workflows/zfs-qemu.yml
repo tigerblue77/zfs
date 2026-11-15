@@ -130,10 +130,24 @@ jobs:
 
     # "t+NN" ends NN minutes after the tests started.  The last of these
     # steps the jobs API shows as completed is how far a lost runner got.
+    # A runner without KSM was lost 3 minutes in: the first eight minutes
+    # are cut into one-minute steps, each followed by an upload.
+    - {name: "t+01", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 1}
+    - {name: "upload t+01", if: env.PROBE_VARIANT, uses: actions/upload-artifact@v7, with: {name: "probe-${{ env.PROBE_VARIANT }}-${{ matrix.copy }}-t01", path: /var/tmp/probe}}
     - {name: "t+02", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 2}
+    - {name: "upload t+02", if: env.PROBE_VARIANT, uses: actions/upload-artifact@v7, with: {name: "probe-${{ env.PROBE_VARIANT }}-${{ matrix.copy }}-t02", path: /var/tmp/probe}}
+    - {name: "t+03", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 3}
+    - {name: "upload t+03", if: env.PROBE_VARIANT, uses: actions/upload-artifact@v7, with: {name: "probe-${{ env.PROBE_VARIANT }}-${{ matrix.copy }}-t03", path: /var/tmp/probe}}
     - {name: "t+04", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 4}
+    - {name: "upload t+04", if: env.PROBE_VARIANT, uses: actions/upload-artifact@v7, with: {name: "probe-${{ env.PROBE_VARIANT }}-${{ matrix.copy }}-t04", path: /var/tmp/probe}}
+    - {name: "t+05", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 5}
+    - {name: "upload t+05", if: env.PROBE_VARIANT, uses: actions/upload-artifact@v7, with: {name: "probe-${{ env.PROBE_VARIANT }}-${{ matrix.copy }}-t05", path: /var/tmp/probe}}
     - {name: "t+06", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 6}
+    - {name: "upload t+06", if: env.PROBE_VARIANT, uses: actions/upload-artifact@v7, with: {name: "probe-${{ env.PROBE_VARIANT }}-${{ matrix.copy }}-t06", path: /var/tmp/probe}}
+    - {name: "t+07", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 7}
+    - {name: "upload t+07", if: env.PROBE_VARIANT, uses: actions/upload-artifact@v7, with: {name: "probe-${{ env.PROBE_VARIANT }}-${{ matrix.copy }}-t07", path: /var/tmp/probe}}
     - {name: "t+08", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 8}
+    - {name: "upload t+08", if: env.PROBE_VARIANT, uses: actions/upload-artifact@v7, with: {name: "probe-${{ env.PROBE_VARIANT }}-${{ matrix.copy }}-t08", path: /var/tmp/probe}}
     - {name: "t+10", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 10}
     - {name: "upload t+10", if: env.PROBE_VARIANT, uses: actions/upload-artifact@v7, with: {name: "probe-${{ env.PROBE_VARIANT }}-${{ matrix.copy }}-t10", path: /var/tmp/probe}}
     - {name: "t+12", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 12}
