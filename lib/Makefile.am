@@ -44,11 +44,14 @@
 # --no-unreferenced-symbols: Exclude symbols which are not referenced by
 # any debug information.
 #
-# --headers-dir1: Limit ABI checks to public OpenZFS headers, otherwise
-# changes in public system headers are also reported.
-#
 # --suppressions: Honor a suppressions file for each library to provide
-# a mechanism for suppressing harmless warnings.
+# a mechanism for suppressing harmless warnings.  Each file also limits
+# the check to the types defined in the public OpenZFS headers (include
+# and lib/libspl/include), otherwise changes in system headers and in
+# private types are also reported.  Where a type is defined is read from
+# the built library: the stored .abi files have no source locations
+# (--no-show-locs), and --headers-dir1 treats every struct without one
+# as private.
 #
 
 noinst_LTLIBRARIES =
@@ -100,7 +103,6 @@ checkabi: check_libabi_version
 		[ -f $(srcdir)/lib/$$lib/$$lib.suppr ] || continue; \
 		echo $$lib:; \
 		abidiff --no-unreferenced-symbols \
-		    --headers-dir1 include \
 		    --suppressions $(srcdir)/lib/$$lib/$$lib.suppr \
 		    $(srcdir)/lib/$$lib/$$lib.abi .libs/$$lib.so || err=$$((err + 1)); \
 	done; \

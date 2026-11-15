@@ -3,3 +3,6 @@
 
 [suppress_type]
 	name = pthread_cond_t
+
+[suppress_type]
+	source_location_not_regexp = ^([^/].*/)?include/

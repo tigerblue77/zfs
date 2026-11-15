@@ -9,5 +9,5 @@
 	type_kind = typedef
 	name = SHA2_CTX
 
-[suppress_variable]
-	name = zfs_deleg_perm_tab
+[suppress_type]
+	source_location_not_regexp = ^([^/].*/)?include/
