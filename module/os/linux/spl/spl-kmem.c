@@ -130,6 +130,30 @@ kmem_strfree(char *str)
 }
 EXPORT_SYMBOL(kmem_strfree);
 
+/*
+ * Return the flags to use for a vmalloc() of the given size.
+ *
+ * Since Linux 6.19, vmalloc() first tries to back an area with pages of
+ * order up to ilog2(nr_pages).  Those attempts skip direct reclaim, but
+ * each failure wakes kswapd, although the order-0 fallback then succeeds.
+ * When free memory is fragmented the attempts fail however much of it
+ * there is, and kswapd, which cannot produce a costly order by reclaim,
+ * shrinks the ARC each time.
+ *
+ * So a costly vmalloc() does not wake kswapd.  This is limited to masks
+ * that allow direct reclaim: the order-0 allocations keep it, so the
+ * request cannot fail where it would not have failed before.
+ */
+static inline gfp_t
+spl_vmalloc_lflags(size_t size, gfp_t lflags)
+{
+	if ((size > PAGE_SIZE << PAGE_ALLOC_COSTLY_ORDER) &&
+	    (lflags & __GFP_DIRECT_RECLAIM))
+		lflags &= ~__GFP_KSWAPD_RECLAIM;
+
+	return (lflags);
+}
+
 void *
 spl_kvmalloc(size_t size, gfp_t lflags)
 {
@@ -165,6 +189,17 @@ spl_kvmalloc(size_t size, gfp_t lflags)
 			kmalloc_lflags &= ~__GFP_DIRECT_RECLAIM;
 
 		/*
+		 * A costly physical attempt that has the vmalloc fallback
+		 * below is speculative as well, so do not wake kswapd for it
+		 * either; see spl_vmalloc_lflags().  Without the fallback a
+		 * failure is final and the wake-up is kept.
+		 */
+		if (!(kmalloc_lflags & __GFP_RETRY_MAYFAIL) &&
+		    (size > PAGE_SIZE << PAGE_ALLOC_COSTLY_ORDER) &&
+		    (lflags & __GFP_RECLAIM) == __GFP_RECLAIM)
+			kmalloc_lflags &= ~__GFP_KSWAPD_RECLAIM;
+
+		/*
 		 * Limit physical allocation retries for non-costly requests,
 		 * including those with __GFP_RETRY_MAYFAIL.
 		 */
@@ -194,7 +229,7 @@ spl_kvmalloc(size_t size, gfp_t lflags)
 	 * __GFP_COMP, which is not a valid flag for vmalloc.
 	 */
 	lflags &= ~__GFP_COMP;
-	return (spl_vmalloc(size, lflags));
+	return (spl_vmalloc(size, spl_vmalloc_lflags(size, lflags)));
 }
 
 /*
@@ -243,7 +278,8 @@ spl_kmem_alloc_impl(size_t size, int flags, int node)
 		 */
 		if (size > spl_kmem_alloc_max) {
 			if (flags & KM_VMEM) {
-				ptr = spl_vmalloc(size, lflags);
+				ptr = spl_vmalloc(size,
+				    spl_vmalloc_lflags(size, lflags));
 			} else {
 				return (NULL);
 			}
