@@ -6030,8 +6030,14 @@ top:
 				}
 				acb->acb_zb = *zb;
 				if (pio != NULL) {
+					/*
+					 * It only carries the error of the
+					 * read in progress to pio, which may
+					 * be one that is allowed to fail.
+					 */
 					acb->acb_zio_dummy = zio_null(pio,
-					    spa, NULL, NULL, NULL, zio_flags);
+					    spa, NULL, NULL, NULL,
+					    zio_flags | ZIO_FLAG_CANFAIL);
 				}
 				acb->acb_zio_head = head_zio;
 				acb->acb_next = hdr->b_l1hdr.b_acb;
@@ -6496,7 +6502,13 @@ done:
 	if (done)
 		done(NULL, zb, bp, buf, private);
 	if (pio && rc != 0) {
-		zio_t *zio = zio_null(pio, spa, NULL, NULL, NULL, zio_flags);
+		/*
+		 * This zio only carries rc to pio.  It has to be allowed to
+		 * fail whatever the read itself was: zio_done() asserts that
+		 * no other zio completes with an error.
+		 */
+		zio_t *zio = zio_null(pio, spa, NULL, NULL, NULL,
+		    zio_flags | ZIO_FLAG_CANFAIL);
 		zio->io_error = rc;
 		zio_nowait(zio);
 	}

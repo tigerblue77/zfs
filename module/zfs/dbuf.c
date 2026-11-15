@@ -1792,8 +1792,8 @@ dbuf_fix_old_data(dmu_buf_impl_t *db, uint64_t txg)
 	}
 }
 
-int
-dbuf_read(dmu_buf_impl_t *db, zio_t *pio, dmu_flags_t flags)
+static int
+dbuf_read_once(dmu_buf_impl_t *db, zio_t *pio, dmu_flags_t flags)
 {
 	dnode_t *dn;
 	boolean_t miss = B_TRUE, need_wait = B_FALSE, prefetch;
@@ -1937,6 +1937,62 @@ done:
 		zio->io_error = err;
 		zio_nowait(zio);
 	}
+
+	return (err);
+}
+
+/*
+ * A read that must succeed (no DB_RF_CANFAIL) came back with an error.  Its
+ * callers cannot handle that: they go on to use the data of the dbuf.  An
+ * I/O error never gets here, the zio layer suspends the pool for it.  What
+ * gets here is a block that yields no data without any I/O error: its block
+ * pointer is rejected by zfs_blkptr_verify(), it does not decompress or
+ * authenticate, or the read was done by another reader that may fail.
+ *
+ * Try once more, in case the failure was only that other reader's.  After
+ * that, do what a failed ZIO_FLAG_MUSTSUCCEED zio does: suspend the pool and
+ * retry when it is resumed.  Return B_FALSE when there is nothing to retry.
+ */
+noinline static boolean_t
+dbuf_read_must_retry(dmu_buf_impl_t *db, zio_t *pio, dmu_flags_t flags,
+    int err, int tries)
+{
+	spa_t *spa = db->db_objset->os_spa;
+	dbuf_states_t state;
+
+	/* With a pio the read is asynchronous, its outcome is not known. */
+	if (pio != NULL || (flags & DB_RF_CANFAIL))
+		return (B_FALSE);
+
+	mutex_enter(&db->db_mtx);
+	state = db->db_state;
+	mutex_exit(&db->db_mtx);
+
+	/* The dbuf has its data (or wants none): not a failed read. */
+	if (state == DB_CACHED || state == DB_NOFILL)
+		return (B_FALSE);
+
+	if (state == DB_UNCACHED && tries > 1) {
+		cmn_err(CE_WARN, "Pool '%s' cannot read a block it has to: "
+		    "objset %llu object %llu level %lld blkid %llu, error %d",
+		    spa_name(spa), (u_longlong_t)dmu_objset_id(db->db_objset),
+		    (u_longlong_t)db->db.db_object, (longlong_t)db->db_level,
+		    (u_longlong_t)db->db_blkid, err);
+		zio_suspend(spa, NULL, ZIO_SUSPEND_IOERR);
+		zio_resume_wait(spa);
+	}
+
+	return (B_TRUE);
+}
+
+int
+dbuf_read(dmu_buf_impl_t *db, zio_t *pio, dmu_flags_t flags)
+{
+	int err, tries = 0;
+
+	while ((err = dbuf_read_once(db, pio, flags)) != 0 &&
+	    dbuf_read_must_retry(db, pio, flags, err, ++tries))
+		continue;
 
 	return (err);
 }
