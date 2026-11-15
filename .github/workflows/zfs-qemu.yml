@@ -1,271 +1,196 @@
+# FORK-ONLY PROBE, NOT FOR MERGE.
+#
+# zfs-qemu jobs that land on an AWS-hosted ubuntu-24.04 runner (root on
+# /dev/mapper/cow-root) lose their runner about 49 minutes into the tests.
+# On the probe branch this file is replaced by N copies of one Linux target.
+# A copy on any other host exits at once.  A copy on such a host takes the
+# least-covered variant and runs the usual steps:
+#
+#   control  the stock setup: two 8 GiB guests, KSM on
+#   noksm    KSM stopped and unmerged once the build machine is up
+#   ram6     two 6 GiB guests, as the FreeBSD targets get
+#
+# GitHub keeps no log of the step a lost runner was in.  So the tests run in
+# the background, the wait for them is cut into two-minute steps, whose
+# states the jobs API keeps, and the samples are uploaded on the way.
 name: zfs-qemu
 
 on:
-  push:
-  pull_request:
   workflow_dispatch:
     inputs:
-      fedora_kernel_ver:
+      copies:
         type: string
-        required: false
-        default: ""
-        description: "(optional) Experimental kernel version to install on Fedora (like '6.14' or '6.13.3-0.rc3')"
-      specific_os:
+        default: "60"
+        description: "Matrix copies to start (about 1 in 4 lands on AWS)"
+      per_variant:
         type: string
-        required: false
-        default: ""
-        description: "(optional) Only run on this specific OS (like 'fedora44' or 'alpine3-24')"
+        default: "3"
+        description: "Jobs wanted for each variant; later copies exit at once"
+      variants:
+        type: string
+        default: "control noksm ram6"
+        description: "Variants to cover: control, noksm, ramN (N GiB guests)"
+      os:
+        type: string
+        default: "debian12"
+        description: "Linux target to build and test"
+      host:
+        type: choice
+        options: [aws, any]
+        default: aws
+        description: "'any' probes whatever host a copy gets (to try this out)"
 
-concurrency:
-  group: >-
-    ${{ github.workflow }}-${{ github.head_ref ||
-    (github.event_name == 'push' && github.ref) || github.run_id }}
-  cancel-in-progress: true
+permissions:
+  contents: read
+  actions: read
 
 jobs:
-  test-config:
-    name: Setup
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || github.repository != 'openzfs/zfs'
+  plan:
+    name: Plan
     runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      actions: read
     outputs:
-      test_os: ${{ steps.os.outputs.os }}
-      ci_type: ${{ steps.os.outputs.ci_type }}
-      reused_jobs: ${{ steps.reuse.outputs.jobs }}
-      all_reused: ${{ steps.reuse.outputs.all_reused }}
+      copies: ${{ steps.copies.outputs.copies }}
     steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - name: Generate OS config and CI type
-        id: os
-        run: |
-          ci_type="default"
-          ci_source="auto"
-
-          # determine CI type when running on PR
-          if ${{ github.event_name == 'pull_request' }}; then
-            head=${{ github.event.pull_request.head.sha }}
-            base=${{ github.event.pull_request.base.sha }}
-            read -r ci_type ci_source <<< "$(python3 .github/workflows/scripts/generate-ci-type.py $head $base)"
-          fi
-
-          case "$ci_type" in
-          docs)
-            os_selection='[]'
-            ;;
-          quick)
-            os_selection='["almalinux8", "almalinux9", "almalinux10", "debian12", "fedora45", "freebsd15-2s", "ubuntu26"]'
-            ;;
-          linux)
-            os_selection='["almalinux8", "almalinux9", "almalinux10", "centos-stream9", "centos-stream10", "debian11", "debian12", "debian13", "fedora43", "fedora44", "fedora45", "ubuntu22", "ubuntu24", "ubuntu26"]'
-            ;;
-          freebsd)
-            os_selection='["freebsd14-4r", "freebsd14-5s", "freebsd15-1r", "freebsd15-2s", "freebsd16-0c"]'
-            ;;
-          *)
-            # default list
-            os_selection='["almalinux8", "almalinux9", "almalinux10", "alpine3-24", "debian12", "debian13", "fedora43", "fedora44", "fedora45", "freebsd14-4r", "freebsd15-1r", "freebsd15-2s", "freebsd16-0c", "ubuntu22", "ubuntu24", "ubuntu26"]'
-            ;;
-          esac
-
-          # Repository-level override for OS selection.
-          # Set vars.ZTS_OS_OVERRIDE in repo settings to restrict targets
-          # (e.g. '["debian13"]' or '["debian13", "fedora44"]').
-          # Manual ZFS-CI-Type in commit messages bypasses the override.
-          if [ -n "${{ vars.ZTS_OS_OVERRIDE }}" ] && [ "$ci_source" != "manual" ]; then
-            override='${{ vars.ZTS_OS_OVERRIDE }}'
-            if echo "$override" | jq -e 'type == "array"' >/dev/null 2>&1; then
-              os_selection="$override"
-            else
-              echo "::warning::Invalid ZTS_OS_OVERRIDE, using default"
-            fi
-          fi
-
-          if ${{ github.event.inputs.fedora_kernel_ver != '' }}; then
-              # They specified a custom kernel version for Fedora.
-              # Use only Fedora runners.
-              os_json=$(echo "${os_selection}" | jq -c '[.[] | select(startswith("fedora"))]')
-          elif ${{ github.event.inputs.specific_os != '' }}; then
-              # Use only the specified runner.
-              os_json=$(jq -cn --arg os "${{ github.event.inputs.specific_os }}" '[ $os ]')
-          else
-              # Normal case
-              os_json=$(echo "${os_selection}" | jq -c)
-          fi
-
-          echo "os=$os_json" | tee -a "$GITHUB_OUTPUT"
-          echo "ci_type=$ci_type" | tee -a "$GITHUB_OUTPUT"
-
-      - name: Find or wait for fork jobs
-        id: reuse
+      - id: copies
         env:
-          GH_TOKEN: ${{ github.token }}
-          ZTS_TARGETS: ${{ steps.os.outputs.os }}
-          REUSE_WAIT_MINUTES: ${{ vars.REUSE_WAIT_MINUTES || 240 }}
+          COPIES: ${{ inputs.copies }}
         run: |
-          jobs=$(python3 .github/workflows/scripts/reuse-ci.py)
-          echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
-          all_reused=$(jq -n --argjson jobs "$jobs" --argjson targets "$ZTS_TARGETS" \
-            '$targets | all(.[]; $jobs[.] != null)')
-          echo "all_reused=$all_reused" >> "$GITHUB_OUTPUT"
+          echo "copies=$(jq -cn --argjson n "$COPIES" '[range(1; $n + 1)]')" >> "$GITHUB_OUTPUT"
 
-  qemu-vm:
-    name: qemu-x86
-    needs: [ test-config ]
-    if: >-
-      (github.event_name == 'pull_request' ||
-      github.repository != 'openzfs/zfs') &&
-      needs.test-config.outputs.ci_type != 'docs'
+  probe:
+    name: probe
+    needs: [ plan ]
     strategy:
       fail-fast: false
       matrix:
-        # rhl:     almalinux8, almalinux9, centos-streamX, fedora4x
-        # debian:  debian12, debian13, ubuntu22, ubuntu24, ubuntu26
-        # misc:    archlinux, tumbleweed
-        # FreeBSD variants of november 2025:
-        # FreeBSD Release: freebsd14-4r, freebsd15-1r
-        # FreeBSD Stable:  freebsd14-5s, freebsd15-2s
-        # FreeBSD Current: freebsd16-0c
-        os: ${{ fromJson(needs.test-config.outputs.test_os) }}
+        copy: ${{ fromJson(needs.plan.outputs.copies) }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 115
     env:
-      # Setup outputs survive a selective matrix job rerun.
-      REUSED_JOB: >-
-        ${{ github.run_attempt == '1' &&
-        fromJSON(needs.test-config.outputs.reused_jobs)[matrix.os] || '' }}
+      PROBE_COPY: ${{ matrix.copy }}
+      PROBE_OS: ${{ inputs.os }}
+      PROBE_HOST: ${{ inputs.host }}
+      PROBE_VARIANTS: ${{ inputs.variants }}
+      PROBE_PER_VARIANT: ${{ inputs.per_variant }}
+      GH_TOKEN: ${{ github.token }}
     steps:
-    - name: Reuse successful fork job
-      if: env.REUSED_JOB != ''
-      run: |
-        printf 'Reused successful full QEMU tests for this commit.\n\n[Original job and logs](%s)\n' \
-          "$REUSED_JOB" | tee -a "$GITHUB_STEP_SUMMARY"
-
     - uses: actions/checkout@v6
-      if: env.REUSED_JOB == ''
+
+    # Sets PROBE_VARIANT, which every later step requires, when this copy is
+    # to run, and PROBE_RAM_GIB for a ramN variant.
+    - name: Host facts and variant
+      run: .github/workflows/scripts/qemu-probe.sh host
+
+    # Other copies count these artifacts to find the least-covered variant.
+    - name: Claim the variant
+      if: env.PROBE_VARIANT
+      uses: actions/upload-artifact@v7
       with:
-        ref: ${{ github.event.pull_request.head.sha }}
+        name: claim-${{ env.PROBE_VARIANT }}-${{ matrix.copy }}
+        path: /var/tmp/probe/host.txt
 
     - name: Setup QEMU
-      if: env.REUSED_JOB == ''
+      if: env.PROBE_VARIANT
       timeout-minutes: 60
       run: .github/workflows/scripts/qemu-1-setup.sh
 
     - name: Start build machine
-      if: env.REUSED_JOB == ''
+      if: env.PROBE_VARIANT
       timeout-minutes: 20
-      run: .github/workflows/scripts/qemu-2-start.sh ${{ matrix.os }}
+      run: .github/workflows/scripts/qemu-2-start.sh "$PROBE_OS"
+
+    - name: Apply the variant
+      if: env.PROBE_VARIANT
+      run: .github/workflows/scripts/qemu-probe.sh variant
+
+    # What "/" is made of and the files Setup QEMU put on it, kept even if
+    # the runner is lost before the first upload of samples.
+    - name: Upload the setup facts
+      if: env.PROBE_VARIANT
+      uses: actions/upload-artifact@v7
+      with:
+        name: setup-${{ env.PROBE_VARIANT }}-${{ matrix.copy }}
+        path: /var/tmp/probe/host.txt
 
     - name: Install dependencies
-      if: env.REUSED_JOB == ''
+      if: env.PROBE_VARIANT
       timeout-minutes: 60
-      run: .github/workflows/scripts/qemu-3-deps.sh --poweroff ${{ matrix.os }} ${{ github.event.inputs.fedora_kernel_ver }}
+      run: .github/workflows/scripts/qemu-3-deps.sh --poweroff "$PROBE_OS"
 
     - name: Build modules
-      if: env.REUSED_JOB == ''
+      if: env.PROBE_VARIANT
       timeout-minutes: 30
-      run: .github/workflows/scripts/qemu-4-build.sh --poweroff --enable-debug ${{ matrix.os }}
+      run: .github/workflows/scripts/qemu-4-build.sh --poweroff --enable-debug "$PROBE_OS"
 
     - name: Setup testing machines
-      if: env.REUSED_JOB == ''
+      if: env.PROBE_VARIANT
       timeout-minutes: 5
       run: .github/workflows/scripts/qemu-5-setup.sh
 
-    - name: Run tests
-      if: env.REUSED_JOB == ''
-      timeout-minutes: 300
-      run: .github/workflows/scripts/qemu-6-tests.sh
-      env:
-        CI_TYPE: ${{ needs.test-config.outputs.ci_type }}
+    - name: Start tests
+      if: env.PROBE_VARIANT
+      run: .github/workflows/scripts/qemu-probe.sh start
 
-    - name: Prepare artifacts
-      if: always() && env.REUSED_JOB == ''
-      timeout-minutes: 10
-      run: .github/workflows/scripts/qemu-7-prepare.sh
+    # "t+NN" ends NN minutes after the tests started.  The last of these
+    # steps the jobs API shows as completed is how far a lost runner got.
+    - {name: "t+02", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 2}
+    - {name: "t+04", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 4}
+    - {name: "t+06", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 6}
+    - {name: "t+08", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 8}
+    - {name: "t+10", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 10}
+    - {name: "upload t+10", if: env.PROBE_VARIANT, uses: actions/upload-artifact@v7, with: {name: "probe-${{ env.PROBE_VARIANT }}-${{ matrix.copy }}-t10", path: /var/tmp/probe}}
+    - {name: "t+12", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 12}
+    - {name: "t+14", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 14}
+    - {name: "t+16", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 16}
+    - {name: "t+18", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 18}
+    - {name: "t+20", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 20}
+    - {name: "upload t+20", if: env.PROBE_VARIANT, uses: actions/upload-artifact@v7, with: {name: "probe-${{ env.PROBE_VARIANT }}-${{ matrix.copy }}-t20", path: /var/tmp/probe}}
+    - {name: "t+22", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 22}
+    - {name: "t+24", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 24}
+    - {name: "t+26", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 26}
+    - {name: "t+28", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 28}
+    - {name: "t+30", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 30}
+    - {name: "upload t+30", if: env.PROBE_VARIANT, uses: actions/upload-artifact@v7, with: {name: "probe-${{ env.PROBE_VARIANT }}-${{ matrix.copy }}-t30", path: /var/tmp/probe}}
+    - {name: "t+32", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 32}
+    - {name: "t+34", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 34}
+    - {name: "t+36", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 36}
+    - {name: "upload t+36", if: env.PROBE_VARIANT, uses: actions/upload-artifact@v7, with: {name: "probe-${{ env.PROBE_VARIANT }}-${{ matrix.copy }}-t36", path: /var/tmp/probe}}
+    - {name: "t+38", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 38}
+    - {name: "t+40", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 40}
+    - {name: "upload t+40", if: env.PROBE_VARIANT, uses: actions/upload-artifact@v7, with: {name: "probe-${{ env.PROBE_VARIANT }}-${{ matrix.copy }}-t40", path: /var/tmp/probe}}
+    - {name: "t+42", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 42}
+    - {name: "t+44", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 44}
+    - {name: "upload t+44", if: env.PROBE_VARIANT, uses: actions/upload-artifact@v7, with: {name: "probe-${{ env.PROBE_VARIANT }}-${{ matrix.copy }}-t44", path: /var/tmp/probe}}
+    - {name: "t+46", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 46}
+    - {name: "t+48", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 48}
+    - {name: "upload t+48", if: env.PROBE_VARIANT, uses: actions/upload-artifact@v7, with: {name: "probe-${{ env.PROBE_VARIANT }}-${{ matrix.copy }}-t48", path: /var/tmp/probe}}
+    - {name: "t+50", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 50}
+    - {name: "t+52", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 52}
+    - {name: "upload t+52", if: env.PROBE_VARIANT, uses: actions/upload-artifact@v7, with: {name: "probe-${{ env.PROBE_VARIANT }}-${{ matrix.copy }}-t52", path: /var/tmp/probe}}
+    - {name: "t+54", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 54}
+    - {name: "t+56", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 56}
+    - {name: "t+58", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 58}
+    - {name: "t+60", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 60}
+    - {name: "upload t+60", if: env.PROBE_VARIANT, uses: actions/upload-artifact@v7, with: {name: "probe-${{ env.PROBE_VARIANT }}-${{ matrix.copy }}-t60", path: /var/tmp/probe}}
+    - {name: "t+62", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 62}
+    - {name: "t+64", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 64}
+    - {name: "t+66", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 66}
+    - {name: "t+68", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 68}
+    - {name: "t+70", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 70}
+    - {name: "t+72", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 72}
+    - {name: "t+74", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 74}
+    - {name: "t+76", if: env.PROBE_VARIANT, run: .github/workflows/scripts/qemu-probe.sh slice 76}
 
-    - uses: actions/upload-artifact@v7
-      id: artifact-upload
-      if: always() && env.REUSED_JOB == ''
+    # The job ends here and takes the tests with it: 76 minutes are past the
+    # mark, and the rest of the suite would only hold a runner.
+    - name: Collect
+      if: always() && env.PROBE_VARIANT
+      timeout-minutes: 5
+      run: .github/workflows/scripts/qemu-probe.sh collect
+
+    - name: Upload the last state
+      if: always() && env.PROBE_VARIANT
+      uses: actions/upload-artifact@v7
       with:
-        name: Logs-functional-${{ matrix.os }}
-        path: /tmp/qemu-${{ matrix.os }}.tar.bz2
-        archive: false
-        if-no-files-found: ignore
-
-    - name: Test Summary
-      if: always() && env.REUSED_JOB == ''
-      run: .github/workflows/scripts/qemu-8-summary.sh '${{ steps.artifact-upload.outputs.artifact-url }}'
-
-  cleanup:
-    if: >-
-      (github.event_name == 'pull_request' ||
-      github.repository != 'openzfs/zfs') &&
-      always()
-    name: Cleanup
-    runs-on: ubuntu-latest
-    needs: [ test-config, qemu-vm ]
-
-    steps:
-    - uses: actions/checkout@v6
-      with:
-        ref: ${{ github.event.pull_request.head.sha }}
-    - uses: actions/download-artifact@v8
-      if: >-
-        github.run_attempt != '1' ||
-        needs.test-config.outputs.all_reused != 'true'
-    - name: Reused fork results
-      env:
-        REUSED_JOBS: >-
-          ${{ github.run_attempt == '1' &&
-          needs.test-config.outputs.reused_jobs || '{}' }}
-      run: |
-        jq -r 'to_entries[] | "- \(.key): [original job and logs](\(.value))"' \
-          <<< "$REUSED_JOBS" >> "$GITHUB_STEP_SUMMARY"
-    - name: Generating summary
-      run: .github/workflows/scripts/qemu-9-summary-page.sh
-    - name: Generating summary...
-      run: .github/workflows/scripts/qemu-9-summary-page.sh 2
-    - name: Generating summary...
-      run: .github/workflows/scripts/qemu-9-summary-page.sh 3
-    - name: Generating summary...
-      run: .github/workflows/scripts/qemu-9-summary-page.sh 4
-    - name: Generating summary...
-      run: .github/workflows/scripts/qemu-9-summary-page.sh 5
-    - name: Generating summary...
-      run: .github/workflows/scripts/qemu-9-summary-page.sh 6
-    - name: Generating summary...
-      run: .github/workflows/scripts/qemu-9-summary-page.sh 7
-    - name: Generating summary...
-      run: .github/workflows/scripts/qemu-9-summary-page.sh 8
-    - name: Generating summary...
-      run: .github/workflows/scripts/qemu-9-summary-page.sh 9
-    - name: Generating summary...
-      run: .github/workflows/scripts/qemu-9-summary-page.sh 10
-    - name: Generating summary...
-      run: .github/workflows/scripts/qemu-9-summary-page.sh 11
-    - name: Generating summary...
-      run: .github/workflows/scripts/qemu-9-summary-page.sh 12
-    - name: Generating summary...
-      run: .github/workflows/scripts/qemu-9-summary-page.sh 13
-    - name: Generating summary...
-      run: .github/workflows/scripts/qemu-9-summary-page.sh 14
-    - name: Generating summary...
-      run: .github/workflows/scripts/qemu-9-summary-page.sh 15
-    - name: Generating summary...
-      run: .github/workflows/scripts/qemu-9-summary-page.sh 16
-    - name: Generating summary...
-      run: .github/workflows/scripts/qemu-9-summary-page.sh 17
-    - name: Generating summary...
-      run: .github/workflows/scripts/qemu-9-summary-page.sh 18
-    - name: Generating summary...
-      run: .github/workflows/scripts/qemu-9-summary-page.sh 19
-    - uses: actions/upload-artifact@v7
-      if: >-
-        github.run_attempt != '1' ||
-        needs.test-config.outputs.all_reused != 'true'
-      with:
-        name: Summary Files
-        path: out-*
-        archive: true
+        name: probe-${{ env.PROBE_VARIANT }}-${{ matrix.copy }}-final
+        path: /var/tmp/probe

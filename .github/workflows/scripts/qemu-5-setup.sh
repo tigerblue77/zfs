@@ -38,6 +38,9 @@ case "$OS" in
     ;;
 esac
 
+# Probe only: guest memory of the variant under test.
+RAM="${PROBE_RAM_GIB:-$RAM}"
+
 # create snapshot we can clone later
 sudo zfs snapshot zpool/openzfs@now
 
