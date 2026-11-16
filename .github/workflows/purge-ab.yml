@@ -1,0 +1,82 @@
+name: purge-ab
+
+# Test only, never for a PR: time the start of qemu-1-setup.sh (disk purge,
+# then package install) three ways on fresh runners: as upstream runs it,
+# with its "rm -fr" of unused directories in the background, and with that
+# while keeping the Azure apt mirror. Runs when this branch is created (its
+# commits carry [skip ci]).
+on:
+  create:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ab:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+    steps:
+      - name: Purge and install as qemu-1-setup.sh does
+        env:
+          LEG: ${{ matrix.leg }}
+        run: |
+          set -eu
+          arms=(serial bgrm bgrm-azure)
+          arm=${arms[$(( LEG % 3 ))]}
+          dirs="/usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup
+            /usr/share/swift /usr/local/share/powershell /usr/local/julia*
+            /usr/share/miniconda /usr/local/share/chromium"
+          now() { date +%s.%N; }
+          since() { awk -v a="$1" -v b="$(now)" 'BEGIN { printf "%.0f", b - a }'; }
+          avail0=$(df -BG --output=avail / | tail -1 | tr -d ' ')
+          t0=$(now)
+          rmpid=
+          if [ "$arm" != serial ]; then
+            # shellcheck disable=SC2086
+            (sudo rm -fr $dirs; since "$t0" > rm.secs) &
+            rmpid=$!
+          fi
+          # Lines below are those of upstream qemu-1-setup.sh.
+          sudo docker image prune --all --force
+          sudo docker builder prune -a
+          # shellcheck disable=SC2140
+          unneeded="microsoft-edge-stable|azure-cli|google-cloud|google-chrome-stable|"\
+          "temurin|llvm|firefox|mysql-server|snapd|android|dotnet|haskell|ghcup|"\
+          "powershell|julia|swift|miniconda|chromium"
+          sudo apt-get -y update
+          # shellcheck disable=SC2046
+          sudo apt-get -y remove $(dpkg-query -f '${binary:Package}\n' -W | grep -E "'$unneeded'")
+          sudo apt-get -y autoremove
+          if [ "$arm" = serial ]; then
+            # shellcheck disable=SC2086
+            sudo rm -fr $dirs
+            since "$t0" > rm.secs
+          fi
+          t_purge=$(since "$t0")
+          if [ "$arm" != bgrm-azure ]; then
+            sudo sed -i '/azure.archive.ubuntu.com/d' /etc/apt/apt-mirrors.txt
+          fi
+          export DEBIAN_FRONTEND="noninteractive"
+          t1=$(now)
+          sudo apt-get -y update
+          # The log goes to the workspace on purpose.
+          # shellcheck disable=SC2024
+          sudo apt-get install -y axel cloud-image-utils daemonize guestfs-tools \
+            virt-manager zfsutils-linux > install.log
+          t_install=$(since "$t1")
+          if [ -n "$rmpid" ]; then
+            wait "$rmpid"
+          fi
+          t_total=$(since "$t0")
+          avail1=$(df -BG --output=avail / | tail -1 | tr -d ' ')
+          f=$(grep '^Fetched' install.log || echo "Fetched nothing")
+          r="RESULT leg=$LEG arm=$arm total=$t_total purge_steps=$t_purge"
+          r+=" rm_done_at=$(cat rm.secs) install=$t_install"
+          r+=" avail=$avail0->$avail1 $f"
+          echo "$r"
+          echo "$r" >> "$GITHUB_STEP_SUMMARY"
