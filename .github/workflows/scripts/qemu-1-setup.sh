@@ -8,10 +8,18 @@ set -eu
 
 # The default runner has a bunch of development tools and other things
 # that we do not need.  Remove them here to free up a total of 35GB.
-#
-# First remove packages - this frees up ~10GB
 echo "Disk space before purge:"
 df -h /
+
+# Remove unneeded files in /usr.  This frees up 25GB but takes about two
+# minutes, so run it in the background while the packages are removed and
+# installed below, and wait for it before the disk space is used.
+sudo rm -fr /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup \
+        /usr/share/swift /usr/local/share/powershell /usr/local/julia* \
+        /usr/share/miniconda /usr/local/share/chromium &
+purge_pid=$!
+
+# Remove packages - this frees up another ~10GB
 sudo docker image prune --all --force
 sudo docker builder prune -a
 unneeded="microsoft-edge-stable|azure-cli|google-cloud|google-chrome-stable|"\
@@ -21,13 +29,6 @@ unneeded="microsoft-edge-stable|azure-cli|google-cloud|google-chrome-stable|"\
 sudo apt-get -y update
 sudo apt-get -y remove $(dpkg-query -f '${binary:Package}\n' -W | grep -E "'$unneeded'")
 sudo apt-get -y autoremove
-
-# Next, remove unneeded files in /usr.  This frees up an additional 25GB.
-sudo rm -fr /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup \
-        /usr/share/swift /usr/local/share/powershell /usr/local/julia* \
-        /usr/share/miniconda /usr/local/share/chromium
-echo "Disk space after:"
-df -h /
 
 # The default 'azure.archive.ubuntu.com' mirrors can be really slow.
 # Prioritize the official Ubuntu mirrors.
@@ -48,6 +49,10 @@ export DEBIAN_FRONTEND="noninteractive"
 sudo apt-get -y update
 sudo apt-get install -y axel cloud-image-utils daemonize guestfs-tools \
   virt-manager zfsutils-linux
+
+wait $purge_pid
+echo "Disk space after:"
+df -h /
 
 # generate ssh keys
 rm -f ~/.ssh/id_ed25519
