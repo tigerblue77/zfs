@@ -7644,6 +7644,20 @@ static const zfs_ioc_key_t zfs_keys_pool_sync[] = {
 	{"force",	DATA_TYPE_BOOLEAN_VALUE,	0},
 };
 
+/*
+ * Dirty the config of every vdev from syncing context, which holds
+ * SCL_CONFIG as reader.  Taking it as writer from open context waits for
+ * spa_sync(), and new readers queue behind a waiting writer: if spa_sync()
+ * suspended, "zpool clear" could no longer get the config to resume it.
+ */
+static void
+zfs_ioc_pool_sync_force(void *arg, dmu_tx_t *tx)
+{
+	(void) arg;
+
+	vdev_config_dirty(dmu_tx_pool(tx)->dp_spa->spa_root_vdev);
+}
+
 static int
 zfs_ioc_pool_sync(const char *pool, nvlist_t *innvl, nvlist_t *onvl)
 {
@@ -7662,9 +7676,16 @@ zfs_ioc_pool_sync(const char *pool, nvlist_t *innvl, nvlist_t *onvl)
 	}
 
 	if (force) {
-		spa_config_enter(spa, SCL_CONFIG, FTAG, RW_WRITER);
-		vdev_config_dirty(spa->spa_root_vdev);
-		spa_config_exit(spa, SCL_CONFIG, FTAG);
+		dsl_pool_t *dp = spa_get_dsl(spa);
+		dmu_tx_t *tx = dmu_tx_create_dd(dp->dp_mos_dir);
+
+		/*
+		 * The wait below covers the task's txg; waiting for it
+		 * first would add a txg to every forced sync.
+		 */
+		VERIFY0(dmu_tx_assign(tx, DMU_TX_WAIT | DMU_TX_SUSPEND));
+		dsl_sync_task_nowait(dp, zfs_ioc_pool_sync_force, NULL, tx);
+		dmu_tx_commit(tx);
 	}
 	txg_wait_synced(spa_get_dsl(spa), 0);
 
