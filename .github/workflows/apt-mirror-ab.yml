@@ -1,0 +1,63 @@
+name: apt-mirror-ab
+
+# Test only, never for a PR: time the "Setup QEMU" package download from
+# the HTTPS mirrors qemu-1-setup.sh keeps, the same hosts over HTTP, and
+# the Azure mirror it drops, on the same runner and the same package set.
+# Runs when this branch is created (its commits carry [skip ci]).
+on:
+  create:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ab:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: [0, 1, 2, 3, 4, 5]
+    steps:
+      - name: Remove the packages qemu-1-setup.sh removes
+        run: |
+          unneeded="microsoft-edge-stable|azure-cli|google-cloud|google-chrome-stable"
+          unneeded+="|temurin|llvm|firefox|mysql-server|snapd|android|dotnet|haskell"
+          unneeded+="|ghcup|powershell|julia|swift|miniconda|chromium"
+          sudo apt-get -y update
+          # shellcheck disable=SC2046
+          sudo apt-get -y remove $(dpkg-query -f '${binary:Package}\n' -W | grep -E "$unneeded")
+          sudo apt-get -y autoremove
+      - name: Download the same packages from each mirror
+        env:
+          LEG: ${{ matrix.leg }}
+        run: |
+          set -eu
+          pkgs="axel cloud-image-utils daemonize guestfs-tools virt-manager zfsutils-linux"
+          variants=(https http azure)
+          for i in 0 1 2; do
+            v=${variants[$(( (LEG + i) % 3 ))]}
+            case "$v" in
+            https) list="https://archive.ubuntu.com/ubuntu/	priority:2
+          https://security.ubuntu.com/ubuntu/	priority:3" ;;
+            http) list="http://archive.ubuntu.com/ubuntu/	priority:2
+          http://security.ubuntu.com/ubuntu/	priority:3" ;;
+            azure) list="http://azure.archive.ubuntu.com/ubuntu/	priority:1" ;;
+            esac
+            echo "$list" | sudo tee /etc/apt/apt-mirrors.txt
+            sudo apt-get -y update >/dev/null
+            sudo apt-get clean
+            t0=$(date +%s.%N)
+            # The log goes to the workspace on purpose; $pkgs is a word list.
+            # shellcheck disable=SC2024,SC2086
+            sudo apt-get install -y --download-only $pkgs > "dl-$v.log"
+            t1=$(date +%s.%N)
+            n=$(grep -c '^Get:' "dl-$v.log" || true)
+            f=$(grep '^Fetched' "dl-$v.log" || echo "Fetched nothing")
+            s=$(awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.1f", b - a }')
+            r="RESULT leg=$LEG order=$i variant=$v seconds=$s gets=$n $f"
+            echo "$r"
+            echo "$r" >> "$GITHUB_STEP_SUMMARY"
+            sudo apt-get clean
+          done
