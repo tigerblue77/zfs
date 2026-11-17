@@ -1638,6 +1638,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/compression/l2arc_compressed_arc.ksh \
 	functional/compression/l2arc_encrypted.ksh \
 	functional/compression/l2arc_encrypted_no_compressed_arc.ksh \
+	functional/compression/l2arc_encrypted_recompress.ksh \
 	functional/compression/setup.ksh \
 	functional/cp_files/cleanup.ksh \
 	functional/cp_files/cp_files_001_pos.ksh \
