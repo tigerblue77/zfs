@@ -61,6 +61,10 @@ the PR's changed files and picks one of:
 | `freebsd` | all supported FreeBSD versions             |
 | default   | cross-platform sample                      |
 
+A push to a PR that would run the default list but only rebases it, with
+the same changes on a new merge base (`git patch-id` of the whole PR diff),
+runs `quick` instead if the QEMU run of the previous head went to its end.
+
 Pushes to `openzfs/zfs` skip the matrix entirely; only PRs (and pushes to
 forks) build.
 
