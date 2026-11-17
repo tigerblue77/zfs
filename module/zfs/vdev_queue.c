@@ -750,6 +750,8 @@ vdev_queue_aggregate(vdev_queue_t *vq, zio_t *zio)
 		ASSERT3P(dio, !=, NULL);
 		zio_add_child(dio, aio);
 		vdev_queue_io_remove(vq, dio);
+		/* An aggregate carrying a ZIL write is issued as one. */
+		aio->io_flags |= dio->io_flags & ZIO_FLAG_ZILWRITE;
 
 		if (dio->io_offset != next_offset) {
 			/* allocate a buffer for a read gap */
