@@ -64,6 +64,9 @@ typedef struct inject_handler {
 	zinject_record_t	zi_record;
 	uint64_t		*zi_lanes;
 	int			zi_next_lane;
+	zio_inject_point_t	zi_point;	/* ZINJECT_DELAY_POINT only */
+	uint32_t		zi_waiters;	/* threads held at zi_point */
+	boolean_t		zi_released;	/* removed, holds no thread */
 	list_node_t		zi_link;
 } inject_handler_t;
 
@@ -94,6 +97,25 @@ static uint32_t inject_delay_count = 0;
  * in that function for more details.
  */
 static kmutex_t inject_delay_mtx;
+
+/*
+ * Number of registered ZINJECT_DELAY_POINT handlers, read without a lock by
+ * zio_inject_point() and changed under inject_lock as RW_WRITER.
+ */
+uint32_t zio_inject_point_count = 0;
+
+/*
+ * Protects the counts, zi_waiters and zi_released of the handlers of named
+ * points.  inject_point_cv is signalled when a handler is removed and when
+ * the last thread held by a removed handler leaves it.
+ */
+static kmutex_t inject_point_lock;
+static kcondvar_t inject_point_cv;
+
+static const char *const zio_inject_point_names[ZIO_INJECT_POINTS] = {
+	[ZIO_INJECT_POINT_UPGRADE_DONE] = "dmu_objset_upgrade_task_cb:done",
+	[ZIO_INJECT_POINT_FREESP_CHANGED] = "zfs_freesp:changed",
+};
 
 /*
  * Used to assign unique identifying numbers to each new zinject handler.
@@ -879,6 +901,51 @@ zio_handle_ready_delay(zio_t *zio)
 	return (target);
 }
 
+/*
+ * For testing, hold the thread at a named point (zinject -w) until the
+ * handler is removed or its zi_timer runs out.  The thread holds no
+ * inject_lock while it waits, so the handler can be removed; removal waits
+ * for the threads it holds to leave before it frees the handler.
+ */
+void
+zio_handle_inject_point(spa_t *spa, zio_inject_point_t point)
+{
+	inject_handler_t *handler;
+	hrtime_t deadline = 0;
+
+	rw_enter(&inject_lock, RW_READER);
+
+	for (handler = list_head(&inject_handlers); handler != NULL;
+	    handler = list_next(&inject_handlers, handler)) {
+		if (handler->zi_record.zi_cmd != ZINJECT_DELAY_POINT ||
+		    handler->zi_spa != spa || handler->zi_point != point)
+			continue;
+
+		mutex_enter(&inject_point_lock);
+		handler->zi_record.zi_match_count++;
+		handler->zi_record.zi_inject_count++;
+		handler->zi_waiters++;
+		mutex_exit(&inject_point_lock);
+		deadline = gethrtime() + handler->zi_record.zi_timer;
+		break;
+	}
+
+	rw_exit(&inject_lock);
+
+	if (handler == NULL)
+		return;
+
+	mutex_enter(&inject_point_lock);
+	while (!handler->zi_released && gethrtime() < deadline) {
+		(void) cv_timedwait_idle_hires(&inject_point_cv,
+		    &inject_point_lock, deadline, MSEC2NSEC(1),
+		    CALLOUT_FLAG_ABSOLUTE);
+	}
+	if (--handler->zi_waiters == 0 && handler->zi_released)
+		cv_broadcast(&inject_point_cv);
+	mutex_exit(&inject_point_lock);
+}
+
 static int
 zio_calculate_range(const char *pool, zinject_record_t *record)
 {
@@ -997,6 +1064,24 @@ zio_inject_fault(char *name, int flags, int *id, zinject_record_t *record)
 			return (SET_ERROR(EINVAL));
 	}
 
+	int point = ZIO_INJECT_POINTS;
+	if (record->zi_cmd == ZINJECT_DELAY_POINT) {
+		/* A wait that the hrtime_t deadline can hold. */
+		if (record->zi_timer == 0 ||
+		    record->zi_timer > (uint64_t)SEC2NSEC(INT32_MAX))
+			return (SET_ERROR(EINVAL));
+		if (strnlen(record->zi_func, sizeof (record->zi_func)) ==
+		    sizeof (record->zi_func))
+			return (SET_ERROR(EINVAL));
+		for (point = 0; point < ZIO_INJECT_POINTS; point++) {
+			if (strcmp(record->zi_func,
+			    zio_inject_point_names[point]) == 0)
+				break;
+		}
+		if (point == ZIO_INJECT_POINTS)
+			return (SET_ERROR(EINVAL));
+	}
+
 	/*
 	 * If the supplied range was in bytes -- calculate the actual blkid
 	 */
@@ -1055,6 +1140,9 @@ zio_inject_fault(char *name, int flags, int *id, zinject_record_t *record)
 			handler->zi_lanes = NULL;
 			handler->zi_next_lane = 0;
 		}
+		handler->zi_point = point;
+		handler->zi_waiters = 0;
+		handler->zi_released = B_FALSE;
 
 		if (handler->zi_spa == NULL)
 			handler->zi_spa_name = spa_strdup(name);
@@ -1071,6 +1159,8 @@ zio_inject_fault(char *name, int flags, int *id, zinject_record_t *record)
 		 */
 		if (handler->zi_record.zi_cmd == ZINJECT_DELAY_IO)
 			atomic_inc_32(&inject_delay_count);
+		if (handler->zi_record.zi_cmd == ZINJECT_DELAY_POINT)
+			atomic_inc_32(&zio_inject_point_count);
 
 		*id = handler->zi_id = inject_next_id++;
 		list_insert_tail(&inject_handlers, handler);
@@ -1115,7 +1205,9 @@ zio_inject_list_next(int *id, char *name, size_t buflen,
 			break;
 
 	if (handler) {
+		mutex_enter(&inject_point_lock);
 		*record = handler->zi_record;
+		mutex_exit(&inject_point_lock);
 		*id = handler->zi_id;
 		ASSERT(handler->zi_spa || handler->zi_spa_name);
 		if (handler->zi_spa != NULL)
@@ -1158,9 +1250,22 @@ zio_clear_fault(int id)
 		ASSERT3U(inject_delay_count, >, 0);
 		atomic_dec_32(&inject_delay_count);
 	}
+	if (handler->zi_record.zi_cmd == ZINJECT_DELAY_POINT) {
+		ASSERT3U(zio_inject_point_count, >, 0);
+		atomic_dec_32(&zio_inject_point_count);
+	}
 
 	list_remove(&inject_handlers, handler);
 	rw_exit(&inject_lock);
+
+	if (handler->zi_record.zi_cmd == ZINJECT_DELAY_POINT) {
+		mutex_enter(&inject_point_lock);
+		handler->zi_released = B_TRUE;
+		cv_broadcast(&inject_point_cv);
+		while (handler->zi_waiters != 0)
+			cv_wait(&inject_point_cv, &inject_point_lock);
+		mutex_exit(&inject_point_lock);
+	}
 
 	if (handler->zi_record.zi_cmd == ZINJECT_DELAY_IO) {
 		ASSERT3P(handler->zi_lanes, !=, NULL);
@@ -1186,6 +1291,8 @@ zio_inject_init(void)
 {
 	rw_init(&inject_lock, NULL, RW_DEFAULT, NULL);
 	mutex_init(&inject_delay_mtx, NULL, MUTEX_DEFAULT, NULL);
+	mutex_init(&inject_point_lock, NULL, MUTEX_DEFAULT, NULL);
+	cv_init(&inject_point_cv, NULL, CV_DEFAULT, NULL);
 	list_create(&inject_handlers, sizeof (inject_handler_t),
 	    offsetof(inject_handler_t, zi_link));
 }
@@ -1194,11 +1301,15 @@ void
 zio_inject_fini(void)
 {
 	list_destroy(&inject_handlers);
+	cv_destroy(&inject_point_cv);
+	mutex_destroy(&inject_point_lock);
 	mutex_destroy(&inject_delay_mtx);
 	rw_destroy(&inject_lock);
 }
 
 EXPORT_SYMBOL(zio_injection_enabled);
+EXPORT_SYMBOL(zio_inject_point_count);
+EXPORT_SYMBOL(zio_handle_inject_point);
 EXPORT_SYMBOL(zio_inject_fault);
 EXPORT_SYMBOL(zio_inject_list_next);
 EXPORT_SYMBOL(zio_clear_fault);

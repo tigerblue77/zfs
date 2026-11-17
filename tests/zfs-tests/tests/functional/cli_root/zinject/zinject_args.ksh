@@ -133,6 +133,28 @@ function test_panic_fault_neg
 	zinject -c all
 }
 
+function test_point_fault
+{
+	typeset -a points=("dmu_objset_upgrade_task_cb:done" \
+	    "zfs_freesp:changed")
+	for p in ${points[@]}; do
+		log_must eval "zinject -w $p -s 10 $TESTPOOL"
+		zinject | grep -q "$p" || \
+		    log_fail "point $p was not registered"
+	done
+	zinject -c all
+}
+
+function test_point_fault_neg
+{
+	log_mustnot eval "zinject -w bogus:point -s 10 $TESTPOOL"
+	log_mustnot eval "zinject -w zfs_freesp:changed $TESTPOOL"
+	log_mustnot eval "zinject -w zfs_freesp:changed -s 10 -f 50 $TESTPOOL"
+	log_mustnot eval "zinject -w zfs_freesp:changed -s 10 -d $DISK1 \
+	    $TESTPOOL"
+	zinject -c all
+}
+
 # Each registered device/delay/data handler row ends with "match inject".
 # Sum the inject counts of all rows.
 function inject_count
@@ -175,6 +197,16 @@ function verify_injection
 	    log_fail "delay injection did not execute (inject=$cnt)"
 	zinject -c all
 
+	# The hold time alone lets a held thread go.
+	if is_linux; then
+		log_must eval "zinject -w zfs_freesp:changed -s 1 $TESTPOOL"
+		log_must truncate -s 0 $TESTFILE
+		cnt=$(inject_count)
+		[[ -n $cnt && $cnt -eq 1 ]] || \
+		    log_fail "point injection did not execute (inject=$cnt)"
+		zinject -c all
+	fi
+
 	log_must zfs inherit primarycache $TESTPOOL
 }
 
@@ -190,6 +222,8 @@ test_delay_fault
 test_delay_fault_neg
 test_panic_fault
 test_panic_fault_neg
+test_point_fault
+test_point_fault_neg
 verify_injection
 
 log_pass "zinject parameters work as expected."

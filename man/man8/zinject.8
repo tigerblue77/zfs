@@ -14,7 +14,7 @@
 .\"
 .\" lint-ok: WARNING: sections out of conventional order: Sh SYNOPSIS
 .\"
-.Dd April 1, 2026
+.Dd November 17, 2026
 .Dt ZINJECT 8
 .Os
 .
@@ -157,6 +157,36 @@ Panic inside the specified function.
 .
 .It Xo
 .Nm zinject
+.Fl w Ar point
+.Fl s Ar seconds
+.Ar pool
+.Xc
+Hold each thread that reaches the named
+.Ar point
+on
+.Ar pool
+for
+.Ar seconds ,
+or until the handler is cancelled with
+.Fl c ,
+whichever comes first.
+The inject count of the handler is the number of threads that reached it.
+A test can stop an operation inside a race window that waits on no I/O,
+run a competing operation, and then let the first one continue.
+The held thread keeps the locks it holds, and the pool cannot be exported
+while the handler exists.
+The points are:
+.Bl -tag -width Ds
+.It Sy dmu_objset_upgrade_task_cb:done
+In the task that upgrades the user accounting of a file system when it is
+mounted, after the task has released the dataset and before it returns.
+.It Sy zfs_freesp:changed
+On Linux, in a truncation or a hole punch, after the file is changed and
+before the change is logged in the ZIL.
+.El
+.
+.It Xo
+.Nm zinject
 .Fl t Sy data
 .Fl C Ar dvas
 .Op Fl e Ar device_error
@@ -277,6 +307,9 @@ The range will be translated to the appropriate blkid range according to the
 object's properties.
 .It Fl s Ar seconds
 Run for this many seconds before reporting failure.
+With
+.Fl w ,
+the longest time a thread is held at the point.
 .It Fl T Ar type
 Inject the error into I/O of this type.
 .Bl -tag -compact -width "read, write, flush, claim, free"
@@ -307,6 +340,8 @@ for the persistent error log.
 .El
 .It Fl u
 Unload the pool after injection.
+.It Fl w Ar point
+Hold threads at the named point in the code.
 .El
 .
 .Sh ENVIRONMENT VARIABLES

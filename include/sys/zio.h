@@ -748,6 +748,33 @@ extern void zio_handle_export_delay(spa_t *spa, hrtime_t elapsed);
 extern hrtime_t zio_handle_ready_delay(zio_t *zio);
 
 /*
+ * Points where zinject -w can hold the thread that reaches them, so that a
+ * test can act inside a race window that waits on no I/O.  Each one is named
+ * in zio_inject_point_names[] and in zinject(8).  A point is added only with
+ * a test that needs it, and never where the thread holds spa_namespace_lock,
+ * which listing and cancelling handlers take.
+ */
+typedef enum zio_inject_point {
+	ZIO_INJECT_POINT_UPGRADE_DONE,
+	ZIO_INJECT_POINT_FREESP_CHANGED,
+	ZIO_INJECT_POINTS
+} zio_inject_point_t;
+
+extern uint32_t zio_inject_point_count;
+extern void zio_handle_inject_point(spa_t *spa, zio_inject_point_t point);
+
+/*
+ * With no zinject -w handler registered, this is one load and one branch
+ * that is not taken.
+ */
+static inline void
+zio_inject_point(spa_t *spa, zio_inject_point_t point)
+{
+	if (unlikely(zio_inject_point_count != 0))
+		zio_handle_inject_point(spa, point);
+}
+
+/*
  * Checksum ereport functions
  */
 extern int zfs_ereport_start_checksum(spa_t *spa, vdev_t *vd,
