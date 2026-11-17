@@ -4640,6 +4640,15 @@ raidz_reflow_impl(vdev_t *vd, vdev_raidz_expand_t *vre, zfs_range_tree_t *rt,
 	raidz_reflow_arg_t *rra = kmem_zalloc(sizeof (*rra) +
 	    sizeof (zio_t *) * writes, KM_SLEEP);
 	rra->rra_vre = vre;
+
+	/*
+	 * SCL_STATE will be released when the read and write are done,
+	 * by raidz_reflow_write_done().  Take it before the range lock:
+	 * a zio holding SCL_ZIO can wait for this range in
+	 * vdev_raidz_io_start(), and spa_vdev_state_enter() holds
+	 * SCL_STATE as writer while it waits for that zio.
+	 */
+	spa_config_enter(spa, SCL_STATE, spa, RW_READER);
 	rra->rra_lr = zfs_rangelock_enter(&vre->vre_rangelock,
 	    offset, size, RL_WRITER);
 	rra->rra_txg = dmu_tx_get_txg(tx);
@@ -4649,12 +4658,6 @@ raidz_reflow_impl(vdev_t *vd, vdev_raidz_expand_t *vre, zfs_range_tree_t *rt,
 
 	raidz_reflow_record_progress(vre, offset + size, tx);
 	zio_inject_point(spa, ZIO_INJECT_POINT_RAIDZ_REFLOW_LOCKED);
-
-	/*
-	 * SCL_STATE will be released when the read and write are done,
-	 * by raidz_reflow_write_done().
-	 */
-	spa_config_enter(spa, SCL_STATE, spa, RW_READER);
 
 	/* check if a replacing vdev was added, if so treat it as an error */
 	if (vdev_raidz_expand_child_replacing(vd)) {
