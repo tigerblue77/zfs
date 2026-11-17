@@ -134,14 +134,28 @@ void *
 spl_kvmalloc(size_t size, gfp_t lflags)
 {
 	/*
+	 * Don't wake kswapd for larger requests, if we can fall back to
+	 * vmalloc.  When the ARC holds most of memory, which compaction
+	 * can't move, kswapd can make contiguous blocks only by evicting
+	 * a lot of it, growing exponentially with the order, which soon
+	 * costs more than vmalloc mapping and TLB flush overheads.  Draw
+	 * the line half way between the costly order and
+	 * spl_kmem_alloc_max in orders.
+	 */
+	boolean_t nokswapd =
+	    (lflags & (__GFP_RECLAIM | __GFP_RETRY_MAYFAIL)) == __GFP_RECLAIM &&
+	    get_order(size) > (PAGE_ALLOC_COSTLY_ORDER +
+	    get_order(spl_kmem_alloc_max)) / 2;
+
+	/*
 	 * GFP_KERNEL allocations can safely use kvmalloc which may
 	 * improve performance by avoiding vmalloc's mapping and locking
 	 * overhead when physically contiguous memory is available.
 	 * This has the side-effect that the slab statistics will
 	 * incorrectly report this as a vmem allocation, but that is
-	 * purely cosmetic.
+	 * purely cosmetic.  kvmalloc wakes kswapd, so skip it otherwise.
 	 */
-	if ((lflags & GFP_KERNEL) == GFP_KERNEL)
+	if (!nokswapd && (lflags & GFP_KERNEL) == GFP_KERNEL)
 		return (kvmalloc(size, lflags));
 
 	gfp_t kmalloc_lflags = lflags;
@@ -172,6 +186,9 @@ spl_kvmalloc(size_t size, gfp_t lflags)
 		    (size <= PAGE_SIZE << PAGE_ALLOC_COSTLY_ORDER)) {
 			kmalloc_lflags |= __GFP_NORETRY;
 		}
+
+		if (nokswapd)
+			kmalloc_lflags &= ~__GFP_KSWAPD_RECLAIM;
 	}
 
 	/*
