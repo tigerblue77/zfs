@@ -1489,6 +1489,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/cli_root/zpool_sync/setup.ksh \
 	functional/cli_root/zpool_sync/zpool_sync_001_pos.ksh \
 	functional/cli_root/zpool_sync/zpool_sync_002_neg.ksh \
+	functional/cli_root/zpool_sync/zpool_sync_force_suspended.ksh \
 	functional/cli_root/zpool_trim/cleanup.ksh \
 	functional/cli_root/zpool_trim/setup.ksh \
 	functional/cli_root/zpool_trim/zpool_trim_attach_detach_add_remove.ksh \
