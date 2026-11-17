@@ -2490,6 +2490,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/test_runner/test_runner_selection.ksh \
 	functional/trim/autotrim_config.ksh \
 	functional/trim/autotrim_integrity.ksh \
+	functional/trim/autotrim_off_exit.ksh \
 	functional/trim/autotrim_trim_integrity.ksh \
 	functional/trim/cleanup.ksh \
 	functional/trim/setup.ksh \
