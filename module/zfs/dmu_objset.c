@@ -1385,6 +1385,7 @@ static void
 dmu_objset_upgrade_task_cb(void *data)
 {
 	objset_t *os = data;
+	spa_t *spa = os->os_spa;
 
 	mutex_enter(&os->os_upgrade_lock);
 	os->os_upgrade_status = EINTR;
@@ -1408,6 +1409,13 @@ dmu_objset_upgrade_task_cb(void *data)
 	dsl_dataset_long_rele(dmu_objset_ds(os), upgrade_tag);
 	os->os_upgrade_id = 0;
 	mutex_exit(&os->os_upgrade_lock);
+
+	/* os may be freed by now; the spa outlives its upgrade taskq. */
+	if (zio_injection_enabled) {
+		int ignored = 0;
+		(void) zio_handle_func_injection(spa,
+		    "dmu_objset_upgrade_task_cb:done", &ignored);
+	}
 }
 
 static void

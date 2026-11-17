@@ -1924,6 +1924,11 @@ zfs_freesp(znode_t *zp, uint64_t off, uint64_t len, int flag, boolean_t log)
 		    off + len > zp->z_size)
 			error = zfs_extend_locked(zp, lr, off+len, B_FALSE);
 	}
+	if (zio_injection_enabled) {
+		int ignored = 0;
+		(void) zio_handle_func_injection(dmu_objset_spa(zfsvfs->z_os),
+		    "zfs_freesp:changed", &ignored);
+	}
 	if (error || !log)
 		goto out;
 log:
