@@ -1042,6 +1042,16 @@ vdev_disk_io_rw(zio_t *zio)
 	}
 
 	/*
+	 * Test only: a ZIL block write may be issued by the thread that
+	 * writes it out, whose io cgroup the bio then carries.  The io
+	 * cgroup controllers issue REQ_META bios as if from the root cgroup.
+	 */
+	if (zio->io_type == ZIO_TYPE_WRITE &&
+	    zio->io_bookmark.zb_object == ZB_ZIL_OBJECT &&
+	    zio->io_bookmark.zb_level == ZB_ZIL_LEVEL)
+		flags |= REQ_META;
+
+	/*
 	 * Check alignment of the incoming ABD. If any part of it would require
 	 * submitting a page that is not aligned to both the logical block size
 	 * and the page size, then we take a copy into a new memory region with
