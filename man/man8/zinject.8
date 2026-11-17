@@ -183,6 +183,9 @@ mounted, after the task has released the dataset and before it returns.
 .It Sy zfs_freesp:changed
 On Linux, in a truncation or a hole punch, after the file is changed and
 before the change is logged in the ZIL.
+.It Sy raidz_reflow_impl:locked
+In the thread of a RAID-Z expansion, after a chunk to copy has been locked
+against other I/O to its range and before the chunk is read.
 .El
 .
 .It Xo
