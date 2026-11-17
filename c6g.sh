@@ -126,7 +126,11 @@ load_arm() {    # load_arm ARM: unload, then load ARM's modules
 	if [ -z "$want" ] || [ "$want" != "$got" ]; then
 		die "srcversion $got loaded, $1 built $want"
 	fi
+	# As TASK-1117-V5P: the ARC stays clear of the two null_blk devices.
+	echo $((2 << 30)) > /sys/module/zfs/parameters/zfs_arc_max ||
+	    die "zfs_arc_max"
 	echo "$1" > "$D/cur-arm"
+	echo "task-1118-v6cg: arm $1 loaded" > /dev/kmsg
 	log "arm $1 loaded, srcversion $got"
 }
 
@@ -295,6 +299,7 @@ row() {         # row TAG ARM PASS
 	sleep 1
 	cat "/proc/spl/kstat/zfs/$pool/txgs" > "$dir/$tag.txgs0"
 	cat /proc/spl/kstat/zfs/zil > "$dir/$tag.zil0"
+	{ head -1 /proc/stat; cat /proc/loadavg; } > "$dir/$tag.cpu0"
 	[ -n "$TRACE" ] && bt_start "$dir/$tag.bt.txt"
 	if [ "$tag" = i0 ] || [ "$tag" = i1 ]; then
 		fio --name=c --filename="$MI/bulk/c" --rw=write --bs=1M \
@@ -328,6 +333,7 @@ row() {         # row TAG ARM PASS
 	fi
 	[ -n "$pd" ] && wait "$pd"
 	[ -n "$TRACE" ] && bt_stop
+	{ head -1 /proc/stat; cat /proc/loadavg; } > "$dir/$tag.cpu1"
 	cat /proc/spl/kstat/zfs/zil > "$dir/$tag.zil1"
 	cat "/proc/spl/kstat/zfs/$pool/txgs" > "$dir/$tag.txgs1"
 	systemctl stop c6g.slice > /dev/null 2>&1
@@ -341,6 +347,8 @@ layout() {      # layout FILE
 		echo "arm $(cat "$D/cur-arm")"
 		echo "srcversion $(cat /sys/module/zfs/srcversion)"
 		dmesg | grep 'ZFS: Loaded module' | tail -1
+		echo "zfs_arc_max" \
+		    "$(cat /sys/module/zfs/parameters/zfs_arc_max)"
 		echo "calling_thread_io" \
 		    "$(cat /sys/module/zfs/parameters/zfs_vdev_disk_calling_thread_io)"
 		echo "root subtree_control" \
@@ -553,6 +561,12 @@ teardown() {
 
 [ "$(id -u)" -eq 0 ] || { echo "run as root" >&2; exit 1; }
 mkdir -p "$L" "$D" || exit 1
+# The test disk is the one setup was given, whatever later calls pass.
+if [ "${1:-}" = setup ]; then
+	echo "$RDISK" > "$D/rdisk" || exit 1
+elif [ -f "$D/rdisk" ]; then
+	RDISK=$(cat "$D/rdisk")
+fi
 command -v zpool | grep -qx "$T/zpool" || die "zpool is not $T/zpool"
 case "${1:-}" in
 setup) setup ;;

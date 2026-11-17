@@ -153,6 +153,19 @@ def maxsync(d, tag):
     return max(new) / 1e6 if new else None
 
 
+def cpu(d, tag):
+    """Steal % over the row and load1 at its end, from tag.cpu0/1."""
+    a = read(os.path.join(d, tag + ".cpu0")).splitlines()
+    b = read(os.path.join(d, tag + ".cpu1")).splitlines()
+    if len(a) < 2 or len(b) < 2:
+        return None, None
+    x = [int(v) for v in a[0].split()[1:9]]
+    y = [int(v) for v in b[0].split()[1:9]]
+    dt = [j - i for i, j in zip(x, y)]
+    tot = sum(dt) or 1
+    return 100.0 * dt[7] / tot, float(b[1].split()[0])
+
+
 def ddq(path):
     """Max IDLE and mean BE requests queued in mq-deadline over the row."""
     idle, be = [], []
@@ -241,6 +254,7 @@ def collect(p, arm, tag):
          "sync": maxsync(d, tag), "lwbs": lwbs(d, tag),
          "bt": bt(os.path.join(d, tag + ".bt.txt"))}
     r["idle_q"], r["be_q"] = ddq(os.path.join(d, tag + ".dd.txt"))
+    r["steal"], r["load1"] = cpu(d, tag)
     return r
 
 
@@ -340,9 +354,9 @@ def timed():
     print("## Timed passes: every row (latencies in us)\n")
     print("| pass | arm | row | B IOPS | B fsync p50 | p99 | p99.9 | A IOPS | "
           "A wios | B wios | A ioprio | A throttled | IDLE q max | BE q "
-          "mean | C MiB/s | max txg sync ms | rc A/B |")
+          "mean | C MiB/s | max txg sync ms | steal % | load1 | rc A/B |")
     print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
-          "---|")
+          "---|---|---|")
     for r in rows:
         b, a, sa, sb = r["b"], r["a"], r["sa"], r["sb"]
         print(f"| {r['pass']} | {r['arm']} | {r['tag']} | {fmt(b.get('iops'))}"
@@ -352,7 +366,17 @@ def timed():
               f"{sa['ioprio'] or '-'} | {fmt(sa['throttled'])} | "
               f"{fmt(r['idle_q'])} | {fmt(r['be_q'], 1)} | "
               f"{fmt(r['c'].get('bw'))} | {fmt(r['sync'], 1)} | "
+              f"{fmt(r['steal'], 2)} | {fmt(r['load1'], 1)} | "
               f"{sa['rc'] or '-'}/{sb['rc']} |")
+    print()
+    print("Noise per pass: highest steal % and load1 range over its rows\n")
+    for p in ps:
+        s = [r for r in rows if r["pass"] == p]
+        st = [r["steal"] for r in s if r["steal"] is not None]
+        ld = [r["load1"] for r in s if r["load1"] is not None]
+        print(f"- {p}: steal max {fmt(max(st) if st else None, 2)} %, "
+              f"load1 {fmt(min(ld) if ld else None, 1)}-"
+              f"{fmt(max(ld) if ld else None, 1)}")
     print()
 
     def sel(arm, tag):
@@ -437,10 +461,19 @@ def timed():
         if not ri:
             continue
         gi, gp = geo(ri), geo(rp)
+        nb = len(set(sel(arm, "i1")) & set(sel("master", "i1")))
+        if len(ri) < nb or len(rp) < nb:
+            gi = gp = None  # a pass where B completed no fsync
         print("- " + rline(f"{arm}/master i1 B IOPS", ri))
         print("- " + rline(f"{arm}/master i1 B fsync p99", rp))
         if arm == "v5":
-            v = gi is not None and (gi <= 0.50 or (gp or 0) >= 10)
+            mv = mean([r["b"].get("iops") for r in sel("v5", "i1").values()])
+            mm = mean([r["b"].get("iops") for r in
+                       sel("master", "i1").values()])
+            q = mv / mm if mv is not None and mm else None
+            print(f"- v5/master i1 B IOPS, ratio of the means: {fmt(q, 3)}")
+            v = ((q is not None and q <= 0.50) or
+                 (gp is not None and gp >= 10))
             print(f"- v5: {'inversion reproduced' if v else 'inversion NOT reproduced'}")
         else:
             v = gi is not None and gi >= 0.85 and gp is not None and gp <= 1.5
