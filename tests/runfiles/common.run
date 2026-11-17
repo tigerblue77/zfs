@@ -1184,7 +1184,8 @@ tests = ['unlinked_fh_accessible']
 tags = ['functional', 'unlink']
 
 [tests/functional/upgrade]
-tests = ['upgrade_userobj_001_pos', 'upgrade_readonly_pool']
+tests = ['upgrade_userobj_001_pos', 'upgrade_readonly_pool',
+    'upgrade_task_unmount']
 tags = ['functional', 'upgrade']
 
 [tests/functional/userquota]
