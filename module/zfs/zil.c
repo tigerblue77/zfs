@@ -2062,7 +2062,7 @@ next_lwb:
 		    lwb->lwb_blk.blk_cksum.zc_word[ZIL_ZC_SEQ]);
 		lwb->lwb_write_zio = zio_rewrite(lwb->lwb_root_zio, spa, 0,
 		    &lwb->lwb_blk, lwb_abd, alloc_size, zil_lwb_write_done,
-		    lwb, prio, ZIO_FLAG_CANFAIL, &zb);
+		    lwb, prio, ZIO_FLAG_CANFAIL | ZIO_FLAG_ZILWRITE, &zb);
 		zil_lwb_add_block(lwb, &lwb->lwb_blk);
 
 		if (lwb->lwb_flags & LWB_FLAG_SLIM) {
