@@ -4506,6 +4506,34 @@ raidz_scratch_child_done(zio_t *zio)
 }
 
 /*
+ * Record a new scratch state in spa_ubsync and write it to the labels of
+ * every leaf.  vdev_raidz_io_start() maps i/o by the state in spa_ubsync,
+ * so if no leaf took the uberblock, put the previous state back: i/o must
+ * keep following the state that is on disk.  As in vdev_config_sync(), the
+ * writes are ZIO_FLAG_CANFAIL: their error is handled here, and zio_done()
+ * has no recovery for a failed label write.
+ */
+static int
+raidz_reflow_scratch_ub_sync(spa_t *spa, raidz_reflow_scratch_state_t state,
+    uint64_t logical_size)
+{
+	uberblock_t *ub = &spa->spa_ubsync;
+	uint64_t old_info = ub->ub_raidz_reflow_info;
+
+	RAIDZ_REFLOW_SET(ub, state, logical_size);
+	ub->ub_timestamp++;
+	int error = vdev_uberblock_sync_list(&spa->spa_root_vdev, 1, ub,
+	    ZIO_FLAG_CONFIG_WRITER | ZIO_FLAG_CANFAIL);
+	if (error != 0) {
+		ub->ub_raidz_reflow_info = old_info;
+		return (error);
+	}
+	if (spa_multihost(spa))
+		mmp_update_uberblock(spa, ub);
+	return (0);
+}
+
+/*
  * Reflow the beginning portion of the vdev into an intermediate scratch area
  * in memory and on disk. This operation must be persisted on disk before we
  * proceed to overwrite the beginning portion with the reflowed data.
@@ -4673,13 +4701,18 @@ io_error_exit:
 	 *
 	 * Note: ub_timestamp is bumped so that vdev_uberblock_compare()
 	 * will prefer this uberblock.
+	 *
+	 * If no disk took it, the real location must not be overwritten:
+	 * pause, as for any other error here.  The scratch area is written
+	 * again when we return.
 	 */
-	RAIDZ_REFLOW_SET(&spa->spa_ubsync, RRSS_SCRATCH_VALID, logical_size);
-	spa->spa_ubsync.ub_timestamp++;
-	VERIFY0(vdev_uberblock_sync_list(&spa->spa_root_vdev, 1,
-	    &spa->spa_ubsync, ZIO_FLAG_CONFIG_WRITER));
-	if (spa_multihost(spa))
-		mmp_update_uberblock(spa, &spa->spa_ubsync);
+	error = raidz_reflow_scratch_ub_sync(spa, RRSS_SCRATCH_VALID,
+	    logical_size);
+	if (error != 0) {
+		zfs_dbgmsg("reflow: error %d writing uberblock "
+		    "(SCRATCH_VALID)", error);
+		goto io_error_exit;
+	}
 
 	zfs_dbgmsg("reflow: uberblock updated "
 	    "(txg %llu, SCRATCH_VALID, size %llu, ts %llu)",
@@ -4721,9 +4754,6 @@ overwrite:
 
 	zfs_dbgmsg("reflow: overwrote %llu bytes (logical) to real location",
 	    (long long)logical_size);
-	for (int i = 0; i < raidvd->vdev_children; i++)
-		abd_free(abds[i]);
-	kmem_free(abds, raidvd->vdev_children * sizeof (abd_t *));
 
 	raidz_expand_pause(RAIDZ_EXPAND_PAUSE_SCRATCH_REFLOWED);
 
@@ -4734,14 +4764,22 @@ overwrite:
 	 * be written to the new location only (because reflow_offset_next ==
 	 * reflow_offset_synced).  If we crashed and re-copied from the
 	 * scratch space, we would lose the regular writes.
+	 *
+	 * If no disk took it, the scratch area stays in use, as when the
+	 * overwrite above fails.
 	 */
-	RAIDZ_REFLOW_SET(&spa->spa_ubsync, RRSS_SCRATCH_INVALID_SYNCED,
+	error = raidz_reflow_scratch_ub_sync(spa, RRSS_SCRATCH_INVALID_SYNCED,
 	    logical_size);
-	spa->spa_ubsync.ub_timestamp++;
-	VERIFY0(vdev_uberblock_sync_list(&spa->spa_root_vdev, 1,
-	    &spa->spa_ubsync, ZIO_FLAG_CONFIG_WRITER));
-	if (spa_multihost(spa))
-		mmp_update_uberblock(spa, &spa->spa_ubsync);
+	if (error != 0) {
+		zfs_dbgmsg("reflow: error %d writing uberblock "
+		    "(SCRATCH_INVALID_SYNCED)", error);
+		RAIDZ_REFLOW_SET(&spa->spa_uberblock, RRSS_SCRATCH_VALID,
+		    logical_size);
+		goto io_error_exit;
+	}
+	for (int i = 0; i < raidvd->vdev_children; i++)
+		abd_free(abds[i]);
+	kmem_free(abds, raidvd->vdev_children * sizeof (abd_t *));
 
 	zfs_dbgmsg("reflow: uberblock updated "
 	    "(txg %llu, SCRATCH_NOT_IN_USE, size %llu, ts %llu)",
