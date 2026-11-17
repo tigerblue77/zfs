@@ -352,6 +352,11 @@ usage(void)
 	    "\t\tsuch that the operation takes a minimum of supplied seconds\n"
 	    "\t\tto complete.\n"
 	    "\n"
+	    "\tzinject -w <point> -s <seconds> pool\n"
+	    "\t\tHold each thread that reaches the named point in the code\n"
+	    "\t\tfor the supplied seconds, or until the handler is cleared\n"
+	    "\t\twith -c.  zinject(8) lists the points.\n"
+	    "\n"
 	    "\tzinject -E <delay> [-a] [-m] [-f freq] [-l level] [-r range]\n"
 	    "\t\t[-T iotype] [-t type object | -b bookmark pool]\n"
 	    "\n"
@@ -556,7 +561,8 @@ print_panic_handler(int id, const char *pool, zinject_record_t *record,
 {
 	int *count = data;
 
-	if (record->zi_func[0] == '\0')
+	if (record->zi_func[0] == '\0' ||
+	    record->zi_cmd == ZINJECT_DELAY_POINT)
 		return (0);
 
 	if (*count == 0) {
@@ -598,6 +604,33 @@ print_pool_delay_handler(int id, const char *pool, zinject_record_t *record,
 	return (0);
 }
 
+static int
+print_point_handler(int id, const char *pool, zinject_record_t *record,
+    void *data)
+{
+	int *count = data;
+
+	if (record->zi_cmd != ZINJECT_DELAY_POINT)
+		return (0);
+
+	if (*count == 0) {
+		(void) printf("%3s  %-15s  %-31s  %-8s  %-6s  %-6s\n",
+		    "ID", "POOL", "POINT", "HOLD (s)", "MATCH", "INJECT");
+		(void) printf("---  ---------------  "
+		    "-------------------------------  --------  ------  "
+		    "------\n");
+	}
+
+	*count += 1;
+
+	(void) printf("%3d  %-15s  %-31s  %8llu  %6" PRIu64 "  %6" PRIu64
+	    "\n", id, pool, record->zi_func,
+	    (u_longlong_t)NSEC2SEC(record->zi_timer),
+	    record->zi_match_count, record->zi_inject_count);
+
+	return (0);
+}
+
 /*
  * Print all registered error handlers.  Returns the number of handlers
  * registered.
@@ -629,6 +662,13 @@ print_all_handlers(void)
 	}
 
 	(void) iter_handlers(print_pool_delay_handler, &count);
+	if (count > 0) {
+		total += count;
+		(void) printf("\n");
+		count = 0;
+	}
+
+	(void) iter_handlers(print_point_handler, &count);
 	if (count > 0) {
 		total += count;
 		(void) printf("\n");
@@ -724,6 +764,10 @@ register_handler(const char *pool, int flags, zinject_record_t *record,
 			if (record->zi_cmd == ZINJECT_DELAY_IMPORT)
 				errmsg = "import delay injector not supported";
 			break;
+		case EINVAL:
+			if (record->zi_cmd == ZINJECT_DELAY_POINT)
+				errmsg = "unknown point";
+			break;
 		default:
 			break;
 		}
@@ -746,6 +790,10 @@ register_handler(const char *pool, int flags, zinject_record_t *record,
 			(void) printf("  vdev: %llx\n",
 			    (u_longlong_t)record->zi_guid);
 			show_iotype = B_TRUE;
+		} else if (record->zi_cmd == ZINJECT_DELAY_POINT) {
+			(void) printf("  point: %s\n", record->zi_func);
+			(void) printf("   hold: %llu seconds\n",
+			    (u_longlong_t)NSEC2SEC(record->zi_timer));
 		} else if (record->zi_func[0] != '\0') {
 			(void) printf("  panic function: %s\n",
 			    record->zi_func);
@@ -968,7 +1016,7 @@ main(int argc, char **argv)
 	}
 
 	while ((c = getopt(argc, argv,
-	    ":aA:b:C:d:D:E:f:Fg:qhIc:t:T:l:mr:s:e:uL:p:P:")) != -1) {
+	    ":aA:b:C:d:D:E:f:Fg:qhIc:t:T:l:mr:s:e:uL:p:P:w:")) != -1) {
 		switch (c) {
 		case 'a':
 			flags |= ZINJECT_FLUSH_ARC;
@@ -1140,6 +1188,11 @@ main(int argc, char **argv)
 			break;
 		case 'u':
 			flags |= ZINJECT_UNLOAD_SPA;
+			break;
+		case 'w':
+			(void) strlcpy(record.zi_func, optarg,
+			    sizeof (record.zi_func));
+			record.zi_cmd = ZINJECT_DELAY_POINT;
 			break;
 		case 'E':
 			ready_delay = MSEC2NSEC(strtol(optarg, &end, 10));
@@ -1378,6 +1431,29 @@ main(int argc, char **argv)
 		}
 
 		(void) strlcpy(pool, argv[0], sizeof (pool));
+	} else if (record.zi_cmd == ZINJECT_DELAY_POINT) {
+		if (raw != NULL || range != NULL || type != TYPE_INVAL ||
+		    level != 0 || record.zi_freq > 0 || dvas != 0 ||
+		    error != 0 || flags != 0 || dur_txg || nowrites ||
+		    ready_delay >= 0) {
+			(void) fprintf(stderr, "%s incompatible with other "
+			    "options\n", "point (-w)");
+			usage();
+			libzfs_fini(g_zfs);
+			return (2);
+		}
+
+		if (argc != 1 || record.zi_duration <= 0) {
+			(void) fprintf(stderr, "point (-w) injection requires "
+			    "a hold time (-s) and a single pool name\n");
+			usage();
+			libzfs_fini(g_zfs);
+			return (2);
+		}
+
+		(void) strlcpy(pool, argv[0], sizeof (pool));
+		record.zi_timer = SEC2NSEC(record.zi_duration);
+		record.zi_duration = 0;
 	} else if (record.zi_cmd == ZINJECT_IGNORED_WRITES) {
 		if (raw != NULL || range != NULL || type != TYPE_INVAL ||
 		    level != 0 || record.zi_freq > 0 || dvas != 0) {
