@@ -1,0 +1,1693 @@
+From fb794659a5a41a9bc75fc695fd8a92e50cd348af Mon Sep 17 00:00:00 2001
+From: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 15:37:21 +0000
+Subject: [PATCH 1/4] Record the former guid of a leaf that takes its parent's
+ guid
+
+When a detach leaves a mirror, replacing or spare vdev with a single
+child, vdev_remove_parent() puts that child in its place as top-level
+vdev and gives it the guid of the parent.  The txg that does so writes
+labels 0 and 2 of the device before its uberblocks, so a crash in
+between leaves a device whose newest labels name it by the new guid,
+while the uberblocks and the MOS config still describe the parent and
+the child under its old guid.
+
+An import that scans the devices builds its config from those newest
+labels.  vdev_copy_path_relaxed() then looks the leaves of the MOS
+config up in it by guid, finds no device for the old guid, and keeps
+the path recorded in the MOS config.  When that path no longer leads to
+the device, as when device names change across a reboot, no child of
+the top-level vdev opens, since the labels of the detached device were
+erased before the txg, and the pool fails to import with ENXIO.  It
+imports again once the devices are back at their old paths.
+
+"zpool split" has the same window, and gives the label of such a leaf
+its former guid as ZPOOL_CONFIG_ORIG_GUID, which vdev_validate()
+accepts in place of the guid.  Do so for every leaf that took the guid
+of its parent, and look a leaf of the MOS config up by it when its guid
+is not found.  Only labels need the key, so leave it out of the MOS
+config, which also keeps it from being read back once the change has
+synced.  The pool now imports, degraded by the detached device, and so
+does a pool left by a crash in the middle of a split, whose labels
+already carry the key.  In place, it imports healthy where
+vdev_validate() rejected the remaining device for the guid in its
+newest label.  Older code already accepts the key in vdev_validate()
+and ignores it elsewhere.
+
+Erasing the labels of the detached device only once the detach has
+synced would not help on its own: the scan keeps the newest label of
+each top-level vdev, which leaves the detached device out of the config
+even when its labels are intact.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>
+---
+ include/sys/vdev_impl.h                       |  1 -
+ module/zfs/vdev.c                             | 33 ++++++-
+ module/zfs/vdev_label.c                       |  7 +-
+ tests/runfiles/common.run                     |  2 +-
+ tests/zfs-tests/tests/Makefile.am             |  1 +
+ .../zpool_detach/zpool_detach_002_pos.ksh     | 94 +++++++++++++++++++
+ 6 files changed, 132 insertions(+), 6 deletions(-)
+ create mode 100755 tests/zfs-tests/tests/functional/cli_root/zpool_detach/zpool_detach_002_pos.ksh
+
+diff --git a/include/sys/vdev_impl.h b/include/sys/vdev_impl.h
+index 0c70247249d..9c0ece3d83b 100644
+--- a/include/sys/vdev_impl.h
++++ b/include/sys/vdev_impl.h
+@@ -403,7 +403,6 @@ struct vdev {
+ 	boolean_t	vdev_has_securetrim; /* secure TRIM is supported */
+ 	boolean_t	vdev_checkremove; /* temporary online test	*/
+ 	boolean_t	vdev_forcefault; /* force online fault		*/
+-	boolean_t	vdev_splitting;	/* split or repair in progress  */
+ 	boolean_t	vdev_delayed_close; /* delayed device close?	*/
+ 	boolean_t	vdev_tmpoffline; /* device taken offline temporarily? */
+ 	boolean_t	vdev_detached;	/* device detached?		*/
+diff --git a/module/zfs/vdev.c b/module/zfs/vdev.c
+index 25ed7a4a741..8a009bca470 100644
+--- a/module/zfs/vdev.c
++++ b/module/zfs/vdev.c
+@@ -969,6 +969,11 @@ vdev_alloc(spa_t *spa, vdev_t **vdp, nvlist_t *nv, vdev_t *parent, uint_t id,
+ 		vd->vdev_label_aux = VDEV_AUX_EXTERNAL;
+ 	}
+ 
++	/* Only labels carry it, for vdev_copy_path_search(). */
++	if (alloctype == VDEV_ALLOC_LOAD)
++		(void) nvlist_lookup_uint64(nv, ZPOOL_CONFIG_ORIG_GUID,
++		    &vd->vdev_orig_guid);
++
+ 	if (nvlist_lookup_string(nv, ZPOOL_CONFIG_DEVID, &tmp) == 0)
+ 		vd->vdev_devid = spa_strdup(tmp);
+ 	if (nvlist_lookup_string(nv, ZPOOL_CONFIG_PHYS_PATH, &tmp) == 0)
+@@ -2881,6 +2886,22 @@ vdev_copy_path_strict(vdev_t *svd, vdev_t *dvd)
+ 	return (0);
+ }
+ 
++static vdev_t *
++vdev_lookup_by_orig_guid(vdev_t *vd, uint64_t guid)
++{
++	vdev_t *mvd;
++
++	if (vd->vdev_ops->vdev_op_leaf)
++		return (vd->vdev_orig_guid == guid ? vd : NULL);
++
++	for (uint64_t c = 0; c < vd->vdev_children; c++)
++		if ((mvd = vdev_lookup_by_orig_guid(vd->vdev_child[c],
++		    guid)) != NULL)
++			return (mvd);
++
++	return (NULL);
++}
++
+ static void
+ vdev_copy_path_search(vdev_t *stvd, vdev_t *dvd)
+ {
+@@ -2901,6 +2922,14 @@ vdev_copy_path_search(vdev_t *stvd, vdev_t *dvd)
+ 	 */
+ 	vdev_t *vd = vdev_lookup_by_guid(stvd, dvd->vdev_guid);
+ 
++	/*
++	 * A leaf left alone in a mirror, replacing or spare vdev that takes
++	 * its place as top-level vdev also takes its guid, and its label can
++	 * be written before the MOS config that records it is committed.
++	 */
++	if (vd == NULL)
++		vd = vdev_lookup_by_orig_guid(stvd, dvd->vdev_guid);
++
+ 	if (vd == NULL || vd->vdev_ops != dvd->vdev_ops)
+ 		return;
+ 
+@@ -6071,10 +6100,8 @@ vdev_split(vdev_t *vd)
+ 	ASSERT3P(pvd->vdev_child, !=, NULL);
+ 
+ 	cvd = pvd->vdev_child[0];
+-	if (pvd->vdev_children == 1) {
++	if (pvd->vdev_children == 1)
+ 		vdev_remove_parent(cvd);
+-		cvd->vdev_splitting = B_TRUE;
+-	}
+ 	vdev_propagate_state(cvd);
+ }
+ 
+diff --git a/module/zfs/vdev_label.c b/module/zfs/vdev_label.c
+index 6507d7491dc..ba5f5c9019f 100644
+--- a/module/zfs/vdev_label.c
++++ b/module/zfs/vdev_label.c
+@@ -793,7 +793,12 @@ vdev_config_generate_impl(spa_t *spa, vdev_t *vd, nvlist_t *nv,
+ 				nvlist_remove_all(nv, ZPOOL_CONFIG_AUX_STATE);
+ 		}
+ 
+-		if (vd->vdev_splitting && vd->vdev_orig_guid != 0LL) {
++		/*
++		 * A leaf that took the guid of its parent may have its label
++		 * written before the MOS config that knows the new guid is
++		 * committed, so give the label its former guid as well.
++		 */
++		if (vd->vdev_orig_guid != 0 && !(flags & VDEV_CONFIG_MOS)) {
+ 			fnvlist_add_uint64(nv, ZPOOL_CONFIG_ORIG_GUID,
+ 			    vd->vdev_orig_guid);
+ 		}
+diff --git a/tests/runfiles/common.run b/tests/runfiles/common.run
+index 5265f44a847..7c1ccc2e49d 100644
+--- a/tests/runfiles/common.run
++++ b/tests/runfiles/common.run
+@@ -475,7 +475,7 @@ post =
+ tags = ['functional', 'cli_root', 'zpool_destroy']
+ 
+ [tests/functional/cli_root/zpool_detach]
+-tests = ['zpool_detach_001_neg']
++tests = ['zpool_detach_001_neg', 'zpool_detach_002_pos']
+ tags = ['functional', 'cli_root', 'zpool_detach']
+ 
+ [tests/functional/cli_root/zpool_events]
+diff --git a/tests/zfs-tests/tests/Makefile.am b/tests/zfs-tests/tests/Makefile.am
+index 31e04a4c30b..57073e14a21 100644
+--- a/tests/zfs-tests/tests/Makefile.am
++++ b/tests/zfs-tests/tests/Makefile.am
+@@ -1243,6 +1243,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
+ 	functional/cli_root/zpool_detach/cleanup.ksh \
+ 	functional/cli_root/zpool_detach/setup.ksh \
+ 	functional/cli_root/zpool_detach/zpool_detach_001_neg.ksh \
++	functional/cli_root/zpool_detach/zpool_detach_002_pos.ksh \
+ 	functional/cli_root/zpool_events/cleanup.ksh \
+ 	functional/cli_root/zpool_events/setup.ksh \
+ 	functional/cli_root/zpool_events/zpool_events_clear.ksh \
+diff --git a/tests/zfs-tests/tests/functional/cli_root/zpool_detach/zpool_detach_002_pos.ksh b/tests/zfs-tests/tests/functional/cli_root/zpool_detach/zpool_detach_002_pos.ksh
+new file mode 100755
+index 00000000000..6dbec469bda
+--- /dev/null
++++ b/tests/zfs-tests/tests/functional/cli_root/zpool_detach/zpool_detach_002_pos.ksh
+@@ -0,0 +1,94 @@
++#!/bin/ksh -p
++# SPDX-License-Identifier: CDDL-1.0
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# https://opensource.org/license/CDDL-1.0.
++#
++
++#
++# Copyright (c) 2026 Tigerblue77
++#
++
++. $STF_SUITE/include/libtest.shlib
++
++#
++# DESCRIPTION:
++# A pool still imports from devices that have moved after a crash in the
++# middle of the txg that detaches one side of a mirror: the remaining
++# device, whose newest labels already describe it as the top-level vdev
++# with the guid of the mirror, is found under the guid it had before.
++#
++# STRATEGY:
++# 1. Create a mirror on file vdevs, export it and copy the devices
++# 2. Import the pool, detach one device, export it again
++# 3. Put back labels 1 and 3 and every uberblock ring of the remaining
++#    device from its copy, leaving labels 0 and 2 from after the detach:
++#    what a crash right before the uberblocks of the detach txg leaves
++# 4. Rename the devices and move them to another directory
++# 5. Verify that the pool imports from there, with the remaining device
++#    online, and scrubs without errors
++#
++
++verify_runnable "global"
++
++VDEV_DIR=$TEST_BASE_DIR/detach_crash
++PRE_DIR=$VDEV_DIR/pre
++MOVED_DIR=$TEST_BASE_DIR/detach_crash_moved
++
++function cleanup
++{
++	poolexists $TESTPOOL1 && destroy_pool $TESTPOOL1
++	rm -rf $VDEV_DIR $MOVED_DIR
++}
++
++#
++# Copy back what a crash before the uberblocks of the detach txg leaves
++# untouched, in 128 KiB blocks: the uberblock ring of label 0 (block 1),
++# label 1 (blocks 2-3), the uberblock ring of label 2 and label 3 (the last
++# three blocks).
++#
++function restore_pre_detach # <device>
++{
++	typeset dev=$1
++	typeset -i n=$((MINVDEVSIZE / 131072))
++
++	log_must dd if=$PRE_DIR/$dev of=$VDEV_DIR/$dev bs=128k \
++	    skip=1 seek=1 count=3 conv=notrunc
++	log_must dd if=$PRE_DIR/$dev of=$VDEV_DIR/$dev bs=128k \
++	    skip=$((n - 3)) seek=$((n - 3)) count=3 conv=notrunc
++}
++
++log_assert "A pool imports from moved devices after a crash in the" \
++    "middle of 'zpool detach'."
++log_onexit cleanup
++
++log_must mkdir -p $PRE_DIR $MOVED_DIR
++for dev in vdev0 vdev1; do
++	log_must truncate -s $MINVDEVSIZE $VDEV_DIR/$dev
++done
++log_must zpool create $TESTPOOL1 mirror $VDEV_DIR/vdev0 $VDEV_DIR/vdev1
++log_must zpool export $TESTPOOL1
++log_must cp $VDEV_DIR/vdev0 $PRE_DIR/vdev0
++
++log_must zpool import -d $VDEV_DIR $TESTPOOL1
++log_must zpool detach $TESTPOOL1 $VDEV_DIR/vdev1
++log_must zpool export $TESTPOOL1
++
++restore_pre_detach vdev0
++for dev in vdev0 vdev1; do
++	log_must mv $VDEV_DIR/$dev $MOVED_DIR/moved_$dev
++done
++
++log_must zpool import -d $MOVED_DIR $TESTPOOL1
++log_must check_vdev_state $TESTPOOL1 $MOVED_DIR/moved_vdev0 ONLINE
++log_must zpool scrub -w $TESTPOOL1
++log_must check_pool_status $TESTPOOL1 "errors" "No known data errors"
++
++log_pass "A pool imports from moved devices after a crash in the middle" \
++    "of 'zpool detach'."
+-- 
+2.43.0
+
+
+From b918651fb9171eae935dff6714ca36bc9a246a85 Mon Sep 17 00:00:00 2001
+From: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 21:21:19 +0000
+Subject: [PATCH 2/4] Use devices whose labels have txg 0 as last-resort import
+ paths
+
+spa_vdev_detach() erases the labels of the detached device with
+vdev_label_init(VDEV_LABEL_REMOVE) before the txg that detaches it is
+synced.  The erased labels have txg 0 but still carry the pool and vdev
+guids, and vdev_validate() accepts them, so after a crash in between
+the pool, still mirrored on disk, opens healthy in place.
+
+An import that scans for the devices skips such labels altogether:
+zpool_read_label() does not count them, so nothing records where the
+device is.  When device names change across the crash, as /dev/sdX
+names do, fix_paths() finds no device for the leaf and keeps the path
+recorded in the labels of the other side of the mirror, which leads
+nowhere or to another device, and the pool imports degraded.  This
+happens to "zpool detach" and to the detach that completes a "zpool
+replace".
+
+While reading the labels of a device that has no valid label, note the
+pool and vdev guids of a label with txg 0, and let fix_paths() use such
+a device as a last resort, only for a leaf of the same pool.  These
+devices are never added as members of a pool, so the list of pools to
+import does not change, and zpool_read_label() returns what it did.
+They go through the same exclusive open test that prunes multipath
+components.  The label checks that the aio and non-aio readers
+duplicated now live in label_unpack().
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>
+---
+ lib/libzutil/os/freebsd/zutil_import_os.c     |   7 +-
+ lib/libzutil/os/linux/zutil_import_os.c       |   7 +-
+ lib/libzutil/zutil_import.c                   | 232 ++++++++++++------
+ lib/libzutil/zutil_import.h                   |   3 +
+ tests/runfiles/common.run                     |   3 +-
+ tests/zfs-tests/tests/Makefile.am             |   1 +
+ .../zpool_detach/zpool_detach_003_pos.ksh     |  95 +++++++
+ 7 files changed, 268 insertions(+), 80 deletions(-)
+ create mode 100755 tests/zfs-tests/tests/functional/cli_root/zpool_detach/zpool_detach_003_pos.ksh
+
+diff --git a/lib/libzutil/os/freebsd/zutil_import_os.c b/lib/libzutil/os/freebsd/zutil_import_os.c
+index fce6c22265b..1ae6e854781 100644
+--- a/lib/libzutil/os/freebsd/zutil_import_os.c
++++ b/lib/libzutil/os/freebsd/zutil_import_os.c
+@@ -164,6 +164,8 @@ zpool_open_func(void *arg)
+ 	rdsk_node_t *rn = arg;
+ 	struct stat64 statbuf;
+ 	nvlist_t *config;
++	uint64_t txg0_pool_guid;
++	uint64_t txg0_guid;
+ 	int num_labels;
+ 	int fd;
+ 	off_t mediasize = 0;
+@@ -203,9 +205,12 @@ zpool_open_func(void *arg)
+ 		goto out;
+ 	}
+ 
+-	if (zpool_read_label(fd, &config, &num_labels) != 0)
++	if (zpool_read_label_txg0(fd, &config, &num_labels, &txg0_pool_guid,
++	    &txg0_guid) != 0)
+ 		goto out;
+ 	if (num_labels == 0) {
++		rn->rn_txg0_pool_guid = txg0_pool_guid;
++		rn->rn_txg0_guid = txg0_guid;
+ 		nvlist_free(config);
+ 		goto out;
+ 	}
+diff --git a/lib/libzutil/os/linux/zutil_import_os.c b/lib/libzutil/os/linux/zutil_import_os.c
+index cbab3977804..374f1105126 100644
+--- a/lib/libzutil/os/linux/zutil_import_os.c
++++ b/lib/libzutil/os/linux/zutil_import_os.c
+@@ -144,6 +144,8 @@ zpool_open_func(void *arg)
+ 	libpc_handle_t *hdl = rn->rn_hdl;
+ 	nvlist_t *config;
+ 	uint64_t vdev_guid = 0;
++	uint64_t txg0_pool_guid;
++	uint64_t txg0_guid;
+ 	int error;
+ 	int num_labels = 0;
+ 	int fd;
+@@ -164,13 +166,16 @@ zpool_open_func(void *arg)
+ 	if (fd < 0)
+ 		return;
+ 
+-	error = zpool_read_label(fd, &config, &num_labels);
++	error = zpool_read_label_txg0(fd, &config, &num_labels,
++	    &txg0_pool_guid, &txg0_guid);
+ 	if (error != 0) {
+ 		(void) close(fd);
+ 		return;
+ 	}
+ 
+ 	if (num_labels == 0) {
++		rn->rn_txg0_pool_guid = txg0_pool_guid;
++		rn->rn_txg0_guid = txg0_guid;
+ 		(void) close(fd);
+ 		nvlist_free(config);
+ 		return;
+diff --git a/lib/libzutil/zutil_import.c b/lib/libzutil/zutil_import.c
+index 0357c447830..ae839d8bf7e 100644
+--- a/lib/libzutil/zutil_import.c
++++ b/lib/libzutil/zutil_import.c
+@@ -210,6 +210,7 @@ typedef struct name_entry {
+ typedef struct pool_list {
+ 	pool_entry_t		*pools;
+ 	name_entry_t		*names;
++	name_entry_t		*txg0_names;	/* see add_txg0_name() */
+ } pool_list_t;
+ 
+ /*
+@@ -263,7 +264,7 @@ best_name(name_entry_t *names, uint64_t guid, const char *path,
+  * configuration of the pool with the given guid.
+  */
+ static int
+-fix_paths(libpc_handle_t *hdl, nvlist_t *nv, name_entry_t *names,
++fix_paths(libpc_handle_t *hdl, nvlist_t *nv, pool_list_t *pl,
+     uint64_t pool_guid)
+ {
+ 	nvlist_t **child;
+@@ -275,7 +276,7 @@ fix_paths(libpc_handle_t *hdl, nvlist_t *nv, name_entry_t *names,
+ 	if (nvlist_lookup_nvlist_array(nv, ZPOOL_CONFIG_CHILDREN,
+ 	    &child, &children) == 0) {
+ 		for (c = 0; c < children; c++)
+-			if (fix_paths(hdl, child[c], names, pool_guid) != 0)
++			if (fix_paths(hdl, child[c], pl, pool_guid) != 0)
+ 				return (-1);
+ 		return (0);
+ 	}
+@@ -296,15 +297,18 @@ fix_paths(libpc_handle_t *hdl, nvlist_t *nv, name_entry_t *names,
+ 	 * have the same vdev guid (and path) as a device of another pool.
+ 	 * Prefer devices whose label belongs to this pool; fall back to any
+ 	 * device, as a reguid interrupted by a crash leaves labels of the
+-	 * same pool with different pool guids.
++	 * same pool with different pool guids.  As a last resort, use a
++	 * device of this pool whose labels have txg 0.
+ 	 */
+ 	verify(nvlist_lookup_uint64(nv, ZPOOL_CONFIG_GUID, &guid) == 0);
+ 	if (nvlist_lookup_string(nv, ZPOOL_CONFIG_PATH, &path) != 0)
+ 		path = NULL;
+ 
+-	best = best_name(names, guid, path, pool_guid);
++	best = best_name(pl->names, guid, path, pool_guid);
+ 	if (best == NULL && pool_guid != 0)
+-		best = best_name(names, guid, path, 0);
++		best = best_name(pl->names, guid, path, 0);
++	if (best == NULL && pool_guid != 0)
++		best = best_name(pl->txg0_names, guid, path, pool_guid);
+ 
+ 	if (best == NULL)
+ 		return (0);
+@@ -526,6 +530,36 @@ add_config(libpc_handle_t *hdl, pool_list_t *pl, const char *path,
+ 	return (0);
+ }
+ 
++/*
++ * Add a device whose labels have txg 0 to the names of last resort.  A
++ * detach, or the removal of a log device, gives a device such labels before
++ * the txg that takes it out of the pool is synced, and vdev_validate()
++ * accepts them when the pool is opened in place.  The device is not a member
++ * of a pool in its own right, but it gives the path of a leaf that the pool
++ * still names.
++ */
++static int
++add_txg0_name(libpc_handle_t *hdl, pool_list_t *pl, const rdsk_node_t *slice)
++{
++	name_entry_t *ne;
++
++	if ((ne = zutil_alloc(hdl, sizeof (name_entry_t))) == NULL)
++		return (-1);
++
++	if ((ne->ne_name = zutil_strdup(hdl, slice->rn_name)) == NULL) {
++		free(ne);
++		return (-1);
++	}
++
++	ne->ne_guid = slice->rn_txg0_guid;
++	ne->ne_pool_guid = slice->rn_txg0_pool_guid;
++	ne->ne_order = slice->rn_order;
++	ne->ne_next = pl->txg0_names;
++	pl->txg0_names = ne;
++
++	return (0);
++}
++
+ static int
+ zutil_pool_active(libpc_handle_t *hdl, const char *name, uint64_t guid,
+     boolean_t *isactive)
+@@ -902,7 +936,7 @@ get_configs(libpc_handle_t *hdl, pool_list_t *pl, boolean_t active_ok,
+ 		 * Go through and fix up any paths and/or devids based on our
+ 		 * known list of vdev GUID -> path mappings.
+ 		 */
+-		if (fix_paths(hdl, nvroot, pl->names, pe->pe_guid) != 0) {
++		if (fix_paths(hdl, nvroot, pl, pe->pe_guid) != 0) {
+ 			nvlist_free(nvroot);
+ 			goto nomem;
+ 		}
+@@ -973,7 +1007,7 @@ get_configs(libpc_handle_t *hdl, pool_list_t *pl, boolean_t active_ok,
+ 					update_vdev_config_dev_strs(spares[i]);
+ 					continue;
+ 				}
+-				if (fix_paths(hdl, spares[i], pl->names,
++				if (fix_paths(hdl, spares[i], pl,
+ 				    pe->pe_guid) != 0)
+ 					goto nomem;
+ 			}
+@@ -990,7 +1024,7 @@ get_configs(libpc_handle_t *hdl, pool_list_t *pl, boolean_t active_ok,
+ 					update_vdev_config_dev_strs(l2cache[i]);
+ 					continue;
+ 				}
+-				if (fix_paths(hdl, l2cache[i], pl->names,
++				if (fix_paths(hdl, l2cache[i], pl,
+ 				    pe->pe_guid) != 0)
+ 					goto nomem;
+ 			}
+@@ -1051,12 +1085,61 @@ label_offset(uint64_t size, int l)
+ }
+ 
+ /*
+- * The same description applies as to zpool_read_label below,
++ * Unpack a label read from a device, and return it with its vdev guid when
++ * it is valid.  The label of a device of a pool must have a txg: one left
++ * with txg 0 belongs to a device being added to the pool, or whose labels a
++ * detach or a removal erased.  Return the pool and vdev guids of the first
++ * such label in *txg0_pool_guid and *txg0_guid; see add_txg0_name().
++ */
++static nvlist_t *
++label_unpack(vdev_phys_t *label, uint64_t *guidp, uint64_t *txg0_pool_guid,
++    uint64_t *txg0_guid)
++{
++	nvlist_t *config;
++	uint64_t guid;
++	uint64_t state;
++	uint64_t pool_guid;
++	uint64_t txg = 0;
++
++	if (nvlist_unpack(label->vp_nvlist, sizeof (label->vp_nvlist),
++	    &config, 0) != 0)
++		return (NULL);
++
++	if (nvlist_lookup_uint64(config, ZPOOL_CONFIG_GUID, &guid) != 0 ||
++	    guid == 0 ||
++	    nvlist_lookup_uint64(config, ZPOOL_CONFIG_POOL_STATE,
++	    &state) != 0 || state > POOL_STATE_L2CACHE) {
++		nvlist_free(config);
++		return (NULL);
++	}
++
++	if (state != POOL_STATE_SPARE && state != POOL_STATE_L2CACHE) {
++		(void) nvlist_lookup_uint64(config, ZPOOL_CONFIG_POOL_TXG,
++		    &txg);
++		if (txg == 0) {
++			if (*txg0_guid == 0 && nvlist_lookup_uint64(config,
++			    ZPOOL_CONFIG_POOL_GUID, &pool_guid) == 0 &&
++			    pool_guid != 0) {
++				*txg0_pool_guid = pool_guid;
++				*txg0_guid = guid;
++			}
++			nvlist_free(config);
++			return (NULL);
++		}
++	}
++
++	*guidp = guid;
++	return (config);
++}
++
++/*
++ * The same description applies as to zpool_read_label_txg0 below,
+  * except here we do it without aio, presumably because an aio call
+  * errored out in a way we think not using it could circumvent.
+  */
+ static int
+-zpool_read_label_slow(int fd, nvlist_t **config, int *num_labels)
++zpool_read_label_slow(int fd, nvlist_t **config, int *num_labels,
++    uint64_t *txg0_pool_guid, uint64_t *txg0_guid)
+ {
+ 	struct stat64 statbuf;
+ 	int l, count = 0;
+@@ -1065,6 +1148,8 @@ zpool_read_label_slow(int fd, nvlist_t **config, int *num_labels)
+ 	uint64_t expected_guid = 0, size;
+ 
+ 	*config = NULL;
++	*txg0_pool_guid = 0;
++	*txg0_guid = 0;
+ 
+ 	if (fstat64_blk(fd, &statbuf) == -1)
+ 		return (0);
+@@ -1076,35 +1161,16 @@ zpool_read_label_slow(int fd, nvlist_t **config, int *num_labels)
+ 		return (-1);
+ 
+ 	for (l = 0; l < VDEV_LABELS; l++) {
+-		uint64_t state, guid, txg;
++		uint64_t guid;
+ 		off_t offset = label_offset(size, l) + VDEV_SKIP_SIZE;
+ 
+ 		if (pread64(fd, label, sizeof (vdev_phys_t),
+ 		    offset) != sizeof (vdev_phys_t))
+ 			continue;
+ 
+-		if (nvlist_unpack(label->vp_nvlist,
+-		    sizeof (label->vp_nvlist), config, 0) != 0)
+-			continue;
+-
+-		if (nvlist_lookup_uint64(*config, ZPOOL_CONFIG_GUID,
+-		    &guid) != 0 || guid == 0) {
+-			nvlist_free(*config);
+-			continue;
+-		}
+-
+-		if (nvlist_lookup_uint64(*config, ZPOOL_CONFIG_POOL_STATE,
+-		    &state) != 0 || state > POOL_STATE_L2CACHE) {
+-			nvlist_free(*config);
+-			continue;
+-		}
+-
+-		if (state != POOL_STATE_SPARE && state != POOL_STATE_L2CACHE &&
+-		    (nvlist_lookup_uint64(*config, ZPOOL_CONFIG_POOL_TXG,
+-		    &txg) != 0 || txg == 0)) {
+-			nvlist_free(*config);
++		if ((*config = label_unpack(label, &guid, txg0_pool_guid,
++		    txg0_guid)) == NULL)
+ 			continue;
+-		}
+ 
+ 		if (expected_guid) {
+ 			if (expected_guid == guid)
+@@ -1134,9 +1200,25 @@ zpool_read_label_slow(int fd, nvlist_t **config, int *num_labels)
+  */
+ int
+ zpool_read_label(int fd, nvlist_t **config, int *num_labels)
++{
++	uint64_t txg0_pool_guid;
++	uint64_t txg0_guid;
++
++	return (zpool_read_label_txg0(fd, config, num_labels, &txg0_pool_guid,
++	    &txg0_guid));
++}
++
++/*
++ * As zpool_read_label(), and return in *txg0_pool_guid and *txg0_guid the
++ * pool and vdev guids of a label left with txg 0, or 0.
++ */
++int
++zpool_read_label_txg0(int fd, nvlist_t **config, int *num_labels,
++    uint64_t *txg0_pool_guid, uint64_t *txg0_guid)
+ {
+ #ifndef HAVE_AIO_H
+-	return (zpool_read_label_slow(fd, config, num_labels));
++	return (zpool_read_label_slow(fd, config, num_labels, txg0_pool_guid,
++	    txg0_guid));
+ #else
+ 	struct stat64 statbuf;
+ 	struct aiocb aiocbs[VDEV_LABELS];
+@@ -1147,6 +1229,8 @@ zpool_read_label(int fd, nvlist_t **config, int *num_labels)
+ 	int error, l, count = 0;
+ 
+ 	*config = NULL;
++	*txg0_pool_guid = 0;
++	*txg0_guid = 0;
+ 
+ 	if (fstat64_blk(fd, &statbuf) == -1)
+ 		return (0);
+@@ -1216,7 +1300,8 @@ zpool_read_label(int fd, nvlist_t **config, int *num_labels)
+ 			 * At least some IO involved access unsafe-for-AIO
+ 			 * files. Let's try again, without AIO this time.
+ 			 */
+-			error = zpool_read_label_slow(fd, config, num_labels);
++			error = zpool_read_label_slow(fd, config, num_labels,
++			    txg0_pool_guid, txg0_guid);
+ 			saved_errno = errno;
+ 		}
+ 		kmem_free_aligned(labels, VDEV_LABELS * sizeof (*labels));
+@@ -1225,33 +1310,14 @@ zpool_read_label(int fd, nvlist_t **config, int *num_labels)
+ 	}
+ 
+ 	for (l = 0; l < VDEV_LABELS; l++) {
+-		uint64_t state, guid, txg;
++		uint64_t guid;
+ 
+ 		if (aio_return(&aiocbs[l]) != sizeof (vdev_phys_t))
+ 			continue;
+ 
+-		if (nvlist_unpack(labels[l].vp_nvlist,
+-		    sizeof (labels[l].vp_nvlist), config, 0) != 0)
+-			continue;
+-
+-		if (nvlist_lookup_uint64(*config, ZPOOL_CONFIG_GUID,
+-		    &guid) != 0 || guid == 0) {
+-			nvlist_free(*config);
++		if ((*config = label_unpack(&labels[l], &guid, txg0_pool_guid,
++		    txg0_guid)) == NULL)
+ 			continue;
+-		}
+-
+-		if (nvlist_lookup_uint64(*config, ZPOOL_CONFIG_POOL_STATE,
+-		    &state) != 0 || state > POOL_STATE_L2CACHE) {
+-			nvlist_free(*config);
+-			continue;
+-		}
+-
+-		if (state != POOL_STATE_SPARE && state != POOL_STATE_L2CACHE &&
+-		    (nvlist_lookup_uint64(*config, ZPOOL_CONFIG_POOL_TXG,
+-		    &txg) != 0 || txg == 0)) {
+-			nvlist_free(*config);
+-			continue;
+-		}
+ 
+ 		if (expected_guid) {
+ 			if (expected_guid == guid)
+@@ -1565,6 +1631,25 @@ error:
+ 	return (error);
+ }
+ 
++/*
++ * Verify that a device found by the scan can be opened exclusively.  This
++ * will prune all underlying multipath devices which otherwise could result
++ * in the vdev appearing as UNAVAIL.
++ *
++ * Under zdb, this step isn't required and would prevent a zdb -e of active
++ * pools with no cachefile.
++ */
++static boolean_t
++slice_open_excl(const rdsk_node_t *slice, boolean_t can_be_active)
++{
++	int fd = open(slice->rn_name, O_RDONLY | O_EXCL | O_CLOEXEC);
++
++	if (fd >= 0)
++		(void) close(fd);
++
++	return (fd >= 0 || can_be_active);
++}
++
+ /*
+  * Given a list of directories to search, find all pools stored on disk.  This
+  * includes partial pools which are not available to import.  If no args are
+@@ -1627,7 +1712,6 @@ zpool_find_import_impl(libpc_handle_t *hdl, importargs_t *iarg,
+ 			nvlist_t *config = slice->rn_config;
+ 			boolean_t matched = B_TRUE;
+ 			boolean_t aux = B_FALSE;
+-			int fd;
+ 
+ 			/*
+ 			 * Check if it's a spare or l2cache device. If it is,
+@@ -1655,28 +1739,16 @@ zpool_find_import_impl(libpc_handle_t *hdl, importargs_t *iarg,
+ 				    ZPOOL_CONFIG_POOL_GUID, &this_guid) == 0 &&
+ 				    iarg->guid == this_guid;
+ 			}
+-			if (matched) {
+-				/*
+-				 * Verify all remaining entries can be opened
+-				 * exclusively. This will prune all underlying
+-				 * multipath devices which otherwise could
+-				 * result in the vdev appearing as UNAVAIL.
+-				 *
+-				 * Under zdb, this step isn't required and
+-				 * would prevent a zdb -e of active pools with
+-				 * no cachefile.
+-				 */
+-				fd = open(slice->rn_name,
+-				    O_RDONLY | O_EXCL | O_CLOEXEC);
+-				if (fd >= 0 || iarg->can_be_active) {
+-					if (fd >= 0)
+-						close(fd);
+-					add_config(hdl, &pools,
+-					    slice->rn_name, slice->rn_order,
+-					    slice->rn_num_labels, config);
+-				}
++			if (matched && slice_open_excl(slice,
++			    iarg->can_be_active)) {
++				add_config(hdl, &pools, slice->rn_name,
++				    slice->rn_order, slice->rn_num_labels,
++				    config);
+ 			}
+ 			nvlist_free(config);
++		} else if (slice->rn_txg0_guid != 0 &&
++		    slice_open_excl(slice, iarg->can_be_active)) {
++			(void) add_txg0_name(hdl, &pools, slice);
+ 		}
+ 		free(slice->rn_name);
+ 		free(slice);
+@@ -1714,6 +1786,12 @@ zpool_find_import_impl(libpc_handle_t *hdl, importargs_t *iarg,
+ 		free(ne);
+ 	}
+ 
++	for (ne = pools.txg0_names; ne != NULL; ne = nenext) {
++		nenext = ne->ne_next;
++		free(ne->ne_name);
++		free(ne);
++	}
++
+ 	return (ret);
+ }
+ 
+diff --git a/lib/libzutil/zutil_import.h b/lib/libzutil/zutil_import.h
+index 7881ee09cec..511874b6bbe 100644
+--- a/lib/libzutil/zutil_import.h
++++ b/lib/libzutil/zutil_import.h
+@@ -43,8 +43,11 @@ typedef struct rdsk_node {
+ 	avl_node_t rn_node;
+ 	pthread_mutex_t *rn_lock;
+ 	boolean_t rn_labelpaths;
++	uint64_t rn_txg0_pool_guid;	/* Pool guid of a txg 0 label */
++	uint64_t rn_txg0_guid;		/* Vdev guid of a txg 0 label */
+ } rdsk_node_t;
+ 
++int zpool_read_label_txg0(int, nvlist_t **, int *, uint64_t *, uint64_t *);
+ int slice_cache_compare(const void *, const void *);
+ 
+ boolean_t zpool_dev_probe_ok(const char *path);
+diff --git a/tests/runfiles/common.run b/tests/runfiles/common.run
+index 7c1ccc2e49d..c50a55c6059 100644
+--- a/tests/runfiles/common.run
++++ b/tests/runfiles/common.run
+@@ -475,7 +475,8 @@ post =
+ tags = ['functional', 'cli_root', 'zpool_destroy']
+ 
+ [tests/functional/cli_root/zpool_detach]
+-tests = ['zpool_detach_001_neg', 'zpool_detach_002_pos']
++tests = ['zpool_detach_001_neg', 'zpool_detach_002_pos',
++    'zpool_detach_003_pos']
+ tags = ['functional', 'cli_root', 'zpool_detach']
+ 
+ [tests/functional/cli_root/zpool_events]
+diff --git a/tests/zfs-tests/tests/Makefile.am b/tests/zfs-tests/tests/Makefile.am
+index 57073e14a21..f652a1868f6 100644
+--- a/tests/zfs-tests/tests/Makefile.am
++++ b/tests/zfs-tests/tests/Makefile.am
+@@ -1244,6 +1244,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
+ 	functional/cli_root/zpool_detach/setup.ksh \
+ 	functional/cli_root/zpool_detach/zpool_detach_001_neg.ksh \
+ 	functional/cli_root/zpool_detach/zpool_detach_002_pos.ksh \
++	functional/cli_root/zpool_detach/zpool_detach_003_pos.ksh \
+ 	functional/cli_root/zpool_events/cleanup.ksh \
+ 	functional/cli_root/zpool_events/setup.ksh \
+ 	functional/cli_root/zpool_events/zpool_events_clear.ksh \
+diff --git a/tests/zfs-tests/tests/functional/cli_root/zpool_detach/zpool_detach_003_pos.ksh b/tests/zfs-tests/tests/functional/cli_root/zpool_detach/zpool_detach_003_pos.ksh
+new file mode 100755
+index 00000000000..c8984d2ca25
+--- /dev/null
++++ b/tests/zfs-tests/tests/functional/cli_root/zpool_detach/zpool_detach_003_pos.ksh
+@@ -0,0 +1,95 @@
++#!/bin/ksh -p
++# SPDX-License-Identifier: CDDL-1.0
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# https://opensource.org/license/CDDL-1.0.
++#
++
++#
++# Copyright (c) 2026 Tigerblue77
++#
++
++. $STF_SUITE/include/libtest.shlib
++
++#
++# DESCRIPTION:
++# A pool imports healthy from devices that have moved after a crash in
++# 'zpool detach' right after the labels of the detached device were
++# erased: those labels, left with txg 0, still lead the import to the
++# device, which the pool on disk has not detached yet.
++#
++# STRATEGY:
++# 1. Create a mirror on file vdevs, export it and copy the devices
++# 2. Import the pool, detach one device, export it again
++# 3. Put back every label and uberblock ring of the remaining device from
++#    its copy, leaving the detached device with its erased labels: what a
++#    crash before the first label of the detach txg leaves
++# 4. Rename the devices and move them to another directory
++# 5. Verify that the pool imports from there, healthy with both devices
++#    online, and scrubs without errors
++#
++
++verify_runnable "global"
++
++VDEV_DIR=$TEST_BASE_DIR/detach_erased
++PRE_DIR=$VDEV_DIR/pre
++MOVED_DIR=$TEST_BASE_DIR/detach_erased_moved
++
++function cleanup
++{
++	poolexists $TESTPOOL1 && destroy_pool $TESTPOOL1
++	rm -rf $VDEV_DIR $MOVED_DIR
++}
++
++#
++# Copy back the four labels with their uberblock rings, in 128 KiB blocks:
++# labels 0 and 1 are the first four blocks, labels 2 and 3 the last four.
++#
++function restore_labels # <device>
++{
++	typeset dev=$1
++	typeset -i n=$((MINVDEVSIZE / 131072))
++
++	log_must dd if=$PRE_DIR/$dev of=$VDEV_DIR/$dev bs=128k count=4 \
++	    conv=notrunc
++	log_must dd if=$PRE_DIR/$dev of=$VDEV_DIR/$dev bs=128k \
++	    skip=$((n - 4)) seek=$((n - 4)) count=4 conv=notrunc
++}
++
++log_assert "A pool imports healthy from moved devices after a crash in" \
++    "'zpool detach' right after the detached device was erased."
++log_onexit cleanup
++
++log_must mkdir -p $PRE_DIR $MOVED_DIR
++for dev in vdev0 vdev1; do
++	log_must truncate -s $MINVDEVSIZE $VDEV_DIR/$dev
++done
++log_must zpool create $TESTPOOL1 mirror $VDEV_DIR/vdev0 $VDEV_DIR/vdev1
++log_must zpool export $TESTPOOL1
++log_must cp $VDEV_DIR/vdev0 $PRE_DIR/vdev0
++
++log_must zpool import -d $VDEV_DIR $TESTPOOL1
++log_must zpool detach $TESTPOOL1 $VDEV_DIR/vdev1
++log_must zpool export $TESTPOOL1
++
++restore_labels vdev0
++for dev in vdev0 vdev1; do
++	log_must mv $VDEV_DIR/$dev $MOVED_DIR/moved_$dev
++done
++
++log_must zpool import -d $MOVED_DIR $TESTPOOL1
++log_must check_pool_status $TESTPOOL1 "state" "ONLINE"
++for dev in vdev0 vdev1; do
++	log_must check_vdev_state $TESTPOOL1 $MOVED_DIR/moved_$dev ONLINE
++done
++log_must zpool scrub -w $TESTPOOL1
++log_must check_pool_status $TESTPOOL1 "errors" "No known data errors"
++
++log_pass "A pool imports healthy from moved devices after a crash in" \
++    "'zpool detach' right after the detached device was erased."
+-- 
+2.43.0
+
+
+From c19f57462f454a4806c81585bb9b3a18f212ee79 Mon Sep 17 00:00:00 2001
+From: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 21:27:04 +0000
+Subject: [PATCH 3/4] Pass the kernel the paths of leaves the import config
+ does not name
+
+After a crash right before the uberblocks of the txg that detaches one
+side of a mirror, the newest labels of the remaining device describe it
+alone as the top-level vdev, and the labels of the detached device are
+erased.  An import that scans the devices builds its config from those
+newest labels, so the detached leaf appears nowhere in it, while the
+MOS config, still mirrored, names it.  vdev_copy_path_relaxed() finds
+no device for it and keeps the path recorded in the MOS config: when
+device names have changed across the crash, the leaf does not open and
+the pool imports degraded.
+
+The scan knows where the device is, as it now notes the guids of labels
+with txg 0.  Have get_configs() add to the config, as
+ZPOOL_CONFIG_LEAF_PATHS, the paths of the devices of the pool that its
+vdev tree does not name, keyed by vdev guid in decimal.  After
+vdev_copy_path_relaxed(), spa_ld_trusted_config() gives each leaf of
+the MOS config that the provided config does not name, by guid or
+former guid, the path listed for its guid, if any; the device still has
+to pass vdev_validate().  "zpool import" passes the key to the tryimport
+only, whose config already has the path.  It is not stored on disk, as
+the config is regenerated from the MOS config right after.  Older
+kernels ignore it, and without it nothing changes.
+
+zpool_detach_002_pos now expects the pool to import healthy, with the
+detached device online.  best_name() picks the best of several names
+when given no path to prefer, rather than the first; fix_paths() does
+so only for leaves without a path, such as distributed spares, for
+which no device is found anyway.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>
+---
+ include/sys/fs/zfs.h                          |  1 +
+ include/sys/vdev.h                            |  1 +
+ lib/libzutil/zutil_import.c                   | 88 +++++++++++++++++--
+ module/zfs/spa.c                              |  7 +-
+ module/zfs/vdev.c                             | 31 ++++++-
+ .../zpool_detach/zpool_detach_002_pos.ksh     | 21 +++--
+ 6 files changed, 131 insertions(+), 18 deletions(-)
+
+diff --git a/include/sys/fs/zfs.h b/include/sys/fs/zfs.h
+index 83bfca9c6b1..be3ada8fd14 100644
+--- a/include/sys/fs/zfs.h
++++ b/include/sys/fs/zfs.h
+@@ -957,6 +957,7 @@ typedef struct zpool_load_policy {
+ #define	ZPOOL_CONFIG_DDT_STATS		"ddt_stats"
+ #define	ZPOOL_CONFIG_SPLIT		"splitcfg"
+ #define	ZPOOL_CONFIG_ORIG_GUID		"orig_guid"
++#define	ZPOOL_CONFIG_LEAF_PATHS		"leaf_paths"	/* not stored on disk */
+ #define	ZPOOL_CONFIG_SPLIT_GUID		"split_guid"
+ #define	ZPOOL_CONFIG_SPLIT_LIST		"guid_list"
+ #define	ZPOOL_CONFIG_NONALLOCATING	"non_allocating"
+diff --git a/include/sys/vdev.h b/include/sys/vdev.h
+index ad94f2d5205..2958f7ea1d2 100644
+--- a/include/sys/vdev.h
++++ b/include/sys/vdev.h
+@@ -54,6 +54,7 @@ extern void vdev_open_children_subset(vdev_t *, cred_t *,
+ extern int vdev_validate(vdev_t *);
+ extern int vdev_copy_path_strict(vdev_t *, vdev_t *);
+ extern void vdev_copy_path_relaxed(vdev_t *, vdev_t *);
++extern void vdev_copy_leaf_paths(vdev_t *, vdev_t *, nvlist_t *);
+ extern void vdev_close(vdev_t *);
+ extern int vdev_create(vdev_t *, uint64_t txg, boolean_t isreplace);
+ extern void vdev_reopen(vdev_t *);
+diff --git a/lib/libzutil/zutil_import.c b/lib/libzutil/zutil_import.c
+index ae839d8bf7e..ca52377f28b 100644
+--- a/lib/libzutil/zutil_import.c
++++ b/lib/libzutil/zutil_import.c
+@@ -214,9 +214,10 @@ typedef struct pool_list {
+ } pool_list_t;
+ 
+ /*
+- * Find the best name for the leaf vdev with the given guid.  With
+- * pool_guid != 0, only consider devices whose label has that pool guid
+- * (or none: spares and l2cache devices).
++ * Find the best name for the leaf vdev with the given guid: path if a device
++ * was found there, or else the device with the most labels found first in
++ * the search order.  With pool_guid != 0, only consider devices whose label
++ * has that pool guid (or none: spares and l2cache devices).
+  */
+ static name_entry_t *
+ best_name(name_entry_t *names, uint64_t guid, const char *path,
+@@ -231,10 +232,7 @@ best_name(name_entry_t *names, uint64_t guid, const char *path,
+ 		    ne->ne_pool_guid != pool_guid)
+ 			continue;
+ 
+-		if (path == NULL)
+-			return (ne);
+-
+-		if ((strlen(path) == strlen(ne->ne_name)) &&
++		if (path != NULL && strlen(path) == strlen(ne->ne_name) &&
+ 		    strncmp(path, ne->ne_name, strlen(path)) == 0)
+ 			return (ne);
+ 
+@@ -560,6 +558,79 @@ add_txg0_name(libpc_handle_t *hdl, pool_list_t *pl, const rdsk_node_t *slice)
+ 	return (0);
+ }
+ 
++/*
++ * Return whether the vdev config nv or one of its descendants has the guid.
++ */
++static boolean_t
++vdev_has_guid(nvlist_t *nv, uint64_t guid)
++{
++	nvlist_t **child;
++	uint_t c, children;
++	uint64_t vdev_guid;
++
++	if (nvlist_lookup_uint64(nv, ZPOOL_CONFIG_GUID, &vdev_guid) == 0 &&
++	    vdev_guid == guid)
++		return (B_TRUE);
++
++	if (nvlist_lookup_nvlist_array(nv, ZPOOL_CONFIG_CHILDREN,
++	    &child, &children) == 0) {
++		for (c = 0; c < children; c++)
++			if (vdev_has_guid(child[c], guid))
++				return (B_TRUE);
++	}
++
++	return (B_FALSE);
++}
++
++/*
++ * The vdev tree of a pool is built from the newest label of each top-level
++ * vdev, which can describe a change that the MOS config does not have yet:
++ * after a crash in the txg that detaches one side of a mirror, the other
++ * side is the whole top-level vdev, and the detached leaf is named nowhere.
++ * Pass the kernel, as ZPOOL_CONFIG_LEAF_PATHS, the paths of the devices of
++ * the pool that the tree does not name, keyed by vdev guid in decimal, so
++ * that such leaves of the MOS config can be found.
++ */
++static int
++add_leaf_paths(nvlist_t *config, nvlist_t *nvroot, pool_list_t *pl,
++    uint64_t pool_guid)
++{
++	name_entry_t *lists[] = { pl->names, pl->txg0_names };
++	name_entry_t *ne;
++	name_entry_t *best;
++	nvlist_t *paths;
++	char guid[21];	/* 64-bit num + '\0' */
++	int error = 0;
++
++	if (nvlist_alloc(&paths, NV_UNIQUE_NAME, 0) != 0)
++		return (-1);
++
++	for (int i = 0; i < ARRAY_SIZE(lists) && error == 0; i++) {
++		for (ne = lists[i]; ne != NULL && error == 0;
++		    ne = ne->ne_next) {
++			if (ne->ne_pool_guid != pool_guid ||
++			    vdev_has_guid(nvroot, ne->ne_guid))
++				continue;
++
++			(void) snprintf(guid, sizeof (guid), "%llu",
++			    (u_longlong_t)ne->ne_guid);
++			if (nvlist_exists(paths, guid))
++				continue;
++
++			best = best_name(lists[i], ne->ne_guid, NULL,
++			    pool_guid);
++			error = nvlist_add_string(paths, guid, best->ne_name);
++		}
++	}
++
++	if (error == 0 && !nvlist_empty(paths))
++		error = nvlist_add_nvlist(config, ZPOOL_CONFIG_LEAF_PATHS,
++		    paths);
++	nvlist_free(paths);
++
++	return (error == 0 ? 0 : -1);
++}
++
+ static int
+ zutil_pool_active(libpc_handle_t *hdl, const char *name, uint64_t guid,
+     boolean_t *isactive)
+@@ -936,7 +1007,8 @@ get_configs(libpc_handle_t *hdl, pool_list_t *pl, boolean_t active_ok,
+ 		 * Go through and fix up any paths and/or devids based on our
+ 		 * known list of vdev GUID -> path mappings.
+ 		 */
+-		if (fix_paths(hdl, nvroot, pl, pe->pe_guid) != 0) {
++		if (fix_paths(hdl, nvroot, pl, pe->pe_guid) != 0 ||
++		    add_leaf_paths(config, nvroot, pl, pe->pe_guid) != 0) {
+ 			nvlist_free(nvroot);
+ 			goto nomem;
+ 		}
+diff --git a/module/zfs/spa.c b/module/zfs/spa.c
+index df8d9e7a7a5..40cc38ace92 100644
+--- a/module/zfs/spa.c
++++ b/module/zfs/spa.c
+@@ -5076,6 +5076,7 @@ spa_ld_trusted_config(spa_t *spa, spa_import_type_t type,
+ {
+ 	vdev_t *mrvd, *rvd = spa->spa_root_vdev;
+ 	nvlist_t *nv, *mos_config, *policy;
++	nvlist_t *leaf_paths;
+ 	int error = 0, copy_error;
+ 	uint64_t healthy_tvds, healthy_tvds_mos;
+ 	uint64_t mos_config_txg;
+@@ -5134,7 +5135,8 @@ spa_ld_trusted_config(spa_t *spa, spa_import_type_t type,
+ 	 * We first try to copy the paths with vdev_copy_path_strict, which
+ 	 * succeeds only when both configs have exactly the same vdev tree.
+ 	 * If that fails, we fall back to a more flexible method that has a
+-	 * best effort policy.
++	 * best effort policy, and take the path of a leaf the untrusted
++	 * config does not name from ZPOOL_CONFIG_LEAF_PATHS, if passed.
+ 	 */
+ 	copy_error = vdev_copy_path_strict(rvd, mrvd);
+ 	if (copy_error != 0 || spa_load_print_vdev_tree) {
+@@ -5147,6 +5149,9 @@ spa_ld_trusted_config(spa_t *spa, spa_import_type_t type,
+ 		spa_load_note(spa, "vdev_copy_path_strict failed, falling "
+ 		    "back to vdev_copy_path_relaxed");
+ 		vdev_copy_path_relaxed(rvd, mrvd);
++		if (nvlist_lookup_nvlist(spa->spa_config,
++		    ZPOOL_CONFIG_LEAF_PATHS, &leaf_paths) == 0)
++			vdev_copy_leaf_paths(rvd, mrvd, leaf_paths);
+ 	}
+ 
+ 	vdev_close(rvd);
+diff --git a/module/zfs/vdev.c b/module/zfs/vdev.c
+index 8a009bca470..e2f5f36b7b6 100644
+--- a/module/zfs/vdev.c
++++ b/module/zfs/vdev.c
+@@ -2785,7 +2785,8 @@ vdev_validate(vdev_t *vd)
+ }
+ 
+ static void
+-vdev_update_path(const char *prefix, char *svd, char **dvd, uint64_t guid)
++vdev_update_path(const char *prefix, const char *svd, char **dvd,
++    uint64_t guid)
+ {
+ 	if (svd != NULL && *dvd != NULL) {
+ 		if (strcmp(svd, *dvd) != 0) {
+@@ -2957,6 +2958,34 @@ vdev_copy_path_relaxed(vdev_t *srvd, vdev_t *drvd)
+ 	}
+ }
+ 
++/*
++ * Give the leaves of the destination tree that the source tree does not name,
++ * by guid or former guid, the path of the device with their guid from paths,
++ * an nvlist keyed by vdev guid in decimal.  An import passes the paths of the
++ * devices it found but did not name in the config it built from their
++ * labels, which can describe a change that the MOS config does not have yet.
++ */
++void
++vdev_copy_leaf_paths(vdev_t *srvd, vdev_t *dvd, nvlist_t *paths)
++{
++	const char *path;
++	char guid[21];	/* 64-bit num + '\0' */
++
++	for (uint64_t c = 0; c < dvd->vdev_children; c++)
++		vdev_copy_leaf_paths(srvd, dvd->vdev_child[c], paths);
++
++	if (!dvd->vdev_ops->vdev_op_leaf || !vdev_is_concrete(dvd) ||
++	    vdev_lookup_by_guid(srvd, dvd->vdev_guid) != NULL ||
++	    vdev_lookup_by_orig_guid(srvd, dvd->vdev_guid) != NULL)
++		return;
++
++	(void) snprintf(guid, sizeof (guid), "%llu",
++	    (u_longlong_t)dvd->vdev_guid);
++	if (nvlist_lookup_string(paths, guid, &path) == 0)
++		vdev_update_path("vdev_path", path, &dvd->vdev_path,
++		    dvd->vdev_guid);
++}
++
+ /*
+  * Close a virtual device.
+  */
+diff --git a/tests/zfs-tests/tests/functional/cli_root/zpool_detach/zpool_detach_002_pos.ksh b/tests/zfs-tests/tests/functional/cli_root/zpool_detach/zpool_detach_002_pos.ksh
+index 6dbec469bda..32be653244d 100755
+--- a/tests/zfs-tests/tests/functional/cli_root/zpool_detach/zpool_detach_002_pos.ksh
++++ b/tests/zfs-tests/tests/functional/cli_root/zpool_detach/zpool_detach_002_pos.ksh
+@@ -19,10 +19,12 @@
+ 
+ #
+ # DESCRIPTION:
+-# A pool still imports from devices that have moved after a crash in the
++# A pool imports healthy from devices that have moved after a crash in the
+ # middle of the txg that detaches one side of a mirror: the remaining
+ # device, whose newest labels already describe it as the top-level vdev
+-# with the guid of the mirror, is found under the guid it had before.
++# with the guid of the mirror, is found under the guid it had before, and
++# the detached device, which those labels no longer name, by its own
++# erased labels.
+ #
+ # STRATEGY:
+ # 1. Create a mirror on file vdevs, export it and copy the devices
+@@ -31,7 +33,7 @@
+ #    device from its copy, leaving labels 0 and 2 from after the detach:
+ #    what a crash right before the uberblocks of the detach txg leaves
+ # 4. Rename the devices and move them to another directory
+-# 5. Verify that the pool imports from there, with the remaining device
++# 5. Verify that the pool imports from there, healthy with both devices
+ #    online, and scrubs without errors
+ #
+ 
+@@ -64,8 +66,8 @@ function restore_pre_detach # <device>
+ 	    skip=$((n - 3)) seek=$((n - 3)) count=3 conv=notrunc
+ }
+ 
+-log_assert "A pool imports from moved devices after a crash in the" \
+-    "middle of 'zpool detach'."
++log_assert "A pool imports healthy from moved devices after a crash in" \
++    "the middle of 'zpool detach'."
+ log_onexit cleanup
+ 
+ log_must mkdir -p $PRE_DIR $MOVED_DIR
+@@ -86,9 +88,12 @@ for dev in vdev0 vdev1; do
+ done
+ 
+ log_must zpool import -d $MOVED_DIR $TESTPOOL1
+-log_must check_vdev_state $TESTPOOL1 $MOVED_DIR/moved_vdev0 ONLINE
++log_must check_pool_status $TESTPOOL1 "state" "ONLINE"
++for dev in vdev0 vdev1; do
++	log_must check_vdev_state $TESTPOOL1 $MOVED_DIR/moved_$dev ONLINE
++done
+ log_must zpool scrub -w $TESTPOOL1
+ log_must check_pool_status $TESTPOOL1 "errors" "No known data errors"
+ 
+-log_pass "A pool imports from moved devices after a crash in the middle" \
+-    "of 'zpool detach'."
++log_pass "A pool imports healthy from moved devices after a crash in the" \
++    "middle of 'zpool detach'."
+-- 
+2.43.0
+
+
+From 07c5baabf5cbf5d58f8aac2751625f436395acd1 Mon Sep 17 00:00:00 2001
+From: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>
+Date: Sun, 8 Nov 2026 20:17:12 +0000
+Subject: [PATCH 4/4] Accept a leaf whose newest label no uberblock of its own
+ covers
+
+vdev_config_sync() writes labels 0 and 2 before the uberblocks of their
+txg, so a crash in between leaves labels that no uberblock on the device
+covers.  When the txg detaches one side of a two-way mirror, or the old
+device of a replacing or spare vdev, those labels name the remaining
+leaf by the guid of its parent, as the top-level vdev it was about to
+become.  Labels written since the first commit of this series also
+record its former guid, but labels written by older code do not:
+vdev_validate() rejects the leaf against the MOS config, which still
+names it by its own guid.  The pool imports degraded in place, and not
+at all from devices that have moved, since the detached device has no
+uberblocks left.  Nothing writes the rejected leaf, so the state stays
+until the user repairs it by hand.
+
+When the trusted config names a leaf by another guid than its newest
+label, and that label is newer than every uberblock on the device, use
+the newest label one of them covers, if it gives the same pool, vdev
+and top-level guids as the trusted config.  The device never committed
+the newer label, so it cannot override the ones before it.  The leaf
+opens, a resilver covers what it missed while it was rejected, and the
+import rewrites its labels.  If the device that carried the pool since
+is missing, the pool now imports from this one at its older txg, as it
+does from any stale side of a mirror, where it used to fail to import.
+
+The import scan records each device under the guid of its first valid
+label only.  Also note the guid of a valid label that disagrees, and use
+it as a path of last resort, as for labels with txg 0, so that the leaf
+is found when the devices have moved.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>
+---
+ include/sys/vdev.h                            |   1 +
+ lib/libzutil/os/freebsd/zutil_import_os.c     |   2 +
+ lib/libzutil/os/linux/zutil_import_os.c       |   2 +
+ lib/libzutil/zutil_import.c                   |  35 +++++-
+ lib/libzutil/zutil_import.h                   |   4 +-
+ module/zfs/vdev.c                             |  54 ++++++++
+ module/zfs/vdev_label.c                       |  25 ++++
+ tests/runfiles/common.run                     |   2 +-
+ tests/zfs-tests/tests/Makefile.am             |   1 +
+ .../zpool_detach/zpool_detach_004_pos.ksh     | 119 ++++++++++++++++++
+ 10 files changed, 240 insertions(+), 5 deletions(-)
+ create mode 100755 tests/zfs-tests/tests/functional/cli_root/zpool_detach/zpool_detach_004_pos.ksh
+
+diff --git a/include/sys/vdev.h b/include/sys/vdev.h
+index 2958f7ea1d2..c0633ef08ab 100644
+--- a/include/sys/vdev.h
++++ b/include/sys/vdev.h
+@@ -228,6 +228,7 @@ extern uint64_t vdev_label_offset(uint64_t psize, int l, uint64_t offset);
+ extern int vdev_label_number(uint64_t psise, uint64_t offset);
+ extern nvlist_t *vdev_label_read_config(vdev_t *vd, uint64_t txg, int labels);
+ extern void vdev_uberblock_load(vdev_t *, struct uberblock *, nvlist_t **);
++extern uint64_t vdev_uberblock_newest_txg(vdev_t *);
+ extern void vdev_config_generate_stats(vdev_t *vd, nvlist_t *nv);
+ extern void vdev_label_write(zio_t *zio, vdev_t *vd, int l, abd_t *buf, uint64_t
+     offset, uint64_t size, zio_done_func_t *done, void *priv, int flags);
+diff --git a/lib/libzutil/os/freebsd/zutil_import_os.c b/lib/libzutil/os/freebsd/zutil_import_os.c
+index 1ae6e854781..e94fa902092 100644
+--- a/lib/libzutil/os/freebsd/zutil_import_os.c
++++ b/lib/libzutil/os/freebsd/zutil_import_os.c
+@@ -217,6 +217,8 @@ zpool_open_func(void *arg)
+ 
+ 	rn->rn_config = config;
+ 	rn->rn_num_labels = num_labels;
++	rn->rn_txg0_pool_guid = txg0_pool_guid;
++	rn->rn_txg0_guid = txg0_guid;
+ 
+ 	/* TODO: Reuse labelpaths logic from Linux? */
+ out:
+diff --git a/lib/libzutil/os/linux/zutil_import_os.c b/lib/libzutil/os/linux/zutil_import_os.c
+index 374f1105126..8f29b4762d0 100644
+--- a/lib/libzutil/os/linux/zutil_import_os.c
++++ b/lib/libzutil/os/linux/zutil_import_os.c
+@@ -197,6 +197,8 @@ zpool_open_func(void *arg)
+ 
+ 	rn->rn_config = config;
+ 	rn->rn_num_labels = num_labels;
++	rn->rn_txg0_pool_guid = txg0_pool_guid;
++	rn->rn_txg0_guid = txg0_guid;
+ 
+ 	/*
+ 	 * Add additional entries for paths described by this label.
+diff --git a/lib/libzutil/zutil_import.c b/lib/libzutil/zutil_import.c
+index ca52377f28b..38a5edc9fe2 100644
+--- a/lib/libzutil/zutil_import.c
++++ b/lib/libzutil/zutil_import.c
+@@ -534,7 +534,8 @@ add_config(libpc_handle_t *hdl, pool_list_t *pl, const char *path,
+  * the txg that takes it out of the pool is synced, and vdev_validate()
+  * accepts them when the pool is opened in place.  The device is not a member
+  * of a pool in its own right, but it gives the path of a leaf that the pool
+- * still names.
++ * still names.  So does a device whose labels disagree on its vdev guid, by
++ * the guid of the labels that were not returned; see label_note_guid().
+  */
+ static int
+ add_txg0_name(libpc_handle_t *hdl, pool_list_t *pl, const rdsk_node_t *slice)
+@@ -1204,6 +1205,26 @@ label_unpack(vdev_phys_t *label, uint64_t *guidp, uint64_t *txg0_pool_guid,
+ 	return (config);
+ }
+ 
++/*
++ * Note the guids of a valid label that names the device by another vdev guid
++ * than its first valid label, unless a guid was already noted.  The even
++ * labels of a txg are written before its uberblocks, so after a crash in
++ * between they can name a leaf by the guid of a parent that a detach was
++ * removing, while the odd labels still give the guid the pool knows it by.
++ */
++static void
++label_note_guid(nvlist_t *config, uint64_t guid, uint64_t *other_pool_guid,
++    uint64_t *other_guid)
++{
++	uint64_t pool_guid;
++
++	if (*other_guid == 0 && nvlist_lookup_uint64(config,
++	    ZPOOL_CONFIG_POOL_GUID, &pool_guid) == 0 && pool_guid != 0) {
++		*other_pool_guid = pool_guid;
++		*other_guid = guid;
++	}
++}
++
+ /*
+  * The same description applies as to zpool_read_label_txg0 below,
+  * except here we do it without aio, presumably because an aio call
+@@ -1247,6 +1268,9 @@ zpool_read_label_slow(int fd, nvlist_t **config, int *num_labels,
+ 		if (expected_guid) {
+ 			if (expected_guid == guid)
+ 				count++;
++			else
++				label_note_guid(*config, guid, txg0_pool_guid,
++				    txg0_guid);
+ 
+ 			nvlist_free(*config);
+ 		} else {
+@@ -1282,7 +1306,8 @@ zpool_read_label(int fd, nvlist_t **config, int *num_labels)
+ 
+ /*
+  * As zpool_read_label(), and return in *txg0_pool_guid and *txg0_guid the
+- * pool and vdev guids of a label left with txg 0, or 0.
++ * pool and vdev guids of a label left with txg 0, or of a valid label that
++ * names the device by another guid than the label returned, or 0.
+  */
+ int
+ zpool_read_label_txg0(int fd, nvlist_t **config, int *num_labels,
+@@ -1394,6 +1419,9 @@ zpool_read_label_txg0(int fd, nvlist_t **config, int *num_labels,
+ 		if (expected_guid) {
+ 			if (expected_guid == guid)
+ 				count++;
++			else
++				label_note_guid(*config, guid, txg0_pool_guid,
++				    txg0_guid);
+ 
+ 			nvlist_free(*config);
+ 		} else {
+@@ -1816,6 +1844,9 @@ zpool_find_import_impl(libpc_handle_t *hdl, importargs_t *iarg,
+ 				add_config(hdl, &pools, slice->rn_name,
+ 				    slice->rn_order, slice->rn_num_labels,
+ 				    config);
++				if (slice->rn_txg0_guid != 0)
++					(void) add_txg0_name(hdl, &pools,
++					    slice);
+ 			}
+ 			nvlist_free(config);
+ 		} else if (slice->rn_txg0_guid != 0 &&
+diff --git a/lib/libzutil/zutil_import.h b/lib/libzutil/zutil_import.h
+index 511874b6bbe..f0d598e917a 100644
+--- a/lib/libzutil/zutil_import.h
++++ b/lib/libzutil/zutil_import.h
+@@ -43,8 +43,8 @@ typedef struct rdsk_node {
+ 	avl_node_t rn_node;
+ 	pthread_mutex_t *rn_lock;
+ 	boolean_t rn_labelpaths;
+-	uint64_t rn_txg0_pool_guid;	/* Pool guid of a txg 0 label */
+-	uint64_t rn_txg0_guid;		/* Vdev guid of a txg 0 label */
++	uint64_t rn_txg0_pool_guid;	/* Pool guid of a last-resort label */
++	uint64_t rn_txg0_guid;		/* Vdev guid of a last-resort label */
+ } rdsk_node_t;
+ 
+ int zpool_read_label_txg0(int, nvlist_t **, int *, uint64_t *, uint64_t *);
+diff --git a/module/zfs/vdev.c b/module/zfs/vdev.c
+index e2f5f36b7b6..1e1064a377d 100644
+--- a/module/zfs/vdev.c
++++ b/module/zfs/vdev.c
+@@ -2534,6 +2534,52 @@ vdev_check_tail_labels(vdev_t *vd, nvlist_t *head)
+ 	nvlist_free(tail);
+ }
+ 
++/*
++ * vdev_config_sync() writes labels 0 and 2 before the uberblocks of their
++ * txg, so a crash in between leaves labels that no uberblock on the device
++ * covers, describing a change the pool never committed.  A leaf that a detach
++ * left alone in its parent then names itself by the guid of the parent, and
++ * code that predates ZPOOL_CONFIG_ORIG_GUID in such labels gave no other.
++ * When label is newer than every uberblock on vd, return the newest label
++ * that one covers if it names vd as the trusted config does, or NULL.
++ */
++static nvlist_t *
++vdev_validate_committed_label(vdev_t *vd, nvlist_t *label)
++{
++	uint64_t label_txg, ub_txg, txg, guid;
++	nvlist_t *older;
++
++	if (nvlist_lookup_uint64(label, ZPOOL_CONFIG_POOL_TXG,
++	    &label_txg) != 0)
++		return (NULL);
++
++	ub_txg = vdev_uberblock_newest_txg(vd);
++	if (ub_txg == 0 || label_txg <= ub_txg)
++		return (NULL);
++
++	older = vdev_label_read_config(vd, ub_txg, VDEV_TRUSTED_LABELS(vd));
++	if (older == NULL)
++		return (NULL);
++
++	if (nvlist_lookup_uint64(older, ZPOOL_CONFIG_POOL_TXG, &txg) != 0 ||
++	    txg == 0 || txg > ub_txg ||
++	    nvlist_lookup_uint64(older, ZPOOL_CONFIG_POOL_GUID, &guid) != 0 ||
++	    guid != spa_guid(vd->vdev_spa) ||
++	    nvlist_lookup_uint64(older, ZPOOL_CONFIG_GUID, &guid) != 0 ||
++	    guid != vd->vdev_guid ||
++	    nvlist_lookup_uint64(older, ZPOOL_CONFIG_TOP_GUID, &guid) != 0 ||
++	    guid != vd->vdev_top->vdev_guid) {
++		nvlist_free(older);
++		return (NULL);
++	}
++
++	vdev_dbgmsg(vd, "vdev_validate: label of txg %llu is newer than "
++	    "every uberblock of the device (txg %llu); using the label of "
++	    "txg %llu", (u_longlong_t)label_txg, (u_longlong_t)ub_txg,
++	    (u_longlong_t)txg);
++	return (older);
++}
++
+ static void
+ vdev_validate_child(void *arg)
+ {
+@@ -2725,8 +2771,16 @@ vdev_validate(vdev_t *vd)
+ 	if (vd->vdev_guid != guid && vd->vdev_guid != aux_guid) {
+ 		boolean_t mismatch = B_FALSE;
+ 		if (spa->spa_trust_config && !spa->spa_extreme_rewind) {
++			nvlist_t *older;
++
+ 			if (vd != vd->vdev_top || vd->vdev_guid != top_guid)
+ 				mismatch = B_TRUE;
++			if (mismatch && (older =
++			    vdev_validate_committed_label(vd, label)) != NULL) {
++				nvlist_free(label);
++				label = older;
++				mismatch = B_FALSE;
++			}
+ 		} else {
+ 			if (vd->vdev_guid != top_guid &&
+ 			    vd->vdev_top->vdev_guid != guid)
+diff --git a/module/zfs/vdev_label.c b/module/zfs/vdev_label.c
+index ba5f5c9019f..d0e06628e2a 100644
+--- a/module/zfs/vdev_label.c
++++ b/module/zfs/vdev_label.c
+@@ -1705,6 +1705,31 @@ vdev_uberblock_load_impl(zio_t *zio, vdev_t *vd, int flags,
+ 	}
+ }
+ 
++/*
++ * Return the txg of the newest valid uberblock on the leaf vd, whatever txg a
++ * load asks for, or 0 if it has none.
++ */
++uint64_t
++vdev_uberblock_newest_txg(vdev_t *vd)
++{
++	uberblock_t ubbest;
++	struct ubl_cbdata cb;
++	int flags = ZIO_FLAG_CONFIG_WRITER | ZIO_FLAG_CANFAIL |
++	    ZIO_FLAG_SPECULATIVE | ZIO_FLAG_TRYHARD;
++
++	ASSERT(vd->vdev_ops->vdev_op_leaf);
++
++	memset(&ubbest, 0, sizeof (ubbest));
++	memset(&cb, 0, sizeof (cb));
++	cb.ubl_ubbest = &ubbest;
++
++	zio_t *zio = zio_root(vd->vdev_spa, NULL, &cb, flags);
++	vdev_uberblock_load_impl(zio, vd, flags, &cb);
++	(void) zio_wait(zio);
++
++	return (cb.ubl_latest.ub_txg);
++}
++
+ /*
+  * Reads the 'best' uberblock from disk along with its associated
+  * configuration. First, we read the uberblock array of each label of each
+diff --git a/tests/runfiles/common.run b/tests/runfiles/common.run
+index c50a55c6059..be41c5a4d45 100644
+--- a/tests/runfiles/common.run
++++ b/tests/runfiles/common.run
+@@ -476,7 +476,7 @@ tags = ['functional', 'cli_root', 'zpool_destroy']
+ 
+ [tests/functional/cli_root/zpool_detach]
+ tests = ['zpool_detach_001_neg', 'zpool_detach_002_pos',
+-    'zpool_detach_003_pos']
++    'zpool_detach_003_pos', 'zpool_detach_004_pos']
+ tags = ['functional', 'cli_root', 'zpool_detach']
+ 
+ [tests/functional/cli_root/zpool_events]
+diff --git a/tests/zfs-tests/tests/Makefile.am b/tests/zfs-tests/tests/Makefile.am
+index f652a1868f6..df19c077360 100644
+--- a/tests/zfs-tests/tests/Makefile.am
++++ b/tests/zfs-tests/tests/Makefile.am
+@@ -1245,6 +1245,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
+ 	functional/cli_root/zpool_detach/zpool_detach_001_neg.ksh \
+ 	functional/cli_root/zpool_detach/zpool_detach_002_pos.ksh \
+ 	functional/cli_root/zpool_detach/zpool_detach_003_pos.ksh \
++	functional/cli_root/zpool_detach/zpool_detach_004_pos.ksh \
+ 	functional/cli_root/zpool_events/cleanup.ksh \
+ 	functional/cli_root/zpool_events/setup.ksh \
+ 	functional/cli_root/zpool_events/zpool_events_clear.ksh \
+diff --git a/tests/zfs-tests/tests/functional/cli_root/zpool_detach/zpool_detach_004_pos.ksh b/tests/zfs-tests/tests/functional/cli_root/zpool_detach/zpool_detach_004_pos.ksh
+new file mode 100755
+index 00000000000..e6ed852d387
+--- /dev/null
++++ b/tests/zfs-tests/tests/functional/cli_root/zpool_detach/zpool_detach_004_pos.ksh
+@@ -0,0 +1,119 @@
++#!/bin/ksh -p
++# SPDX-License-Identifier: CDDL-1.0
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# https://opensource.org/license/CDDL-1.0.
++#
++
++#
++# Copyright (c) 2026 Tigerblue77
++#
++
++. $STF_SUITE/include/libtest.shlib
++
++#
++# DESCRIPTION:
++# A pool imports healthy, in place and from devices that have moved, after
++# a crash in the middle of the txg that detaches one side of a mirror, when
++# the newest labels of the remaining device do not record its former guid,
++# as code that predates it wrote them: those labels are newer than every
++# uberblock on the device, so the labels its uberblocks cover are used.
++#
++# STRATEGY:
++# 1. Create a mirror on file vdevs, export it and copy the devices
++# 2. Import the pool, detach one device, export it, then import and export
++#    it again, which writes labels without the former guid
++# 3. Put back labels 1 and 3 and every uberblock ring of the remaining
++#    device from its copy, leaving labels 0 and 2 from after the detach
++# 4. Verify that the pool imports in place, healthy with both devices
++#    online, and scrubs without errors
++# 5. Verify the same from a copy of the devices moved to another directory
++#    under other names
++#
++
++verify_runnable "global"
++
++VDEV_DIR=$TEST_BASE_DIR/detach_oldlabel
++PRE_DIR=$VDEV_DIR/pre
++CRASH_DIR=$TEST_BASE_DIR/detach_oldlabel_crash
++MOVED_DIR=$TEST_BASE_DIR/detach_oldlabel_moved
++
++function cleanup
++{
++	poolexists $TESTPOOL1 && destroy_pool $TESTPOOL1
++	rm -rf $VDEV_DIR $CRASH_DIR $MOVED_DIR
++}
++
++#
++# Copy back what a crash before the uberblocks of the detach txg leaves
++# untouched, in 128 KiB blocks: the uberblock ring of label 0 (block 1),
++# label 1 (blocks 2-3), the uberblock ring of label 2 and label 3 (the last
++# three blocks).
++#
++function restore_pre_detach # <device>
++{
++	typeset dev=$1
++	typeset -i n=$((MINVDEVSIZE / 131072))
++
++	log_must dd if=$PRE_DIR/$dev of=$VDEV_DIR/$dev bs=128k \
++	    skip=1 seek=1 count=3 conv=notrunc
++	log_must dd if=$PRE_DIR/$dev of=$VDEV_DIR/$dev bs=128k \
++	    skip=$((n - 3)) seek=$((n - 3)) count=3 conv=notrunc
++}
++
++function check_healthy # <dir> <prefix>
++{
++	typeset dir=$1
++	typeset prefix=$2
++
++	log_must check_pool_status $TESTPOOL1 "state" "ONLINE"
++	for dev in vdev0 vdev1; do
++		log_must check_vdev_state $TESTPOOL1 $dir/$prefix$dev ONLINE
++	done
++	log_must zpool scrub -w $TESTPOOL1
++	log_must check_pool_status $TESTPOOL1 "errors" "No known data errors"
++}
++
++log_assert "A pool imports healthy after a crash in the middle of" \
++    "'zpool detach' from labels without the former guid."
++log_onexit cleanup
++
++log_must mkdir -p $PRE_DIR $CRASH_DIR $MOVED_DIR
++for dev in vdev0 vdev1; do
++	log_must truncate -s $MINVDEVSIZE $VDEV_DIR/$dev
++done
++log_must zpool create $TESTPOOL1 mirror $VDEV_DIR/vdev0 $VDEV_DIR/vdev1
++log_must zpool export $TESTPOOL1
++log_must cp $VDEV_DIR/vdev0 $PRE_DIR/vdev0
++
++log_must zpool import -d $VDEV_DIR $TESTPOOL1
++log_must zpool detach $TESTPOOL1 $VDEV_DIR/vdev1
++log_must zpool export $TESTPOOL1
++log_must zpool import -d $VDEV_DIR $TESTPOOL1
++log_must zpool export $TESTPOOL1
++log_mustnot eval "zdb -l $VDEV_DIR/vdev0 | grep -q orig_guid"
++
++restore_pre_detach vdev0
++for dev in vdev0 vdev1; do
++	log_must cp $VDEV_DIR/$dev $CRASH_DIR/$dev
++done
++
++log_must zpool import -d $VDEV_DIR $TESTPOOL1
++check_healthy $VDEV_DIR ""
++log_must zpool export $TESTPOOL1
++log_must rm $VDEV_DIR/vdev0 $VDEV_DIR/vdev1
++
++for dev in vdev0 vdev1; do
++	log_must mv $CRASH_DIR/$dev $MOVED_DIR/moved_$dev
++done
++log_must zpool import -d $MOVED_DIR $TESTPOOL1
++check_healthy $MOVED_DIR "moved_"
++
++log_pass "A pool imports healthy after a crash in the middle of" \
++    "'zpool detach' from labels without the former guid."
+-- 
+2.43.0
+
