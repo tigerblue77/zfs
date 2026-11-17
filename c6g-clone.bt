@@ -1,0 +1,36 @@
+// TASK-1118-V6CG part D: who clones bios, and what a clone costs.
+// Started by c6g.sh (TRACE=1) around one row, stopped with SIGINT.
+// @fio_submit: bios fio's threads submit, by cgroup id (on master none:
+// the write issue taskq submits ZIL blocks).  @clone: bio_alloc_clone()
+// calls by command and cgroup id (v6 clones its per-device root blkg
+// donor once for each ZIL bio whose writer is not in the root io cgroup).
+// @clone_ns: time spent in bio_alloc_clone(), in ns.
+
+BEGIN
+{
+	printf("READY\n");
+}
+
+kprobe:submit_bio
+/comm == "fio"/
+{
+	@fio_submit[cgroup] = count();
+}
+
+kprobe:bio_alloc_clone
+{
+	@clone[comm, cgroup] = count();
+	@t[tid] = nsecs;
+}
+
+kretprobe:bio_alloc_clone
+/@t[tid]/
+{
+	@clone_ns = stats(nsecs - @t[tid]);
+	delete(@t, tid);
+}
+
+END
+{
+	clear(@t);
+}

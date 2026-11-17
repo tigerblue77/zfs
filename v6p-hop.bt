@@ -1,0 +1,61 @@
+// TASK-1118-V6P: the write issue taskq hop, seen from the scheduler.
+// Started by v6p-bench.sh (HOP=1) around one fio row, stopped with SIGINT.
+// For the threads z_wr_iss* and for fio's threads: wakeups
+// (sched_waking), the time from sched_waking to the switch that runs the
+// woken thread (in ns, and in 10 us steps up to 1 ms), and how many of
+// those switches came from the idle task (the CPU had to wake up).  fio's
+// writes (pwrite64 calls) are counted over the same window.
+
+BEGIN
+{
+	printf("READY\n");
+}
+
+tracepoint:syscalls:sys_enter_pwrite64
+/comm == "fio"/
+{
+	@writes = count();
+}
+
+tracepoint:sched:sched_waking
+/strncmp(args.comm, "z_wr_iss", 8) == 0/
+{
+	@wakeups["z_wr_iss"] = count();
+	@wt[args.pid] = nsecs;
+}
+
+tracepoint:sched:sched_waking
+/args.comm == "fio"/
+{
+	@wakeups["fio"] = count();
+	@wt[args.pid] = nsecs;
+}
+
+tracepoint:sched:sched_switch
+/@wt[args.next_pid] && strncmp(args.next_comm, "z_wr_iss", 8) == 0/
+{
+	$ns = nsecs - @wt[args.next_pid];
+	@wake_ns["z_wr_iss"] = stats($ns);
+	@wake_us["z_wr_iss"] = lhist($ns / 1000, 0, 1000, 10);
+	if (args.prev_pid == 0) {
+		@from_idle["z_wr_iss"] = count();
+	}
+	delete(@wt, args.next_pid);
+}
+
+tracepoint:sched:sched_switch
+/@wt[args.next_pid] && args.next_comm == "fio"/
+{
+	$ns = nsecs - @wt[args.next_pid];
+	@wake_ns["fio"] = stats($ns);
+	@wake_us["fio"] = lhist($ns / 1000, 0, 1000, 10);
+	if (args.prev_pid == 0) {
+		@from_idle["fio"] = count();
+	}
+	delete(@wt, args.next_pid);
+}
+
+END
+{
+	clear(@wt);
+}
