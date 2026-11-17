@@ -14,10 +14,16 @@ Prints "quick manual" if:
 or "quick auto" if (heuristics):
 - the files changed are not in the list of specified directories, and
 - all commit messages do not contain 'ZFS-CI-Type: (full|linux|freebsd)'
+or "quick auto" if (rebase) the files changed would run full CI, but the
+head only rebases the previous head of the PR (optional third argument),
+whose zfs-qemu run went to its end; if that run failed, a warning and the
+step summary link to it.
 
 Otherwise prints "full auto" (or "<type> manual" if explicitly requested).
 """
 
+import importlib
+import os
 import sys
 import subprocess
 import re
@@ -72,17 +78,75 @@ if __name__ == '__main__':
 
     prog = sys.argv[0]
 
-    if len(sys.argv) != 3:
-        print(f'Usage: {prog} <head_ref> <base_ref>')
+    if len(sys.argv) not in (3, 4):
+        print(f'Usage: {prog} <head_ref> <base_ref> [<previous_head>]')
         sys.exit(1)
 
     head, base = sys.argv[1:3]
+    prev = sys.argv[3] if len(sys.argv) == 4 else ''
 
     def output_type(type, source, reason):
         print(f'{prog}: will run {type} CI ({source}): {reason}',
               file=sys.stderr)
         print(f'{type} {source}')
         sys.exit(0)
+
+    def rebased_only(prev):
+        """
+        The zfs-qemu run of prev, the previous head of the PR, that went to
+        its end, a successful one first, if head has the changes of prev on
+        another merge base with base; None otherwise.  A run that never
+        finished is no reason to test less.  Whole diffs are compared, so
+        the commits can be split differently.
+        """
+        def git(*args, stdin=None):
+            return subprocess.run(['git', *args], input=stdin, check=True,
+                                  capture_output=True).stdout
+
+        def changes(commit):
+            merge_base = git('merge-base', commit, base).strip()
+            diff = git('diff', '--full-index', merge_base, commit)
+            # unlike --stable, --verbatim keeps whitespace changes
+            return merge_base, git('patch-id', '--verbatim', stdin=diff)
+
+        try:
+            git('fetch', '--quiet', '--no-tags', 'origin', prev)
+            prev_base, prev_id = changes(prev)
+            head_base, head_id = changes(head)
+            if not head_id or head_id != prev_id or head_base == prev_base:
+                return None
+            github_api = importlib.import_module('reuse-ci').github_api
+            runs = github_api(
+                f'repos/{os.environ["GITHUB_REPOSITORY"]}/actions/workflows/'
+                f'zfs-qemu.yml/runs?head_sha={prev}'
+                f'&event={os.environ["GITHUB_EVENT_NAME"]}')['workflow_runs']
+            for conclusion in ('success', 'failure'):
+                for run in runs:
+                    if run['conclusion'] == conclusion:
+                        return run
+            print(f'{prog}: {head} rebases {prev}, which has no finished '
+                  'zfs-qemu run', file=sys.stderr)
+        except Exception as error:
+            print(f'{prog}: cannot compare with {prev}: {error}',
+                  file=sys.stderr)
+        return None
+
+    def warn_failed(prev, run):
+        """
+        The failed run is on a commit the PR no longer shows, and the quick
+        run of head may pass: say so on head's run.
+        """
+        url = run.get('html_url', f'run {run.get("id")}')
+        text = (f'This push only rebases {prev}, whose full CI run failed '
+                f'({url}). Only the quick tests run again; add '
+                '"ZFS-CI-Type: full" to a commit message to run them all.')
+        print(f'::warning::{text}', file=sys.stderr)
+        try:
+            with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+                print(text, file=summary)
+        except (KeyError, OSError) as error:
+            print(f'{prog}: cannot write the step summary: {error}',
+                  file=sys.stderr)
 
     # check last (HEAD) commit message
     last_commit_message_raw = subprocess.run([
@@ -128,6 +192,12 @@ if __name__ == '__main__':
         else:
             for r in FULL_RUN_REGEX:
                 if r.match(f):
+                    run = rebased_only(prev) if prev.strip('0') else None
+                    if run is not None:
+                        if run['conclusion'] == 'failure':
+                            warn_failed(prev, run)
+                        output_type('quick', 'auto',
+                                    f'pure rebase of {prev}')
                     output_type(
                         'full', 'auto',
                         f'changed file "{f}" matches pattern "{r.pattern}"'
