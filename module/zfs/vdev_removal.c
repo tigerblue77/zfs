@@ -2567,7 +2567,8 @@ typedef struct vdev_remove_empty_features {
 
 /*
  * Give back the feature references that the vdev took when it was added or
- * expanded, in the txg that writes the hole.
+ * expanded, in the txg that writes the hole, and return allocation_classes
+ * to enabled if no special or dedup vdev is left.
  */
 static void
 vdev_remove_empty_features_sync(void *arg, dmu_tx_t *tx)
@@ -2583,6 +2584,9 @@ vdev_remove_empty_features_sync(void *arg, dmu_tx_t *tx)
 		spa_feature_decr(spa, SPA_FEATURE_ANYRAID, tx);
 	for (uint64_t i = 0; i < vref->vref_raidz_expansions; i++)
 		spa_feature_decr(spa, SPA_FEATURE_RAIDZ_EXPANSION, tx);
+
+	/* The vdev is a hole by now, so it no longer counts. */
+	spa_deactivate_allocation_classes(spa, tx);
 
 	kmem_free(vref, sizeof (*vref));
 }
@@ -2612,12 +2616,6 @@ vdev_remove_empty_features(vdev_t *vd, uint64_t txg)
 	} else if (vd->vdev_ops == &vdev_anyraid_ops) {
 		/* As counted by spa_create() and spa_vdev_add(). */
 		vref->vref_anyraid = B_TRUE;
-	}
-
-	if (!vref->vref_draid && !vref->vref_anyraid &&
-	    vref->vref_raidz_expansions == 0) {
-		kmem_free(vref, sizeof (*vref));
-		return;
 	}
 
 	dmu_tx_t *tx = dmu_tx_create_assigned(spa->spa_dsl_pool, txg);

@@ -31,7 +31,8 @@
 #    spare goes with it and that the draid feature is no longer active,
 #    also after an export and import.
 # 3. Add an empty dedup raidz vdev, expand it and remove it.  Verify that
-#    the raidz_expansion feature is no longer active.
+#    the raidz_expansion and allocation_classes features are no longer
+#    active, also after an export and import.
 # 4. Add an empty AnyRAID vdev and remove it.  Verify that the anyraid
 #    feature is no longer active, also after an export and import.
 # 5. Verify the pool with zdb and a scrub.
@@ -125,8 +126,16 @@ log_must zpool attach $TESTPOOL raidz1-3 ${disk[6]}
 log_must zpool wait -t raidz_expand $TESTPOOL
 log_must test "$(get_vdev_prop allocated $TESTPOOL raidz1-3)" -eq 0
 log_must test "$(get_pool_prop feature@raidz_expansion $TESTPOOL)" = "active"
+log_must test "$(get_pool_prop feature@allocation_classes $TESTPOOL)" = \
+    "active"
 remove_empty_vdev raidz1-3
 log_must test "$(get_pool_prop feature@raidz_expansion $TESTPOOL)" = \
+    "enabled"
+log_must test "$(get_pool_prop feature@allocation_classes $TESTPOOL)" = \
+    "enabled"
+log_must zpool export $TESTPOOL
+log_must zpool import -d $DISKDIR $TESTPOOL
+log_must test "$(get_pool_prop feature@allocation_classes $TESTPOOL)" = \
     "enabled"
 log_must test "$(get_pool_prop feature@device_removal $TESTPOOL)" = "enabled"
 
