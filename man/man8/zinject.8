@@ -183,6 +183,14 @@ mounted, after the task has released the dataset and before it returns.
 .It Sy zfs_freesp:changed
 On Linux, in a truncation or a hole punch, after the file is changed and
 before the change is logged in the ZIL.
+.It Sy raidz_reflow_scratch_sync:written
+In the sync thread, when a RAID-Z expansion starts, after the start of the
+vdev has been copied to the scratch area and before the uberblock that marks
+the scratch area valid is written.
+.It Sy raidz_reflow_scratch_sync:reflowed
+In the sync thread, when a RAID-Z expansion starts, after the start of the
+vdev has been overwritten with its reflowed contents and before the uberblock
+that marks the scratch area unused is written.
 .El
 .
 .It Xo

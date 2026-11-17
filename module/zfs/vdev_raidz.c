@@ -4908,6 +4908,7 @@ io_error_exit:
 	    (long long)logical_size);
 
 	raidz_expand_pause(RAIDZ_EXPAND_PAUSE_PRE_SCRATCH_3);
+	zio_inject_point(spa, ZIO_INJECT_POINT_RAIDZ_SCRATCH_WRITTEN);
 
 	/*
 	 * Update uberblock to indicate that scratch space is valid.  This is
@@ -4970,6 +4971,7 @@ overwrite:
 	kmem_free(abds, raidvd->vdev_children * sizeof (abd_t *));
 
 	raidz_expand_pause(RAIDZ_EXPAND_PAUSE_SCRATCH_REFLOWED);
+	zio_inject_point(spa, ZIO_INJECT_POINT_RAIDZ_SCRATCH_REFLOWED);
 
 	/*
 	 * Update uberblock to indicate that the initial part has been
