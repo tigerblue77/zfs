@@ -27,6 +27,8 @@
 # 7. Apply the fragmentation information with zhack metaslab leak
 # 8. Import the pool
 # 9. Verify that pool capacity stats match
+# 10. Verify that zdb -b reports the leaked space with exit status 2, and
+#     that zdb -bL, which skips leak detection, exits 0
 
 . "$STF_SUITE"/include/libtest.shlib
 
@@ -69,5 +71,14 @@ alloc2=$(zpool get -Hpo value alloc $TESTPOOL)
 
 within_percent $alloc $alloc2 98 || 
 	log_fail "space usage changed too much: $alloc to $alloc2"
+
+# zdb exited 0 on leaked space from d63f5d7e5 until #19606.
+sync_pool $TESTPOOL
+zdb -b $TESTPOOL > $tmp 2>&1
+typeset -i rc=$?
+log_note "$(grep -c 'leaked space' $tmp) leaked segments:" \
+    "$(grep 'block traversal size' $tmp)"
+(( rc == 2 )) || log_fail "zdb -b exited $rc on leaked space, expected 2"
+log_must eval "zdb -bL $TESTPOOL > /dev/null"
 
 log_pass "zhack metaslab leak behaved correctly"
