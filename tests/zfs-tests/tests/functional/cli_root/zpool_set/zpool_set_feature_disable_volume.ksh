@@ -21,7 +21,8 @@
 #
 # DESCRIPTION:
 #	A volume with blocks larger than 128K needs large_blocks from its
-#	creation on, but activates it only when it writes its first block.
+#	creation on.  The creation checks the feature in open context, and
+#	the volume activates it only once the creation's sync task has run.
 #	A creation that started before a disable of large_blocks, and whose
 #	sync task runs after the disable's, must hold the feature until the
 #	volume exists: the disable must then fail.
@@ -37,9 +38,9 @@
 #	3. Once the sync has started, large_blocks still reads as enabled:
 #	   create a volume with 1M blocks.  Its sync task runs in the next
 #	   transaction group, after the disable's.
-#	4. The disable must fail and leave large_blocks enabled, and fail
-#	   again while the volume exists.  Once the volume is destroyed, it
-#	   must succeed.
+#	4. The disable must fail, and the volume must have activated
+#	   large_blocks, so that the disable fails again while the volume
+#	   exists.  Once the volume is destroyed, it must succeed.
 #
 
 verify_runnable "global"
@@ -124,7 +125,7 @@ disabler=""
 cat $OUT
 (( rc != 0 )) || log_fail "large_blocks was disabled while a volume with" \
     "1M blocks was being created"
-check_prop large_blocks enabled
+check_prop large_blocks active
 log_must test "$(get_prop volblocksize $TESTPOOL1/vol)" = "1048576"
 log_must zinject -c all
 log_mustnot zpool set feature@large_blocks=disabled $TESTPOOL1

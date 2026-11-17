@@ -4059,7 +4059,8 @@ zfs_ioc_create(const char *fsname, nvlist_t *innvl, nvlist_t *outnvl)
 	}
 
 	/*
-	 * A volume activates large_blocks only when it first writes a block:
+	 * zvol_check_volblocksize() found large_blocks enabled in open
+	 * context, and the volume activates it only when its creation syncs:
 	 * hold the feature until the volume exists, so that it cannot be
 	 * disabled in between.
 	 */

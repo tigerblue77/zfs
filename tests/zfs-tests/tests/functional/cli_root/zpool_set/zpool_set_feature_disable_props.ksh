@@ -21,9 +21,10 @@
 # DESCRIPTION:
 #	"zpool set feature@<name>=disabled" is refused while a property of a
 #	dataset, set locally or received, has a value that needs the feature,
-#	or while a volume has blocks larger than 128K, although nothing has
-#	activated the feature yet.  While the feature is disabled, such a
-#	value cannot be set.
+#	although nothing has activated the feature yet.  While the feature is
+#	disabled, such a value cannot be set.  A volume or a file whose block
+#	size is larger than 128K activates large_blocks before it holds any
+#	such block.
 #
 # STRATEGY:
 #	1. Create a pool on which large_blocks, large_dnode, sha512 and skein
@@ -36,8 +37,13 @@
 #	3. Receive a file system with a received recordsize=1M and set
 #	   recordsize=128k on it: disabling large_blocks must still fail,
 #	   until the file system is destroyed.
-#	4. Create a volume with volblocksize=1M and write nothing: disabling
-#	   large_blocks must fail until the volume is destroyed.
+#	4. Create a volume with volblocksize=1M and write nothing:
+#	   large_blocks must be active, and disabling it must fail until the
+#	   volume is destroyed.
+#	5. Grow a file to a 1M block size by truncate in a file system with
+#	   recordsize=1M, then set recordsize=128k: large_blocks must be
+#	   active, and disabling it must fail until the file system is
+#	   destroyed.
 #
 
 verify_runnable "global"
@@ -100,12 +106,25 @@ log_must zfs destroy -r $TESTPOOL1/dst
 log_must zpool set feature@large_blocks=disabled $TESTPOOL1
 log_must zpool set feature@large_blocks=enabled $TESTPOOL1
 
-# 4. A volume with 1M blocks.
+# 4. A volume with 1M blocks; its block size activates large_blocks.
 log_must zfs create -V 16M -b 1M $TESTPOOL1/vol
 block_device_wait
-check_prop large_blocks enabled
+sync_pool $TESTPOOL1
+check_prop large_blocks active
 log_mustnot zpool set feature@large_blocks=disabled $TESTPOOL1
 destroy_dataset $TESTPOOL1/vol
+log_must zpool set feature@large_blocks=disabled $TESTPOOL1
+check_prop large_blocks disabled
+log_must zpool set feature@large_blocks=enabled $TESTPOOL1
+
+# 5. A file with a 1M block size and no block yet.
+log_must zfs create -o recordsize=1M $TESTPOOL1/fs
+log_must truncate -s 10M /$TESTPOOL1/fs/sparse
+log_must zfs set recordsize=128k $TESTPOOL1/fs
+sync_pool $TESTPOOL1
+check_prop large_blocks active
+log_mustnot zpool set feature@large_blocks=disabled $TESTPOOL1
+log_must zfs destroy $TESTPOOL1/fs
 log_must zpool set feature@large_blocks=disabled $TESTPOOL1
 check_prop large_blocks disabled
 
