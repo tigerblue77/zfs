@@ -557,6 +557,7 @@ tags = ['functional', 'cli_root', 'zpool_labelclear']
 [tests/functional/cli_root/zpool_initialize]
 tests = ['zpool_initialize_attach_detach_add_remove',
     'zpool_initialize_anyraid_attach',
+    'zpool_initialize_detach_load',
     'zpool_initialize_fault_export_import_online',
     'zpool_initialize_import_export',
     'zpool_initialize_multiple_pools',
@@ -642,7 +643,7 @@ tests = ['zpool_sync_001_pos', 'zpool_sync_002_neg']
 tags = ['functional', 'cli_root', 'zpool_sync']
 
 [tests/functional/cli_root/zpool_trim]
-tests = ['zpool_trim_attach_detach_add_remove',
+tests = ['zpool_trim_attach_detach_add_remove', 'zpool_trim_detach_load',
     'zpool_trim_fault_export_import_online', 'zpool_trim_import_export',
     'zpool_trim_multiple', 'zpool_trim_multiple_pools', 'zpool_trim_neg',
     'zpool_trim_offline_export_import_online', 'zpool_trim_online_offline',
