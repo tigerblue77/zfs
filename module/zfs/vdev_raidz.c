@@ -5338,13 +5338,24 @@ spa_raidz_expand_thread(void *arg, zthr_t *zthr)
 	 */
 	txg_wait_synced(spa->spa_dsl_pool, 0);
 
-	if (!zthr_iscancelled(zthr) &&
+	/*
+	 * vre_offset advances when a copy is issued, so a copy that fails
+	 * after the last one was issued leaves it at the end with
+	 * vre_failed_offset set.  raidz_reflow_sync() has then kept the
+	 * on-disk progress at vre_failed_offset, so the reflow is not
+	 * complete and must be retried from there like any failed copy.
+	 */
+	mutex_enter(&vre->vre_lock);
+	boolean_t failed = (vre->vre_failed_offset != UINT64_MAX);
+	mutex_exit(&vre->vre_lock);
+
+	if (!zthr_iscancelled(zthr) && !failed &&
 	    vre->vre_offset == raidvd->vdev_ms_count << raidvd->vdev_ms_shift) {
 		/*
-		 * We are not being canceled or paused, so the reflow must be
-		 * complete. In that case also mark it as completed on disk.
+		 * We are not being canceled or paused, and every copy has
+		 * succeeded, so the reflow must be complete. In that case
+		 * also mark it as completed on disk.
 		 */
-		ASSERT3U(vre->vre_failed_offset, ==, UINT64_MAX);
 		VERIFY0(dsl_sync_task(spa_name(spa), NULL,
 		    raidz_reflow_complete_sync, spa,
 		    0, ZFS_SPACE_CHECK_NONE));
