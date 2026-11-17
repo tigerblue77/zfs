@@ -31,6 +31,7 @@
 #include <linux/msdos_fs.h>
 #include <linux/vfs_compat.h>
 #include <linux/blk-cgroup.h>
+#include <linux/ioprio.h>
 
 /*
  * Linux 6.8.x uses a bdev_handle as an instance/refcount for an underlying
@@ -65,7 +66,11 @@ typedef void zfs_bdev_handle_t;
 typedef struct vdev_disk {
 	zfs_bdev_handle_t		*vd_bdh;
 	krwlock_t			vd_lock;
+	struct bio			*vd_pool_bio;
 } vdev_disk_t;
+
+static void vdev_disk_pool_bio_get(vdev_disk_t *vd);
+static void vdev_disk_pool_bio_put(vdev_disk_t *vd);
 
 /*
  * Maximum number of segments to add to a bio (min 4). If this is higher than
@@ -332,6 +337,7 @@ vdev_disk_open(vdev_t *v, uint64_t *psize, uint64_t *max_psize,
 		oldcr = override_creds(kcred);
 
 		rw_enter(&vd->vd_lock, RW_WRITER);
+		vdev_disk_pool_bio_put(vd);
 		bdh = vd->vd_bdh;
 		vd->vd_bdh = NULL;
 
@@ -489,6 +495,7 @@ vdev_disk_open(vdev_t *v, uint64_t *psize, uint64_t *max_psize,
 	}
 
 	vd->vd_bdh = bdh;
+	vdev_disk_pool_bio_get(vd);
 	v->vdev_tsd = vd;
 	rw_exit(&vd->vd_lock);
 
@@ -548,6 +555,7 @@ vdev_disk_close(vdev_t *v)
 
 	rw_enter(&vd->vd_lock, RW_WRITER);
 
+	vdev_disk_pool_bio_put(vd);
 	if (vd->vd_bdh != NULL)
 		vdev_blkdev_put(vd->vd_bdh, spa_mode(v->vdev_spa),
 		    zfs_vdev_holder);
@@ -698,6 +706,88 @@ vdev_bio_alloc(struct block_device *bdev, gfp_t gfp_mask,
 	return (bio);
 }
 
+/*
+ * A bio takes the io cgroup (through bio_alloc() from Linux 5.18) and the
+ * I/O priority of the thread that submits it.  A ZIL block carries the
+ * records of every writer of the dataset and is issued by the writer that
+ * commits it, so a writer held back by its cgroup's io limits or by an idle
+ * I/O priority would hold back the others.  ZIL bios get instead what the
+ * write issue taskq gives them: the root blkg, which every bio had before
+ * 5.18 (vdev_bio_set_dev()), and the best-effort priority its threads get
+ * from their nice value.  bio_associate_blkg() is GPL-only and struct
+ * blkcg_gq is private, so the reference to the root blkg is taken by
+ * cloning a bio associated with it, kept for each device, and moved into
+ * the ZIL bio.
+ */
+#if defined(CONFIG_BLK_CGROUP) && defined(HAVE_BIO_ALLOC_4ARG)
+static void
+vdev_disk_pool_bio_get(vdev_disk_t *vd)
+{
+	struct block_device *bdev = BDH_BDEV(vd->vd_bdh);
+
+	if (vd->vd_pool_bio != NULL)
+		return;
+
+	struct bio *bio = vdev_bio_alloc(bdev, GFP_NOIO, 0);
+	if (bio != NULL &&
+	    (bio->bi_blkg != bdev_get_queue(bdev)->root_blkg ||
+	    atomic_cas_ptr(&vd->vd_pool_bio, NULL, bio) != NULL))
+		bio_put(bio);
+}
+
+static void
+vdev_disk_pool_bio_put(vdev_disk_t *vd)
+{
+	if (vd->vd_pool_bio != NULL) {
+		bio_put(vd->vd_pool_bio);
+		vd->vd_pool_bio = NULL;
+	}
+}
+
+static void
+vdev_bio_set_pool_blkg(struct bio *bio, struct bio *pool_bio)
+{
+	if (pool_bio == NULL || bio->bi_blkg == pool_bio->bi_blkg)
+		return;
+
+	struct bio *donor = bio_alloc_clone(bio->bi_bdev, pool_bio, GFP_NOIO,
+	    &fs_bio_set);
+	if (donor == NULL)
+		return;
+
+	struct blkcg_gq *blkg = bio->bi_blkg;
+	bio->bi_blkg = donor->bi_blkg;
+	donor->bi_blkg = blkg;
+	bio_put(donor);
+	ASSERT3P(bio->bi_blkg, ==, pool_bio->bi_blkg);
+}
+#else
+static void
+vdev_disk_pool_bio_get(vdev_disk_t *vd)
+{
+	(void) vd;
+}
+
+static void
+vdev_disk_pool_bio_put(vdev_disk_t *vd)
+{
+	(void) vd;
+}
+
+static inline void
+vdev_bio_set_pool_blkg(struct bio *bio, struct bio *pool_bio)
+{
+	(void) bio, (void) pool_bio;
+}
+#endif
+
+static inline void
+vdev_bio_set_zil_identity(struct bio *bio, struct bio *pool_bio)
+{
+	bio->bi_ioprio = IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 0);
+	vdev_bio_set_pool_blkg(bio, pool_bio);
+}
+
 static inline uint_t
 vdev_bio_max_segs(struct block_device *bdev)
 {
@@ -756,6 +846,8 @@ typedef struct {
 	struct bio	*vbio_bio;	/* pointer to the current bio */
 	int		vbio_flags;	/* bio flags */
 	boolean_t	vbio_wait;	/* wait for completion */
+	boolean_t	vbio_zil;	/* issue as the ZIL */
+	struct bio	*vbio_pool_bio;	/* bio carrying ZFS's own blkg */
 } vbio_t;
 
 static vbio_t *
@@ -791,6 +883,9 @@ vbio_add_page(vbio_t *vbio, struct page *page, uint_t size, uint_t offset)
 			bio = vdev_bio_alloc(vbio->vbio_bdev, GFP_NOIO,
 			    vbio->vbio_max_segs);
 			VERIFY(bio);
+			if (vbio->vbio_zil)
+				vdev_bio_set_zil_identity(bio,
+				    vbio->vbio_pool_bio);
 
 			BIO_BI_SECTOR(bio) = vbio->vbio_offset >> 9;
 			bio_set_op_attrs(bio,
@@ -1075,6 +1170,15 @@ vdev_disk_io_rw(zio_t *zio)
 	vbio_t *vbio = vbio_alloc(zio, bdev, flags);
 	if (abd != zio->io_abd)
 		vbio->vbio_abd = abd;
+
+	/* Kernel threads are normally in the root io cgroup. */
+	if (current->flags & PF_KTHREAD)
+		vdev_disk_pool_bio_get(vd);
+	if (zio->io_type == ZIO_TYPE_WRITE &&
+	    (zio->io_flags & ZIO_FLAG_ZILWRITE)) {
+		vbio->vbio_zil = B_TRUE;
+		vbio->vbio_pool_bio = vd->vd_pool_bio;
+	}
 
 	boolean_t bio_wait = B_FALSE;
 	if (zfs_vdev_disk_calling_thread_io &&
