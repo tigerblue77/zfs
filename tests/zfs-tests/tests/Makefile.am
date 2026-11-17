@@ -2111,6 +2111,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/raidz/raidz_expand_012_neg.ksh \
 	functional/raidz/raidz_expand_boundary_repair.ksh \
 	functional/raidz/raidz_expand_rewrite.ksh \
+	functional/raidz/raidz_expand_scratch_uberblock.ksh \
 	functional/raidz/raidz_expand_scrub_repair.ksh \
 	functional/raidz/raidz_zinject.ksh \
 	functional/raidz/setup.ksh \
