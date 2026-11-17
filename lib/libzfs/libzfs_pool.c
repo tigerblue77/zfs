@@ -1271,7 +1271,8 @@ zpool_name_valid(libzfs_handle_t *hdl, boolean_t isopen, const char *pool)
 	    strncmp(pool, "draid", 5) == 0 ||
 	    strncmp(pool, "spare", 5) == 0 ||
 	    strcmp(pool, "log") == 0 ||
-	    strncmp(pool, "anymirror", 9) == 0)) {
+	    strncmp(pool, "anymirror", 9) == 0 ||
+	    strcmp(pool, "anyraid") == 0)) {
 		if (hdl != NULL)
 			zfs_error_aux(hdl,
 			    "name is reserved");
