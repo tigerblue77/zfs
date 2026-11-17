@@ -1777,6 +1777,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/failmode/failmode_nowait_wait.ksh \
 	functional/failmode/failmode_vdev_state.ksh \
 	functional/failmode/failmode_vdev_detach.ksh \
+	functional/failmode/failmode_export.ksh \
 	functional/failmode/failmode_dio_unwritable.ksh \
 	functional/failmode/setup.ksh \
 	functional/fallocate/cleanup.ksh \

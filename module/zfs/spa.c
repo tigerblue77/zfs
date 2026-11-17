@@ -8019,9 +8019,17 @@ spa_export_common(const char *pool, int new_state, nvlist_t **oldconfig,
 	 * Datasets that were just closed hold the pool until their
 	 * asynchronous eviction runs, so wait for that even when the pool
 	 * is not syncing (e.g. imported read-only).
+	 *
+	 * A suspended pool syncs nothing until zpool clear resumes it, and
+	 * the clear needs the namespace lock held here.  If the pool
+	 * suspends during this sync, fail as if it had been suspended
+	 * before the export started.
 	 */
-	if (spa->spa_sync_on)
-		txg_wait_synced(spa->spa_dsl_pool, 0);
+	if (spa->spa_sync_on && txg_wait_synced_flags(spa->spa_dsl_pool, 0,
+	    TXG_WAIT_SUSPEND) != 0) {
+		error = SET_ERROR(EAGAIN);
+		goto fail;
+	}
 	spa_evicting_os_wait(spa);
 
 	/*
