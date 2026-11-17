@@ -410,8 +410,10 @@ mountpoint_namecheck(const char *path, namecheck_err_t *why)
 /*
  * For pool names, we have the same set of valid characters as described in
  * dataset names, with the additional restriction that the pool name must begin
- * with a letter.  The pool names 'raidz' and 'mirror' are also reserved names
- * that cannot be used.
+ * with a letter.  The pool names 'raidz', 'mirror' and 'draid' are also
+ * reserved names that cannot be used.  This check also applies to pools that
+ * already exist: a name reserved later is refused for new pools only, in
+ * zpool_name_valid().
  *
  * Returns 0 on success, -1 on error.
  */
@@ -456,9 +458,7 @@ pool_namecheck(const char *pool, namecheck_err_t *why, char *what)
 
 	if (strcmp(pool, "mirror") == 0 ||
 	    strcmp(pool, "raidz") == 0 ||
-	    strcmp(pool, "draid") == 0 ||
-	    strcmp(pool, "anymirror") == 0 ||
-	    strcmp(pool, "anyraid") == 0) {
+	    strcmp(pool, "draid") == 0) {
 		if (why)
 			*why = NAME_ERR_RESERVED;
 		return (-1);
