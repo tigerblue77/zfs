@@ -4666,6 +4666,11 @@ raidz_reflow_impl(vdev_t *vd, vdev_raidz_expand_t *vre, zfs_range_tree_t *rt,
 	rra->rra_writes = writes;
 
 	raidz_reflow_record_progress(vre, offset + size, tx);
+	if (zio_injection_enabled) {
+		int ignored = 0;
+		(void) zio_handle_func_injection(spa,
+		    "raidz_reflow_impl:locked", &ignored);
+	}
 
 	/*
 	 * SCL_STATE will be released when the read and write are done,
