@@ -41,6 +41,8 @@ jobs:
           fetch-depth: 0
       - name: Generate OS config and CI type
         id: os
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           ci_type="default"
           ci_source="auto"
@@ -49,7 +51,9 @@ jobs:
           if ${{ github.event_name == 'pull_request' }}; then
             head=${{ github.event.pull_request.head.sha }}
             base=${{ github.event.pull_request.base.sha }}
-            read -r ci_type ci_source <<< "$(python3 .github/workflows/scripts/generate-ci-type.py $head $base)"
+            # previous head of the PR, set on a push to its branch
+            prev=${{ github.event.before }}
+            read -r ci_type ci_source <<< "$(python3 .github/workflows/scripts/generate-ci-type.py $head $base $prev)"
           fi
 
           case "$ci_type" in

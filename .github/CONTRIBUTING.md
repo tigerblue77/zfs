@@ -150,6 +150,7 @@ https://openzfs.github.io/openzfs-docs/Developer%20Resources/Building%20ZFS.html
 `.github/workflows/scripts/generate-ci-type.py` is used to determine whether the pull request is nonbehavior, i.e., not introducing behavior changes of any code, configuration or tests. If so, the CI will run on fewer platforms and only essential sanity tests will run. You can always override this by adding `ZFS-CI-Type` line to your commit message:
   * If your last commit (or `HEAD` in git terms) contains a line `ZFS-CI-Type: quick`, quick mode is forced regardless of what files are changed.
   * Otherwise, if any commit in a PR contains a line `ZFS-CI-Type: full`, full mode is forced.
+  * Otherwise, a push that only rebases the PR runs in quick mode if the tests of the previous push ran to their end; if they failed, a warning links to their run. Add `ZFS-CI-Type: full` to a commit to test a rebase in full.
 * To verify your changes conform to the [style guidelines](
 https://github.com/openzfs/zfs/blob/master/.github/CONTRIBUTING.md#style-guides
 ), please run `make checkstyle` and resolve any warnings.
