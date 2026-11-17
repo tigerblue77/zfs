@@ -1924,6 +1924,8 @@ zfs_freesp(znode_t *zp, uint64_t off, uint64_t len, int flag, boolean_t log)
 		    off + len > zp->z_size)
 			error = zfs_extend_locked(zp, lr, off+len, B_FALSE);
 	}
+	zio_inject_point(dmu_objset_spa(zfsvfs->z_os),
+	    ZIO_INJECT_POINT_FREESP_CHANGED);
 	if (error || !log)
 		goto out;
 log:
