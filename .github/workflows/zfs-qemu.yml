@@ -56,6 +56,12 @@ jobs:
             read -r ci_type ci_source <<< "$(python3 .github/workflows/scripts/generate-ci-type.py $head $base $prev)"
           fi
 
+          # Test only: decide on a push run as on a PR push, the base being
+          # the parent of the two tested commits.
+          if ${{ github.event_name == 'push' }}; then
+            read -r ci_type ci_source <<< "$(python3 .github/workflows/scripts/generate-ci-type.py ${{ github.sha }} ${{ github.sha }}~2 ${{ github.event.before }})"
+          fi
+
           case "$ci_type" in
           docs)
             os_selection='[]'
@@ -120,8 +126,7 @@ jobs:
     name: qemu-x86
     needs: [ test-config ]
     if: >-
-      (github.event_name == 'pull_request' ||
-      github.repository != 'openzfs/zfs') &&
+      github.event_name == 'pull_request' &&
       needs.test-config.outputs.ci_type != 'docs'
     strategy:
       fail-fast: false
@@ -204,8 +209,7 @@ jobs:
 
   cleanup:
     if: >-
-      (github.event_name == 'pull_request' ||
-      github.repository != 'openzfs/zfs') &&
+      github.event_name == 'pull_request' &&
       always()
     name: Cleanup
     runs-on: ubuntu-latest
