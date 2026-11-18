@@ -603,7 +603,27 @@ jobs:
           # run.  The last 50 of these events and label changes are read for
           # every open PR, 50 PRs a request, or fewer when GitHub is under
           # load; the names that start with $ are GraphQL variables.
+          # A PR that a bot labelled, other than a draft or one labelled
+          # "Bot: Not Stale" or "Status: Work in Progress", gets a comment
+          # warning that it will be closed after 30 more days without
+          # activity, and is closed, with another comment, once the warning
+          # is 30 days old and the label still there.  The warning comes
+          # with the label, or once the label is 30 days old when the PR has
+          # had none since, as it was exempt then or the comment failed, so
+          # that no PR is closed without 30 days' notice; it is found by its
+          # marker among the comments of bots since the label.  A label
+          # added by hand closes nothing.
           label="Status: Inactive"
+          marker='<!-- labels-yml:inactive-close -->'
+          warn="$marker"$'\n'
+          warn+="This PR has had no activity for 30 days.  It will be closed in"
+          warn+=" 30 days unless someone pushes to it, comments on it or"
+          warn+=" reviews it; it can be reopened later.  A maintainer can keep"
+          warn+=" it open with the \"Bot: Not Stale\" label."
+          bye="Closing this PR, which has had no activity for 60 days.  Thank"
+          bye+=" you for your contribution!  It can be reopened when work on it"
+          bye+=" resumes; reopen it before force-pushing to its branch, as"
+          bye+=" GitHub cannot reopen it after that."
           labels=$(gh label list --limit 1000 --json name --jq '.[].name')
           if ! grep -qixF "$label" <<< "$labels"; then
             gh label create "$label" --color cfd3d7 \
@@ -655,6 +675,7 @@ jobs:
                     nodes {
                       number
                       createdAt
+                      isDraft
                       labels(first: 100) { nodes { name } }
                       timelineItems(last: 50, itemTypes: [PULL_REQUEST_COMMIT,
                           HEAD_REF_FORCE_PUSHED_EVENT, ISSUE_COMMENT,
@@ -698,29 +719,73 @@ jobs:
               ([.createdAt] + [$t[] | select(.label == null and (.bot | not)) |
                   .at] | max) as $last |
               ([$t[] | select(.label == $l)] | last) as $mark |
+              (.isDraft or any(.labels.nodes[]; .name == "Bot: Not Stale" or
+                  .name == "Status: Work in Progress")) as $kept |
               if any(.labels.nodes[]; .name == $l) then
-                select($mark.type == "LabeledEvent" and $mark.bot and
-                    $last > $mark.at) | "\($n)\tDELETE"
+                select($mark.type == "LabeledEvent" and $mark.bot) |
+                if $last > $mark.at then
+                  "\($n)\tDELETE"
+                else
+                  select(($kept | not) and $mark.at < $cutoff) |
+                  "\($n)\tCLOSE\t\($mark.at)"
+                end
               else
                 select($last < $cutoff and
                     all($t[]; .label != $l or .bot or .at < $last)) |
-                "\($n)\tPOST"
+                "\($n)\tPOST\t\($kept | not)"
               end' |
-          while IFS=$'\t' read -r pr method; do
-            if [ "$method" = POST ]; then
-              gh api --silent -X POST "repos/$GH_REPO/issues/$pr/labels" \
-                  -f "labels[]=$label" < /dev/null ||
-                  echo "::warning::Could not add \"$label\" to PR #$pr"
-            else
+          while IFS=$'\t' read -r pr method arg; do
+            case $method in
+            POST)
+              if ! gh api --silent -X POST "repos/$GH_REPO/issues/$pr/labels" \
+                  -f "labels[]=$label" < /dev/null; then
+                echo "::warning::Could not add \"$label\" to PR #$pr"
+              elif [ "$arg" = true ]; then
+                sleep 3
+                gh api --silent -X POST "repos/$GH_REPO/issues/$pr/comments" \
+                    -f body="$warn" < /dev/null ||
+                    echo "::warning::Could not comment on PR #$pr"
+              fi
+              ;;
+            DELETE)
               # Another run may have removed it already.
               if ! error=$(gh api --silent -X DELETE \
                   "repos/$GH_REPO/issues/$pr/labels/Status:%20Inactive" \
                   2>&1 < /dev/null) && ! grep -q 'HTTP 404' <<< "$error"; then
                 echo "::warning::Could not remove \"$label\" from PR #$pr"
               fi
-            fi
-            # GitHub allows 80 label changes a minute; leave room for the
-            # other jobs doing the same.
+              ;;
+            CLOSE)
+              # When the warning was posted, if it was since the label.
+              if ! warned=$(gh api --paginate \
+                  "repos/$GH_REPO/issues/$pr/comments?since=$arg&per_page=100" \
+                  --jq ".[] | select(.user.type == \"Bot\" and
+                      (.body | startswith(\"$marker\"))) | .created_at" \
+                  < /dev/null); then
+                echo "::warning::Could not read the comments of PR #$pr"
+                continue
+              elif [ -z "$warned" ]; then
+                gh api --silent -X POST "repos/$GH_REPO/issues/$pr/comments" \
+                    -f body="$warn" < /dev/null ||
+                    echo "::warning::Could not comment on PR #$pr"
+              elif [[ $(head -n 1 <<< "$warned") < "$cutoff" ]]; then
+                if gh api --silent -X POST \
+                    "repos/$GH_REPO/issues/$pr/comments" -f body="$bye" \
+                    < /dev/null; then
+                  sleep 3
+                  gh api --silent -X PATCH "repos/$GH_REPO/pulls/$pr" \
+                      -f state=closed < /dev/null ||
+                      echo "::warning::Could not close PR #$pr"
+                else
+                  echo "::warning::Could not comment on PR #$pr"
+                fi
+              else
+                continue
+              fi
+              ;;
+            esac
+            # GitHub allows 80 comments and label changes a minute; leave
+            # room for the other jobs doing the same.
             sleep 3
           done
 

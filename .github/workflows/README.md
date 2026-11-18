@@ -193,7 +193,11 @@ Available via `specific_os` or `ZTS_OS_OVERRIDE`:
     when a PR is opened, pushed to or reopened, and every 3 hours
   - `Status: Inactive`, every 3 hours, on PRs, drafts included, with no
     commit, comment, review or change of state by anyone but a bot for 30
-    days; it goes once there is some, unless it was added by hand
+    days; it goes once there is some, unless it was added by hand.  A PR
+    that is not a draft and has neither `Bot: Not Stale` nor
+    `Status: Work in Progress` gets a comment with it, warning that it will
+    be closed after 30 more days without activity, and is closed then,
+    unless the label was added by hand
 
   Running it by hand applies the jobs that label every open PR, all of
   them or the one chosen.  A first run over many unlabelled PRs is best
