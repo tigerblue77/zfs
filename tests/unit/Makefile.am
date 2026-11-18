@@ -25,7 +25,8 @@ UNIT_TESTS = \
 	%D%/test_backtrace \
 	%D%/test_timer \
 	%D%/test_zfs_file \
-	%D%/test_indirect_mapping
+	%D%/test_indirect_mapping \
+	%D%/test_zpool_status
 
 # extra test binaries. not unit/correctness tests as such, but use the same
 # framework. not run by `make unit`, but will work with `T=` etc
@@ -187,6 +188,45 @@ nodist_%C%_test_indirect_mapping_SOURCES = \
 %C%_test_indirect_mapping_LDADD = \
 	libspl.la \
 	libunit.la
+
+
+%C%_test_zpool_status_CFLAGS = $(AM_CFLAGS)
+%C%_test_zpool_status_CFLAGS += $(LIBBLKID_CFLAGS) $(LIBUUID_CFLAGS)
+
+%C%_test_zpool_status_CPPFLAGS = $(AM_CPPFLAGS)
+%C%_test_zpool_status_CPPFLAGS += -I$(srcdir)/cmd/zpool -I$(srcdir)/lib/libzfs
+
+# zpool_main.c is not listed: the test includes it, to reach its static
+# functions
+nodist_%C%_test_zpool_status_SOURCES = \
+	cmd/zpool/zpool_iter.c \
+	cmd/zpool/zpool_util.c \
+	cmd/zpool/zpool_vdev.c
+
+if BUILD_FREEBSD
+nodist_%C%_test_zpool_status_SOURCES += \
+	cmd/zpool/os/freebsd/zpool_vdev_os.c
+endif
+
+if BUILD_LINUX
+nodist_%C%_test_zpool_status_SOURCES += \
+	cmd/zpool/os/linux/zpool_vdev_os.c
+endif
+
+%C%_test_zpool_status_SOURCES = \
+	%D%/test_zpool_status.c
+
+%C%_test_zpool_status_LDADD = \
+	libzfs.la \
+	libzfs_core.la \
+	libnvpair.la \
+	libzutil.la \
+	libunit.la
+
+if BUILD_FREEBSD
+%C%_test_zpool_status_LDADD += -lgeom
+endif
+%C%_test_zpool_status_LDADD += -lm $(LIBBLKID_LIBS) $(LIBUUID_LIBS)
 
 
 %C%_test_nvpair_stress_CFLAGS = $(AM_CFLAGS) $(LIBTIRPC_CFLAGS)
