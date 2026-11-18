@@ -149,7 +149,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE: ${{ github.event.pull_request.html_url }}
         run: |
-          gh pr edit $ISSUE --remove-label "Status: Accepted,Status: Inactive,Status: Revision Needed,Status: Stale"
+          gh pr edit $ISSUE --remove-label "Status: Inactive,Status: Revision Needed,Status: Stale"
       # The author has pushed after changes were requested: back to review.
       - if: "${{ !github.event.pull_request.draft && contains(github.event.pull_request.labels.*.name, 'Status: Revision Needed') }}"
         env:
@@ -402,7 +402,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE: ${{ github.event.pull_request.html_url }}
         run: |
-          gh pr edit $ISSUE --remove-label "Status: Accepted,Status: Code Review Needed,Status: Inactive,Status: Revision Needed,Status: Stale" --add-label "Status: Work in Progress"
+          gh pr edit $ISSUE --remove-label "Status: Code Review Needed,Status: Inactive,Status: Revision Needed,Status: Stale" --add-label "Status: Work in Progress"
 
   rfr:
     runs-on: ubuntu-latest
@@ -412,7 +412,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE: ${{ github.event.pull_request.html_url }}
         run: |
-          gh pr edit $ISSUE --remove-label "Status: Accepted,Status: Inactive,Status: Revision Needed,Status: Stale,Status: Work in Progress" --add-label "Status: Code Review Needed"
+          gh pr edit $ISSUE --remove-label "Status: Inactive,Status: Revision Needed,Status: Stale,Status: Work in Progress" --add-label "Status: Code Review Needed"
 
   reviewed:
     runs-on: ubuntu-latest
@@ -442,7 +442,9 @@ jobs:
           # them.  A label goes when another one outranks it in both,
           # Maintainer above Contributor and Approved above Reviewed, so that
           # a PR carries two at most, or when no review gives it any more,
-          # unless someone other than a bot added it last.  The PR gets
+          # unless someone other than a bot added it last, as a maintainer
+          # adds "Status: Maintainer Approved", which replaces
+          # "Status: Accepted", to accept a PR.  The PR gets
           # "Status: Revision Needed", unless it is a draft, when the latest
           # verdict of someone with write access asks for changes to its head
           # commit, which no push has replaced yet; a push removes it.  A
@@ -458,7 +460,7 @@ jobs:
           for l in "Status: Contributor Reviewed|0e8a16|Reviewed by someone without push access other than its author|Status: Reviewed" \
               "Status: Contributor Approved|2da44e|Approved by someone without push access other than its author|" \
               "Status: Maintainer Reviewed|0a5c2b|Reviewed by someone with push access other than its author|" \
-              "Status: Maintainer Approved|116329|Approved by someone with push access other than its author|" \
+              "Status: Maintainer Approved|116329|Approved by someone with push access other than its author|Status: Accepted" \
               "Status: Revision Needed|e60000|Changes are required for the PR to be accepted|"; do
             IFS='|' read -r name color desc old <<< "$l"
             if grep -qixF "$name" <<< "$labels"; then
