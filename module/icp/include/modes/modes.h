@@ -137,14 +137,22 @@ typedef enum gcm_impl {
  *			Length of processed plaintext (encrypt) or
  *			length of processed ciphertext (decrypt).
  *
- * gcm_pt_buf:		Stores the decrypted plaintext returned by
- *			decrypt_final when the computed authentication
- *			tag matches the	user supplied tag.
+ * gcm_pt_buf:		Decrypt: gathers the ciphertext when it is not all
+ *			in one piece of input, and holds the plaintext
+ *			when it cannot be decrypted straight into the
+ *			output; it is then copied there by decrypt_final
+ *			when the computed authentication tag matches the
+ *			user supplied tag.
  *
  * gcm_pt_buf_len:	Length of the plaintext buffer.
  *
  * gcm_ct_len:		Length of the ciphertext without the tag (decrypt),
  *			set by the caller before the first call.
+ *
+ * gcm_ct:		The caller's ciphertext (decrypt), when all of it
+ *			is in one piece of input, which is then not copied.
+ *
+ * gcm_tag:		The tag that follows the ciphertext (decrypt).
  *
  * gcm_H:		Subkey.
  *
@@ -179,6 +187,8 @@ typedef struct gcm_ctx {
 	enum gcm_impl impl;
 #endif
 	size_t gcm_ct_len;
+	const uint8_t *gcm_ct;
+	uint64_t gcm_tag[2];
 } gcm_ctx_t;
 
 #define	gcm_keysched		gcm_common.cc_keysched

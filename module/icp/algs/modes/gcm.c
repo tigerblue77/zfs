@@ -65,7 +65,8 @@ static int gcm_mode_encrypt_contiguous_blocks_avx(gcm_ctx_t *, char *, size_t,
     crypto_data_t *, size_t);
 
 static int gcm_encrypt_final_avx(gcm_ctx_t *, crypto_data_t *, size_t);
-static int gcm_decrypt_final_avx(gcm_ctx_t *, crypto_data_t *, size_t);
+static int gcm_decrypt_avx(gcm_ctx_t *, const uint8_t *, uint8_t *, size_t,
+    size_t);
 static int gcm_init_avx(gcm_ctx_t *, const uint8_t *, size_t, const uint8_t *,
     size_t, size_t);
 #endif /* ifdef CAN_USE_GCM_ASM */
@@ -276,15 +277,49 @@ gcm_encrypt_final(gcm_ctx_t *ctx, crypto_data_t *out, size_t block_size,
 }
 
 /*
+ * Return a pointer to the len bytes of out at its current offset if they are
+ * contiguous in memory, or NULL if they are not.
+ */
+static uint8_t *
+gcm_contig_output(crypto_data_t *out, size_t len)
+{
+	zfs_uio_t *uio;
+	offset_t off;
+	uint_t idx;
+
+	if (out->cd_offset < 0)
+		return (NULL);
+
+	switch (out->cd_format) {
+	case CRYPTO_DATA_RAW:
+		if ((size_t)out->cd_offset > out->cd_raw.iov_len ||
+		    out->cd_raw.iov_len - (size_t)out->cd_offset < len)
+			return (NULL);
+		return ((uint8_t *)out->cd_raw.iov_base + out->cd_offset);
+	case CRYPTO_DATA_UIO:
+		uio = out->cd_uio;
+		if (zfs_uio_segflg(uio) != UIO_SYSSPACE)
+			return (NULL);
+		off = zfs_uio_index_at_offset(uio, out->cd_offset, &idx);
+		if (idx >= (uint_t)zfs_uio_iovcnt(uio) ||
+		    (size_t)zfs_uio_iovlen(uio, idx) - (size_t)off < len)
+			return (NULL);
+		return ((uint8_t *)zfs_uio_iovbase(uio, idx) + off);
+	default:
+		return (NULL);
+	}
+}
+
+/*
  * This will only deal with decrypting the last block of the input that
  * might not be a multiple of block length.
  */
 static void
-gcm_decrypt_incomplete_block(gcm_ctx_t *ctx, size_t block_size, size_t index,
+gcm_decrypt_incomplete_block(gcm_ctx_t *ctx, size_t block_size, uint8_t *outp,
     int (*encrypt_block)(const void *, const uint8_t *, uint8_t *),
     void (*xor_block)(uint8_t *, uint8_t *))
 {
-	uint8_t *datap, *outp, *counterp;
+	uint8_t *datap, *counterp;
 	uint64_t counter;
 	uint64_t counter_mask = ntohll(0x00000000ffffffffULL);
 	int i;
@@ -299,7 +334,6 @@ gcm_decrypt_incomplete_block(gcm_ctx_t *ctx, size_t block_size, size_t index,
 	ctx->gcm_cb[1] = (ctx->gcm_cb[1] & ~counter_mask) | counter;
 
 	datap = (uint8_t *)ctx->gcm_remainder;
-	outp = &((ctx->gcm_pt_buf)[index]);
 	counterp = (uint8_t *)ctx->gcm_tmp;
 
 	/* authentication tag */
@@ -318,6 +352,12 @@ gcm_decrypt_incomplete_block(gcm_ctx_t *ctx, size_t block_size, size_t index,
 	}
 }
 
+/*
+ * Gather the input of a decryption, which gcm_decrypt_final() decrypts.
+ * If all of the ciphertext is in this piece, only a pointer to it is kept;
+ * otherwise it is copied to gcm_pt_buf. The tag that follows it is copied
+ * to gcm_tag.
+ */
 int
 gcm_mode_decrypt_contiguous_blocks(gcm_ctx_t *ctx, char *data, size_t length,
     crypto_data_t *out, size_t block_size,
@@ -327,59 +367,60 @@ gcm_mode_decrypt_contiguous_blocks(gcm_ctx_t *ctx, char *data, size_t length,
 {
 	(void) out, (void) block_size, (void) encrypt_block, (void) copy_block,
 	    (void) xor_block;
-	size_t total = ctx->gcm_ct_len + ctx->gcm_tag_len;
+	size_t ct_len = ctx->gcm_ct_len;
+	size_t done = ctx->gcm_processed_data_len;
+	size_t n;
 
-	if (length > total - ctx->gcm_processed_data_len)
+	if (length > ct_len + ctx->gcm_tag_len - done)
 		return (CRYPTO_ENCRYPTED_DATA_LEN_RANGE);
 
-	/*
-	 * Copy contiguous ciphertext input blocks to plaintext buffer.
-	 * Ciphertext will be decrypted in the final. The buffer is allocated
-	 * once, at the full length of the ciphertext and tag.
-	 */
-	if (length > 0) {
-		if (ctx->gcm_pt_buf == NULL) {
-			ctx->gcm_pt_buf = vmem_alloc(total, KM_SLEEP);
-			if (ctx->gcm_pt_buf == NULL)
-				return (CRYPTO_HOST_MEMORY);
-			ctx->gcm_pt_buf_len = total;
+	if (done < ct_len && length > 0) {
+		n = MIN(length, ct_len - done);
+		if (done == 0 && n == ct_len) {
+			ctx->gcm_ct = (const uint8_t *)data;
+		} else {
+			if (ctx->gcm_pt_buf == NULL) {
+				ctx->gcm_pt_buf = vmem_alloc(ct_len, KM_SLEEP);
+				if (ctx->gcm_pt_buf == NULL)
+					return (CRYPTO_HOST_MEMORY);
+				ctx->gcm_pt_buf_len = ct_len;
+			}
+			memcpy(&ctx->gcm_pt_buf[done], data, n);
 		}
-		memcpy(&ctx->gcm_pt_buf[ctx->gcm_processed_data_len], data,
-		    length);
-		ctx->gcm_processed_data_len += length;
+		data += n;
+		length -= n;
+		done += n;
 	}
+	if (length > 0)
+		memcpy((uint8_t *)ctx->gcm_tag + (done - ct_len), data, length);
+	ctx->gcm_processed_data_len = done + length;
 
 	ctx->gcm_remainder_len = 0;
 	return (CRYPTO_SUCCESS);
 }
 
-int
-gcm_decrypt_final(gcm_ctx_t *ctx, crypto_data_t *out, size_t block_size,
+/*
+ * Decrypt len bytes of ciphertext from ct to pt, which may be the same
+ * buffer, and compute the tag in gcm_ghash.
+ */
+static int
+gcm_decrypt(gcm_ctx_t *ctx, const uint8_t *ct, uint8_t *pt, size_t len,
+    size_t block_size,
     int (*encrypt_block)(const void *, const uint8_t *, uint8_t *),
     void (*xor_block)(uint8_t *, uint8_t *))
 {
-#ifdef CAN_USE_GCM_ASM
-	if (ctx->impl != GCM_IMPL_GENERIC)
-		return (gcm_decrypt_final_avx(ctx, out, block_size));
-#endif
-
 	const gcm_impl_ops_t *gops;
-	size_t pt_len;
 	size_t remainder;
 	uint8_t *ghash;
 	uint8_t *blockp;
 	uint8_t *cbp;
 	uint64_t counter;
 	uint64_t counter_mask = ntohll(0x00000000ffffffffULL);
-	int processed = 0, rv;
-
-	ASSERT(ctx->gcm_processed_data_len == ctx->gcm_pt_buf_len);
 
 	gops = gcm_impl_get_ops();
-	pt_len = ctx->gcm_processed_data_len - ctx->gcm_tag_len;
 	ghash = (uint8_t *)ctx->gcm_ghash;
-	blockp = ctx->gcm_pt_buf;
-	remainder = pt_len;
+	blockp = (uint8_t *)ct;
+	remainder = len;
 	while (remainder > 0) {
 		/* Incomplete last block */
 		if (remainder < block_size) {
@@ -389,8 +430,8 @@ gcm_decrypt_final(gcm_ctx_t *ctx, crypto_data_t *out, size_t block_size,
 			 * not expecting anymore ciphertext, just
 			 * compute plaintext for the remaining input
 			 */
-			gcm_decrypt_incomplete_block(ctx, block_size,
-			    processed, encrypt_block, xor_block);
+			gcm_decrypt_incomplete_block(ctx, block_size, pt,
+			    encrypt_block, xor_block);
 			ctx->gcm_remainder_len = 0;
 			goto out;
 		}
@@ -410,29 +451,85 @@ gcm_decrypt_final(gcm_ctx_t *ctx, crypto_data_t *out, size_t block_size,
 		encrypt_block(ctx->gcm_keysched, (uint8_t *)ctx->gcm_cb, cbp);
 
 		/* XOR with ciphertext */
-		xor_block(cbp, blockp);
+		xor_block(blockp, cbp);
+		memcpy(pt, cbp, block_size);
 
-		processed += block_size;
 		blockp += block_size;
+		pt += block_size;
 		remainder -= block_size;
 	}
 out:
-	ctx->gcm_len_a_len_c[1] = htonll(CRYPTO_BYTES2BITS(pt_len));
+	ctx->gcm_len_a_len_c[1] = htonll(CRYPTO_BYTES2BITS(len));
 	GHASH(ctx, ctx->gcm_len_a_len_c, ghash, gops);
 	encrypt_block(ctx->gcm_keysched, (uint8_t *)ctx->gcm_J0,
 	    (uint8_t *)ctx->gcm_J0);
 	xor_block((uint8_t *)ctx->gcm_J0, ghash);
 
+	return (CRYPTO_SUCCESS);
+}
+
+/*
+ * Decrypt the ciphertext gathered by gcm_mode_decrypt_contiguous_blocks()
+ * and check the tag. The plaintext is decrypted straight into the output
+ * when it is contiguous there and does not overlap the ciphertext, and is
+ * zeroed there if the tag does not match, so that the output never holds
+ * unauthenticated plaintext when this fails. Otherwise it is decrypted in
+ * gcm_pt_buf and copied to the output once the tag matches.
+ */
+int
+gcm_decrypt_final(gcm_ctx_t *ctx, crypto_data_t *out, size_t block_size,
+    int (*encrypt_block)(const void *, const uint8_t *, uint8_t *),
+    void (*xor_block)(uint8_t *, uint8_t *))
+{
+	size_t pt_len = ctx->gcm_ct_len;
+	const uint8_t *ct;
+	uint8_t *pt = NULL;
+	int rv;
+
+	if (ctx->gcm_processed_data_len != pt_len + ctx->gcm_tag_len)
+		return (CRYPTO_ENCRYPTED_DATA_LEN_RANGE);
+
+	ct = (ctx->gcm_ct != NULL) ? ctx->gcm_ct : ctx->gcm_pt_buf;
+	if (pt_len > 0) {
+		pt = gcm_contig_output(out, pt_len);
+		if (pt != NULL && (uintptr_t)pt < (uintptr_t)ct + pt_len &&
+		    (uintptr_t)ct < (uintptr_t)pt + pt_len)
+			pt = NULL;
+		if (pt == NULL) {
+			if (ctx->gcm_pt_buf == NULL) {
+				ctx->gcm_pt_buf = vmem_alloc(pt_len, KM_SLEEP);
+				if (ctx->gcm_pt_buf == NULL)
+					return (CRYPTO_HOST_MEMORY);
+				ctx->gcm_pt_buf_len = pt_len;
+			}
+			pt = ctx->gcm_pt_buf;
+		}
+	}
+
+#ifdef CAN_USE_GCM_ASM
+	if (ctx->impl != GCM_IMPL_GENERIC)
+		rv = gcm_decrypt_avx(ctx, ct, pt, pt_len, block_size);
+	else
+#endif
+		rv = gcm_decrypt(ctx, ct, pt, pt_len, block_size,
+		    encrypt_block, xor_block);
+
 	/* compare the input authentication tag with what we calculated */
-	if (memcmp(&ctx->gcm_pt_buf[pt_len], ghash, ctx->gcm_tag_len)) {
-		/* They don't match */
-		return (CRYPTO_INVALID_MAC);
-	} else {
-		rv = crypto_put_output_data(ctx->gcm_pt_buf, out, pt_len);
+	if (rv == CRYPTO_SUCCESS &&
+	    memcmp(ctx->gcm_tag, ctx->gcm_ghash, ctx->gcm_tag_len) != 0)
+		rv = CRYPTO_INVALID_MAC;
+
+	if (rv != CRYPTO_SUCCESS) {
+		if (pt != ctx->gcm_pt_buf)
+			memset(pt, 0, pt_len);
+		return (rv);
+	}
+	if (pt == ctx->gcm_pt_buf && pt_len > 0) {
+		rv = crypto_put_output_data(pt, out, pt_len);
 		if (rv != CRYPTO_SUCCESS)
 			return (rv);
-		out->cd_offset += pt_len;
 	}
+	out->cd_offset += pt_len;
 	return (CRYPTO_SUCCESS);
 }
 
@@ -1208,40 +1305,6 @@ static size_t aesni_gcm_encrypt_avx2(const uint8_t *in, uint8_t *out,
 #endif /* if CAN_USE_GCM_ASM >= 2 */
 
 /*
- * Return a pointer to the len bytes of out at its current offset if they are
- * contiguous in memory, or NULL if they are not.
- */
-static uint8_t *
-gcm_contig_output(crypto_data_t *out, size_t len)
-{
-	zfs_uio_t *uio;
-	offset_t off;
-	uint_t idx;
-
-	if (out->cd_offset < 0)
-		return (NULL);
-
-	switch (out->cd_format) {
-	case CRYPTO_DATA_RAW:
-		if ((size_t)out->cd_offset > out->cd_raw.iov_len ||
-		    out->cd_raw.iov_len - (size_t)out->cd_offset < len)
-			return (NULL);
-		return ((uint8_t *)out->cd_raw.iov_base + out->cd_offset);
-	case CRYPTO_DATA_UIO:
-		uio = out->cd_uio;
-		if (zfs_uio_segflg(uio) != UIO_SYSSPACE)
-			return (NULL);
-		off = zfs_uio_index_at_offset(uio, out->cd_offset, &idx);
-		if (idx >= (uint_t)zfs_uio_iovcnt(uio) ||
-		    (size_t)zfs_uio_iovlen(uio, idx) - (size_t)off < len)
-			return (NULL);
-		return ((uint8_t *)zfs_uio_iovbase(uio, idx) + off);
-	default:
-		return (NULL);
-	}
-}
-
-/*
  * Encrypt multiple blocks of data in GCM mode.
  * This is done in gcm_avx_chunk_size chunks, utilizing AVX assembler routines
  * if possible. While processing a chunk the FPU is "locked".
@@ -1509,13 +1572,13 @@ static size_t aesni_gcm_decrypt_avx2(const uint8_t *in, uint8_t *out,
 #endif /* if CAN_USE_GCM_ASM >= 2 */
 
 /*
- * Finalize decryption: We just have accumulated crypto text, so now we
- * decrypt it here inplace.
+ * Decrypt len bytes of ciphertext from ct to pt, which may be the same
+ * buffer, and compute the tag in gcm_ghash.
  */
 static int
-gcm_decrypt_final_avx(gcm_ctx_t *ctx, crypto_data_t *out, size_t block_size)
+gcm_decrypt_avx(gcm_ctx_t *ctx, const uint8_t *ct, uint8_t *pt, size_t len,
+    size_t block_size)
 {
-	ASSERT3U(ctx->gcm_processed_data_len, ==, ctx->gcm_pt_buf_len);
 	ASSERT3U(block_size, ==, 16);
 	ASSERT3S(((aes_key_t *)ctx->gcm_keysched)->ops->needs_byteswap, ==,
 	    B_FALSE);
@@ -1527,14 +1590,11 @@ gcm_decrypt_final_avx(gcm_ctx_t *ctx, crypto_data_t *out, size_t block_size)
 	    aesni_gcm_decrypt_avx2 :
 #endif
 	    aesni_gcm_decrypt_avx;
-	size_t pt_len = ctx->gcm_processed_data_len - ctx->gcm_tag_len;
-	uint8_t *datap = ctx->gcm_pt_buf;
 	const aes_key_t *key = ((aes_key_t *)ctx->gcm_keysched);
 	uint32_t *cb = (uint32_t *)ctx->gcm_cb;
 	uint64_t *htable = ctx->gcm_Htable;
 	uint64_t *ghash = ctx->gcm_ghash;
 	uint32_t *tmp = (uint32_t *)ctx->gcm_tmp;
-	int rv = CRYPTO_SUCCESS;
 	size_t bleft, done;
 	kfpu_ctx_t kctx;
 
@@ -1543,28 +1603,30 @@ gcm_decrypt_final_avx(gcm_ctx_t *ctx, crypto_data_t *out, size_t block_size)
 	 * greater or equal than GCM_AVX_MIN_ENCRYPT_BYTES, and a multiple of
 	 * GCM_AVX_MIN_DECRYPT_BYTES.
 	 */
-	for (bleft = pt_len; bleft >= chunk_size; bleft -= chunk_size) {
+	for (bleft = len; bleft >= chunk_size; bleft -= chunk_size) {
 		kfpu_begin(&kctx);
-		done = decrypt_blocks(datap, datap, chunk_size,
+		done = decrypt_blocks(ct, pt, chunk_size,
 		    (const void *)key, ctx->gcm_cb, htable, ghash);
 		clear_fpu_regs();
 		kfpu_end(&kctx);
 		if (done != chunk_size) {
 			return (CRYPTO_FAILED);
 		}
-		datap += done;
+		ct += done;
+		pt += done;
 	}
 	/* Decrypt remainder, which is less than chunk size, in one go. */
 	kfpu_begin(&kctx);
 	if (bleft >= GCM_AVX_MIN_DECRYPT_BYTES) {
-		done = decrypt_blocks(datap, datap, bleft,
+		done = decrypt_blocks(ct, pt, bleft,
 		    (const void *)key, ctx->gcm_cb, htable, ghash);
 		if (done == 0) {
 			clear_fpu_regs();
 			kfpu_end(&kctx);
 			return (CRYPTO_FAILED);
 		}
-		datap += done;
+		ct += done;
+		pt += done;
 		bleft -= done;
 	}
 	ASSERT(bleft < GCM_AVX_MIN_DECRYPT_BYTES);
@@ -1579,31 +1641,28 @@ gcm_decrypt_final_avx(gcm_ctx_t *ctx, crypto_data_t *out, size_t block_size)
 			uint8_t *lastb = (uint8_t *)ctx->gcm_remainder;
 
 			memset(lastb, 0, block_size);
-			memcpy(lastb, datap, bleft);
+			memcpy(lastb, ct, bleft);
 			/* The GCM processing. */
 			GHASH_AVX(ctx, lastb, block_size);
 			aes_encrypt_intel(key->encr_ks.ks32, key->nr, cb, tmp);
 			for (size_t i = 0; i < bleft; i++) {
-				datap[i] = lastb[i] ^ ((uint8_t *)tmp)[i];
+				pt[i] = lastb[i] ^ ((uint8_t *)tmp)[i];
 			}
 			break;
 		}
 		/* The GCM processing. */
-		GHASH_AVX(ctx, datap, block_size);
+		GHASH_AVX(ctx, ct, block_size);
 		aes_encrypt_intel(key->encr_ks.ks32, key->nr, cb, tmp);
-		gcm_xor_avx((uint8_t *)tmp, datap);
+		gcm_xor_avx(ct, (uint8_t *)tmp);
+		memcpy(pt, tmp, block_size);
 		gcm_incr_counter_block(ctx);
 
-		datap += block_size;
+		ct += block_size;
+		pt += block_size;
 		bleft -= block_size;
 	}
-	if (rv != CRYPTO_SUCCESS) {
-		clear_fpu_regs();
-		kfpu_end(&kctx);
-		return (rv);
-	}
 	/* Decryption done, finish the tag. */
-	ctx->gcm_len_a_len_c[1] = htonll(CRYPTO_BYTES2BITS(pt_len));
+	ctx->gcm_len_a_len_c[1] = htonll(CRYPTO_BYTES2BITS(len));
 	GHASH_AVX(ctx, (uint8_t *)ctx->gcm_len_a_len_c, block_size);
 	aes_encrypt_intel(key->encr_ks.ks32, key->nr, (uint32_t *)ctx->gcm_J0,
 	    (uint32_t *)ctx->gcm_J0);
@@ -1614,16 +1673,6 @@ gcm_decrypt_final_avx(gcm_ctx_t *ctx, crypto_data_t *out, size_t block_size)
 	clear_fpu_regs();
 	kfpu_end(&kctx);
 
-	/* Compare the input authentication tag with what we calculated. */
-	if (memcmp(&ctx->gcm_pt_buf[pt_len], ghash, ctx->gcm_tag_len)) {
-		/* They don't match. */
-		return (CRYPTO_INVALID_MAC);
-	}
-	rv = crypto_put_output_data(ctx->gcm_pt_buf, out, pt_len);
-	if (rv != CRYPTO_SUCCESS) {
-		return (rv);
-	}
-	out->cd_offset += pt_len;
 	return (CRYPTO_SUCCESS);
 }
 
