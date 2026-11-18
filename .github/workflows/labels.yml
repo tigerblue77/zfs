@@ -591,7 +591,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           # "Status: Inactive" on an open PR, draft or not, with no activity
-          # by anyone but a bot for 90 days: no commit or force-push, comment,
+          # by anyone but a bot for 30 days: no commit or force-push, comment,
           # review or reopening, and no change between draft and ready for
           # review, so that the events that remove the label count too.  The
           # PR's updatedAt would not do, as label changes move it.  A commit
@@ -644,7 +644,7 @@ jobs:
               fi
             done
           }
-          cutoff=$(date -u -d '-90 days' +%Y-%m-%dT%H:%M:%SZ)
+          cutoff=$(date -u -d '-30 days' +%Y-%m-%dT%H:%M:%SZ)
           # shellcheck disable=SC2016
           open_prs '
               query($owner: String!, $repo: String!, $first: Int!,
