@@ -188,7 +188,8 @@ Available via `specific_os` or `ZTS_OS_OVERRIDE`:
   - type and component labels, from the issues each PR closes, for PRs
     that have none of that kind
   - `Status: Blocked`, on PRs that declare "Depends on #N" while any of
-    those PRs or issues is open
+    those PRs or issues is open; a PR that no longer declares any loses
+    it, unless it was added by hand
   - `Status: Merge Conflict`, on PRs that conflict with their base, checked
     when a PR is opened, pushed to or reopened, and every 3 hours
   - `Status: Inactive`, every 3 hours, on PRs, drafts included, with no

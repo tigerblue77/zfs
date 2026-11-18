@@ -254,14 +254,15 @@ jobs:
           # A PR with a line of its description that starts with "Depends
           # on" and one or more PRs or issues of this repository, as "#N",
           # "owner/repo#N" or their URL, is blocked while any of them is
-          # open.  Only such PRs get "Status: Blocked" or lose it, so a label
-          # set by hand on any other PR stays, as does the label of a PR
-          # whose line is deleted.  Only the first 10 dependencies are read,
-          # to bound the work of every event, and a PR that names more is
-          # told so once, and a PR that names itself is not blocked by it.
-          # When a PR or an issue is closed or reopened, the open PRs that
-          # depend on it, and a reopened PR itself, are updated; a manual run
-          # updates them all.
+          # open.  Only such PRs get "Status: Blocked".  A PR that names
+          # none, as when its line is deleted, loses it only if a bot was the
+          # last to add it, among the last 100 label changes of the PR, so
+          # that a label set by hand stays.  Only the first 10 dependencies
+          # are read, to bound the work of every event, and a PR that names
+          # more is told so once, and a PR that names itself is not blocked
+          # by it.  When a PR or an issue is closed or reopened, the open PRs
+          # that depend on it, and a reopened PR itself, are updated; a
+          # manual run updates them all.
           label="Status: Blocked"
           marker='<!-- labels-yml:depends-cap -->'
           note="$marker
@@ -272,6 +273,28 @@ jobs:
             gh label create "$label" --color e60000 \
                 --description "Depends on another pending change"
           fi
+          # The last 100 label changes of a PR; the names that start with $
+          # are GraphQL variables.
+          # shellcheck disable=SC2016
+          changes='
+              query($owner: String!, $repo: String!, $number: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  pullRequest(number: $number) {
+                    timelineItems(last: 100,
+                        itemTypes: [LABELED_EVENT, UNLABELED_EVENT]) {
+                      nodes {
+                        __typename
+                        ... on LabeledEvent {
+                          actor { __typename } label { name }
+                        }
+                        ... on UnlabeledEvent {
+                          actor { __typename } label { name }
+                        }
+                      }
+                    }
+                  }
+                }
+              }'
           sweep=
           if [ "$ACTION" = closed ] || [ "$ACTION" = reopened ]; then
             sweep=true
@@ -295,8 +318,8 @@ jobs:
                 reduce .[] as $n ([]; if index([$n]) then . else . + [$n] end) |
                 .[]' <<< "$p")
             deps=$(head -n 10 <<< "$refs")
-            if [ -z "$deps" ] || { [ -n "$sweep" ] && [ "$pr" != "$NUMBER" ] &&
-                ! grep -qxF "$NUMBER" <<< "$deps"; }; then
+            if [ -n "$sweep" ] && [ "$pr" != "$NUMBER" ] &&
+                ! grep -qxF "$NUMBER" <<< "$deps"; then
               continue
             fi
             if [ "$(wc -l <<< "$refs")" -gt 10 ] &&
@@ -323,6 +346,22 @@ jobs:
               gh api --silent -X POST "repos/$GH_REPO/issues/$pr/labels" \
                   -f "labels[]=$label" < /dev/null
             else
+              # Without a dependency, only if a bot was the last to add it.
+              # Label changes that cannot be read leave the PR as it is.
+              if [ -z "$deps" ]; then
+                if ! bot=$(gh api graphql -F number="$pr" \
+                    -f owner="${GH_REPO%/*}" -f repo="${GH_REPO#*/}" \
+                    -f query="$changes" < /dev/null |
+                    jq --arg l "$label" '[.data.repository.pullRequest |
+                    .timelineItems.nodes[] | select(.label.name == $l)] |
+                    last | .__typename == "LabeledEvent" and
+                    .actor.__typename == "Bot"'); then
+                  echo "::warning::Could not read the label changes of PR #$pr"
+                  continue
+                elif [ "$bot" != true ]; then
+                  continue
+                fi
+              fi
               # Another run may have removed it already.
               gh api --silent -X DELETE \
                   "repos/$GH_REPO/issues/$pr/labels/Status:%20Blocked" \
