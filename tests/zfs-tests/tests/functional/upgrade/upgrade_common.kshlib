@@ -29,4 +29,9 @@ function cleanup_upgrade
 	destroy_dataset "$TESTPOOL/fs2"
 	destroy_dataset "$TESTPOOL/fs3"
 	destroy_pool "$TESTPOOL"
+
+	# A pool imported read-only keeps the labels of its last export
+	# when destroyed, so give the next test a file that is in no pool.
+	log_must rm -f "$TMPDEV"
+	log_must truncate -s $MINVDEVSIZE "$TMPDEV"
 }
