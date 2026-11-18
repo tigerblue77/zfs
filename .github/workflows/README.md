@@ -173,11 +173,19 @@ Available via `specific_os` or `ZTS_OS_OVERRIDE`:
 - `zfs-arm.yml`: ARM build on `ubuntu-24.04-arm`
 - `zloop.yml`: host-side zloop
 - `labels.yml`: maintains PR labels:
-  - status labels, and every 3 hours `Status: Reviewed` on PRs that someone
-    other than their author has reviewed, `Status: Maintainer Reviewed` when
-    one of them can push to the repository, and `Status: Revision Needed` on
-    PRs other than drafts whose head a reviewer with write access has asked
-    to change
+  - status labels, and every 3 hours `Status: Revision Needed` on PRs
+    other than drafts whose head a reviewer with write access has asked to
+    change
+  - review labels, every 3 hours, from the reviews of the code a PR has
+    now by others than its author and bots: `Status: Maintainer Reviewed`
+    or `Status: Maintainer Approved` for a reviewer who can push to the
+    repository, `Status: Contributor Reviewed` or
+    `Status: Contributor Approved` for anyone else, Approved when their
+    latest verdict approves that code.  A label goes when another one
+    outranks it in both, so that only `Status: Maintainer Reviewed` and
+    `Status: Contributor Approved` can go together.  A push that changes
+    the code of a PR removes all four, and a rebase or a merge of its base
+    branch, squashed fixups or a reworded commit do not
   - size labels, from the lines each PR changes
   - `Component: CI`, `Component: Test Suite`, `Type: Documentation` and
     `Type: Building`, for PRs that change only CI, tests, documentation or
