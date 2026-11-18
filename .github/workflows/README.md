@@ -185,7 +185,10 @@ Available via `specific_os` or `ZTS_OS_OVERRIDE`:
     outranks it in both, so that only `Status: Maintainer Reviewed` and
     `Status: Contributor Approved` can go together.  A push that changes
     the code of a PR removes all four, and a rebase or a merge of its base
-    branch, squashed fixups or a reworded commit do not
+    branch, squashed fixups or a reworded commit do not.
+    `Status: Maintainer Approved` replaces `Status: Accepted`: a
+    maintainer can still add it by hand to accept a PR, and then only such
+    a push removes it
   - size labels, from the lines each PR changes
   - `Component: CI`, `Component: Test Suite`, `Type: Documentation` and
     `Type: Building`, for PRs that change only CI, tests, documentation or
