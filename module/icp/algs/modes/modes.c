@@ -112,6 +112,40 @@ crypto_get_ptrs(crypto_data_t *out, void **iov_or_mp, offset_t *current_offset,
 	} /* end switch */
 }
 
+/*
+ * Return a pointer to the len bytes of out at its current offset if they are
+ * contiguous in memory, or NULL if they are not.
+ */
+uint8_t *
+crypto_contig_output(crypto_data_t *out, size_t len)
+{
+	zfs_uio_t *uio;
+	offset_t off;
+	uint_t idx;
+
+	if (out->cd_offset < 0)
+		return (NULL);
+
+	switch (out->cd_format) {
+	case CRYPTO_DATA_RAW:
+		if ((size_t)out->cd_offset > out->cd_raw.iov_len ||
+		    out->cd_raw.iov_len - (size_t)out->cd_offset < len)
+			return (NULL);
+		return ((uint8_t *)out->cd_raw.iov_base + out->cd_offset);
+	case CRYPTO_DATA_UIO:
+		uio = out->cd_uio;
+		if (zfs_uio_segflg(uio) != UIO_SYSSPACE)
+			return (NULL);
+		off = zfs_uio_index_at_offset(uio, out->cd_offset, &idx);
+		if (idx >= (uint_t)zfs_uio_iovcnt(uio) ||
+		    (size_t)zfs_uio_iovlen(uio, idx) - (size_t)off < len)
+			return (NULL);
+		return ((uint8_t *)zfs_uio_iovbase(uio, idx) + off);
+	default:
+		return (NULL);
+	}
+}
+
 void
 crypto_free_mode_ctx(void *ctx)
 {

@@ -93,8 +93,12 @@ typedef struct common_ctx common_ctx_t;
  *
  * ccm_pt_buf:		Only used in CCM mode decrypt.  It stores the
  *			decrypted plaintext to be returned when
- *			MAC verification succeeds in decrypt_final.
- *			Memory for this should be allocated in the AES module.
+ *			MAC verification succeeds in decrypt_final,
+ *			when it cannot be decrypted straight into the
+ *			output.  Allocated when it is first needed.
+ *
+ * ccm_ct:		The caller's ciphertext (decrypt), when all of it
+ *			is in one piece of input: decrypt_final decrypts it.
  *
  */
 typedef struct ccm_ctx {
@@ -108,6 +112,7 @@ typedef struct ccm_ctx {
 	uint8_t *ccm_pt_buf;
 	uint64_t ccm_mac_input_buf[2];
 	uint64_t ccm_counter_mask;
+	const uint8_t *ccm_ct;
 } ccm_ctx_t;
 
 #define	ccm_keysched		ccm_common.cc_keysched
@@ -264,7 +269,7 @@ extern int gcm_decrypt_final(gcm_ctx_t *, crypto_data_t *, size_t,
     int (*encrypt_block)(const void *, const uint8_t *, uint8_t *),
     void (*xor_block)(uint8_t *, uint8_t *));
 
-extern int ccm_init_ctx(ccm_ctx_t *, char *, int, boolean_t, size_t,
+extern int ccm_init_ctx(ccm_ctx_t *, char *, boolean_t, size_t,
     int (*encrypt_block)(const void *, const uint8_t *, uint8_t *),
     void (*xor_block)(uint8_t *, uint8_t *));
 
@@ -281,6 +286,7 @@ extern void gcm_mul(uint64_t *, uint64_t *, uint64_t *);
 extern void crypto_init_ptrs(crypto_data_t *, void **, offset_t *);
 extern void crypto_get_ptrs(crypto_data_t *, void **, offset_t *,
     uint8_t **, size_t *, uint8_t **, size_t);
+extern uint8_t *crypto_contig_output(crypto_data_t *, size_t);
 
 extern void *ccm_alloc_ctx(int);
 extern void *gcm_alloc_ctx(int);

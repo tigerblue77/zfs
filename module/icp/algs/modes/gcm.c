@@ -277,40 +277,6 @@ gcm_encrypt_final(gcm_ctx_t *ctx, crypto_data_t *out, size_t block_size,
 }
 
 /*
- * Return a pointer to the len bytes of out at its current offset if they are
- * contiguous in memory, or NULL if they are not.
- */
-static uint8_t *
-gcm_contig_output(crypto_data_t *out, size_t len)
-{
-	zfs_uio_t *uio;
-	offset_t off;
-	uint_t idx;
-
-	if (out->cd_offset < 0)
-		return (NULL);
-
-	switch (out->cd_format) {
-	case CRYPTO_DATA_RAW:
-		if ((size_t)out->cd_offset > out->cd_raw.iov_len ||
-		    out->cd_raw.iov_len - (size_t)out->cd_offset < len)
-			return (NULL);
-		return ((uint8_t *)out->cd_raw.iov_base + out->cd_offset);
-	case CRYPTO_DATA_UIO:
-		uio = out->cd_uio;
-		if (zfs_uio_segflg(uio) != UIO_SYSSPACE)
-			return (NULL);
-		off = zfs_uio_index_at_offset(uio, out->cd_offset, &idx);
-		if (idx >= (uint_t)zfs_uio_iovcnt(uio) ||
-		    (size_t)zfs_uio_iovlen(uio, idx) - (size_t)off < len)
-			return (NULL);
-		return ((uint8_t *)zfs_uio_iovbase(uio, idx) + off);
-	default:
-		return (NULL);
-	}
-}
-
-/*
  * This will only deal with decrypting the last block of the input that
  * might not be a multiple of block length.
  */
@@ -491,7 +457,7 @@ gcm_decrypt_final(gcm_ctx_t *ctx, crypto_data_t *out, size_t block_size,
 
 	ct = (ctx->gcm_ct != NULL) ? ctx->gcm_ct : ctx->gcm_pt_buf;
 	if (pt_len > 0) {
-		pt = gcm_contig_output(out, pt_len);
+		pt = crypto_contig_output(out, pt_len);
 		if (pt != NULL && (uintptr_t)pt < (uintptr_t)ct + pt_len &&
 		    (uintptr_t)ct < (uintptr_t)pt + pt_len)
 			pt = NULL;
@@ -1390,7 +1356,7 @@ gcm_mode_encrypt_contiguous_blocks_avx(gcm_ctx_t *ctx, char *data,
 	 * buffer to encrypt to otherwise.
 	 */
 	if (bleft >= GCM_AVX_MIN_ENCRYPT_BYTES) {
-		direct = gcm_contig_output(out, bleft - bleft % block_size);
+		direct = crypto_contig_output(out, bleft - bleft % block_size);
 		if (direct == NULL) {
 			ct_buf = vmem_alloc(chunk_size, KM_SLEEP);
 			if (ct_buf == NULL) {

@@ -350,6 +350,27 @@ ccm_mode_decrypt_contiguous_blocks(ccm_ctx_t *ctx, char *data, size_t length,
 
 	pm_len = ctx->ccm_processed_mac_len;
 
+	/*
+	 * If all of the ciphertext is in the first piece, keep a pointer to
+	 * it for ccm_decrypt_final() to decrypt, and gather the MAC.
+	 */
+	if (ctx->ccm_ct == NULL && ctx->ccm_processed_data_len == 0 &&
+	    ctx->ccm_remainder_len == 0 && pm_len == 0 &&
+	    length >= ctx->ccm_data_len) {
+		ctx->ccm_ct = datap;
+		ctx->ccm_processed_data_len = ctx->ccm_data_len;
+		datap += ctx->ccm_data_len;
+		length -= ctx->ccm_data_len;
+	}
+	if (ctx->ccm_ct != NULL) {
+		if (length > ctx->ccm_mac_len - pm_len)
+			return (CRYPTO_ENCRYPTED_DATA_LEN_RANGE);
+		memcpy((uint8_t *)ctx->ccm_mac_input_buf + pm_len, datap,
+		    length);
+		ctx->ccm_processed_mac_len += length;
+		return (CRYPTO_SUCCESS);
+	}
+
 	if (pm_len > 0) {
 		uint8_t *tmp;
 		/*
@@ -380,6 +401,12 @@ ccm_mode_decrypt_contiguous_blocks(ccm_ctx_t *ctx, char *data, size_t length,
 	}
 
 	pt_len = ctx->ccm_data_len;
+
+	if (ctx->ccm_pt_buf == NULL) {
+		ctx->ccm_pt_buf = vmem_alloc(pt_len, KM_SLEEP);
+		if (ctx->ccm_pt_buf == NULL)
+			return (CRYPTO_HOST_MEMORY);
+	}
 
 	if (total_decrypted_len > pt_len) {
 		/*
@@ -504,6 +531,59 @@ out:
 	return (CRYPTO_SUCCESS);
 }
 
+/*
+ * Decrypt len bytes of ciphertext from ct to pt in counter mode.
+ */
+static void
+ccm_decrypt_blocks(ccm_ctx_t *ctx, const uint8_t *ct, uint8_t *pt, size_t len,
+    size_t block_size,
+    int (*encrypt_block)(const void *, const uint8_t *, uint8_t *),
+    void (*copy_block)(uint8_t *, uint8_t *),
+    void (*xor_block)(uint8_t *, uint8_t *))
+{
+	uint8_t *cbp = (uint8_t *)ctx->ccm_tmp;
+	uint64_t counter;
+	size_t i;
+
+	while (len > 0) {
+		encrypt_block(ctx->ccm_keysched, (uint8_t *)ctx->ccm_cb, cbp);
+		if (len < block_size) {
+			for (i = 0; i < len; i++)
+				pt[i] = ct[i] ^ cbp[i];
+			break;
+		}
+
+		/*
+		 * Increment counter.
+		 * Counter bits are confined to the bottom 64 bits
+		 */
+#ifdef _ZFS_LITTLE_ENDIAN
+		counter = ntohll(ctx->ccm_cb[1] & ctx->ccm_counter_mask);
+		counter = htonll(counter + 1);
+#else
+		counter = ctx->ccm_cb[1] & ctx->ccm_counter_mask;
+		counter++;
+#endif	/* _ZFS_LITTLE_ENDIAN */
+		counter &= ctx->ccm_counter_mask;
+		ctx->ccm_cb[1] =
+		    (ctx->ccm_cb[1] & ~(ctx->ccm_counter_mask)) | counter;
+
+		xor_block((uint8_t *)ct, cbp);
+		copy_block(cbp, pt);
+		ct += block_size;
+		pt += block_size;
+		len -= block_size;
+	}
+}
+
+/*
+ * If the ciphertext was kept in place by ccm_mode_decrypt_contiguous_blocks(),
+ * decrypt it straight into the output when it is contiguous there and does
+ * not overlap the ciphertext, and zero it there if the MAC does not match,
+ * so that the output never holds unauthenticated plaintext when this fails.
+ * Otherwise the plaintext is in ccm_pt_buf, and is copied to the output once
+ * the MAC matches.
+ */
 int
 ccm_decrypt_final(ccm_ctx_t *ctx, crypto_data_t *out, size_t block_size,
     int (*encrypt_block)(const void *, const uint8_t *, uint8_t *),
@@ -512,6 +592,8 @@ ccm_decrypt_final(ccm_ctx_t *ctx, crypto_data_t *out, size_t block_size,
 {
 	size_t mac_remain, pt_len;
 	uint8_t *pt, *mac_buf, *macp, *ccm_mac_p;
+	const uint8_t *ct = ctx->ccm_ct;
+	uint8_t *dst = NULL;
 	int rv;
 
 	pt_len = ctx->ccm_data_len;
@@ -520,8 +602,30 @@ ccm_decrypt_final(ccm_ctx_t *ctx, crypto_data_t *out, size_t block_size,
 	if (out->cd_length < pt_len) {
 		return (CRYPTO_DATA_LEN_RANGE);
 	}
+	if (ctx->ccm_processed_data_len != pt_len ||
+	    ctx->ccm_processed_mac_len != ctx->ccm_mac_len)
+		return (CRYPTO_ENCRYPTED_DATA_LEN_RANGE);
 
-	pt = ctx->ccm_pt_buf;
+	if (ct != NULL && pt_len > 0) {
+		dst = crypto_contig_output(out, pt_len);
+		if (dst != NULL && (uintptr_t)dst < (uintptr_t)ct + pt_len &&
+		    (uintptr_t)ct < (uintptr_t)dst + pt_len)
+			dst = NULL;
+		if (dst == NULL) {
+			if (ctx->ccm_pt_buf == NULL) {
+				ctx->ccm_pt_buf = vmem_alloc(pt_len, KM_SLEEP);
+				if (ctx->ccm_pt_buf == NULL)
+					return (CRYPTO_HOST_MEMORY);
+			}
+			dst = ctx->ccm_pt_buf;
+		}
+		ccm_decrypt_blocks(ctx, ct, dst, pt_len, block_size,
+		    encrypt_block, copy_block, xor_block);
+	} else {
+		dst = ctx->ccm_pt_buf;
+	}
+
+	pt = dst;
 	mac_remain = ctx->ccm_processed_data_len;
 	mac_buf = (uint8_t *)ctx->ccm_mac_buf;
 
@@ -550,13 +654,16 @@ ccm_decrypt_final(ccm_ctx_t *ctx, crypto_data_t *out, size_t block_size,
 	/* compare the input CCM MAC value with what we calculated */
 	if (memcmp(ctx->ccm_mac_input_buf, ccm_mac_p, ctx->ccm_mac_len)) {
 		/* They don't match */
+		if (dst != ctx->ccm_pt_buf)
+			memset(dst, 0, pt_len);
 		return (CRYPTO_INVALID_MAC);
-	} else {
-		rv = crypto_put_output_data(ctx->ccm_pt_buf, out, pt_len);
+	}
+	if (dst == ctx->ccm_pt_buf && pt_len > 0) {
+		rv = crypto_put_output_data(dst, out, pt_len);
 		if (rv != CRYPTO_SUCCESS)
 			return (rv);
-		out->cd_offset += pt_len;
 	}
+	out->cd_offset += pt_len;
 	return (CRYPTO_SUCCESS);
 }
 
@@ -834,7 +941,7 @@ ccm_init(ccm_ctx_t *ctx, unsigned char *nonce, size_t nonce_len,
  * for AES CCM mode.
  */
 int
-ccm_init_ctx(ccm_ctx_t *ccm_ctx, char *param, int kmflag,
+ccm_init_ctx(ccm_ctx_t *ccm_ctx, char *param,
     boolean_t is_encrypt_init, size_t block_size,
     int (*encrypt_block)(const void *, const uint8_t *, uint8_t *),
     void (*xor_block)(uint8_t *, uint8_t *))
@@ -869,14 +976,6 @@ ccm_init_ctx(ccm_ctx_t *ccm_ctx, char *param, int kmflag,
 	    ccm_param->authData, ccm_param->ulAuthDataSize, block_size,
 	    encrypt_block, xor_block) != 0) {
 		return (CRYPTO_MECHANISM_PARAM_INVALID);
-	}
-	if (!is_encrypt_init) {
-		/* allocate buffer for storing decrypted plaintext */
-		ccm_ctx->ccm_pt_buf = vmem_alloc(ccm_ctx->ccm_data_len,
-		    kmflag);
-		if (ccm_ctx->ccm_pt_buf == NULL) {
-			rv = CRYPTO_HOST_MEMORY;
-		}
 	}
 	return (rv);
 }
