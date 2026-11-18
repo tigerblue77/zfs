@@ -127,9 +127,16 @@ function test_panic_fault
 
 function test_panic_fault_neg
 {
+	typeset msg
+
 	log_mustnot eval "zinject -p f -d $DISK1 $TESTPOOL"
 	log_mustnot eval "zinject -p f -t data $TESTFILE"
 	log_mustnot eval "zinject -p f -f 50 $TESTPOOL"
+
+	# The refusal of -f comes from the -p checks and must name -p.
+	msg=$(zinject -p f -f 50 "$TESTPOOL" 2>&1 >/dev/null)
+	[[ $msg == *"panic (-p) incompatible with other options"* ]] || \
+	    log_fail "zinject -p -f refused with: $msg"
 	zinject -c all
 }
 
