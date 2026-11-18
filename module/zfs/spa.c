@@ -1139,8 +1139,24 @@ spa_change_guid(spa_t *spa, const uint64_t *guidp)
 		guid = spa_generate_guid(NULL);
 	}
 
+	/*
+	 * Sync the new guid without the namespace lock: zpool clear needs
+	 * it to resume the pool if the pool suspends meanwhile.  Until the
+	 * guid has synced, spa_by_guid() matches it, so no other pool can
+	 * take it.  spa_vdev_top_lock keeps other reguids of this pool
+	 * out, and the caller's reference keeps the pool from being
+	 * exported.
+	 */
+	ASSERT(!spa_refcount_zero(spa));
+	ASSERT0(spa->spa_pending_guid);
+	spa->spa_pending_guid = guid;
+	spa_namespace_exit(FTAG);
+
 	error = dsl_sync_task(spa->spa_name, spa_change_guid_check,
 	    spa_change_guid_sync, &guid, 5, ZFS_SPACE_CHECK_RESERVED);
+
+	spa_namespace_enter(FTAG);
+	spa->spa_pending_guid = 0;
 
 	if (error == 0) {
 		/*

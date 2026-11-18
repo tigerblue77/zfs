@@ -287,6 +287,7 @@ struct spa {
 	uint64_t	spa_config_guid;	/* config pool guid */
 	uint64_t	spa_load_guid;		/* spa_load initialized guid */
 	uint64_t	spa_last_synced_guid;	/* last synced guid */
+	uint64_t	spa_pending_guid;	/* guid being set by reguid */
 	list_t		spa_config_dirty_list;	/* vdevs with dirty config */
 	list_t		spa_state_dirty_list;	/* vdevs with dirty state */
 	spa_allocs_use_t *spa_allocs_use;
