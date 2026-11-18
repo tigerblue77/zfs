@@ -157,6 +157,64 @@ jobs:
           ISSUE: ${{ github.event.pull_request.html_url }}
         run: |
           gh pr edit "$ISSUE" --add-label "Status: Code Review Needed"
+      - if: ${{ github.event.action == 'synchronize' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+        run: |
+          # A push that changes the code of the PR takes off the labels that
+          # the reviewed job gives from its reviews, whoever added them.  The
+          # code changes when the diff of the new head from its merge base
+          # with the base branch differs from that of the previous head,
+          # leaving out context lines, line numbers and blob names: a rebase
+          # or a merge of the base branch, squashed fixups or a reworded
+          # commit keep the labels, a rebase that resolves a conflict another
+          # way does not.  git reads the commits and trees of both heads and
+          # of the base branch, and the blobs of the files they change;
+          # nothing of the PR is checked out or run.  When the diffs cannot
+          # be compared, as when the previous head can no longer be fetched,
+          # the labels go too.
+          have=$(jq -r '.pull_request.labels[].name | select(test(
+              "^Status: (Contributor|Maintainer) (Reviewed|Approved)$"))' \
+              "$GITHUB_EVENT_PATH")
+          if [ -z "$have" ]; then
+            exit 0
+          fi
+          # The diff of commit $1 from its merge base with the base branch,
+          # without what a change of the base branch alone changes in it.
+          diff_of() {
+            local from
+            from=$(git merge-base "refs/base/$BASE" "$1") &&
+            git diff-tree -r -p -U0 --binary -M "$from" "$1" < /dev/null |
+                sed -E '/^(index|(dis)?similarity index) /d; s/^@@ .*/@@/'
+          }
+          export GIT_DIR=$RUNNER_TEMP/pr.git
+          git init -q --bare
+          git remote add origin "$GITHUB_SERVER_URL/$GH_REPO"
+          if git fetch -q --no-tags --filter=blob:none origin \
+              "+refs/heads/$BASE:refs/base/$BASE" "+$BEFORE:refs/before" \
+              "+$AFTER:refs/after" &&
+              diff_of refs/before > "$RUNNER_TEMP/before.diff" &&
+              diff_of refs/after > "$RUNNER_TEMP/after.diff"; then
+            if cmp -s "$RUNNER_TEMP/before.diff" "$RUNNER_TEMP/after.diff"; then
+              exit 0
+            fi
+          else
+            echo "::warning::Could not compare the code of $BEFORE and $AFTER"
+          fi
+          while read -r l; do
+            # Another run may have removed it already.
+            if ! error=$(gh api --silent -X DELETE \
+                "repos/$GH_REPO/issues/$PR/labels/$(jq -rn --arg l "$l" '$l | @uri')" \
+                2>&1 < /dev/null) && ! grep -q 'HTTP 404' <<< "$error"; then
+              echo "::warning::Could not remove \"$l\" from PR #$PR"
+            fi
+          done <<< "$have"
 
   area:
     runs-on: ubuntu-latest
@@ -373,26 +431,41 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
-          # An open PR gets "Status: Reviewed" once someone other than its
-          # author, and not a bot, has submitted a review of it, whatever its
-          # verdict, so that PRs reviewed by anyone stand out, and
-          # "Status: Maintainer Reviewed" when one of them can push to the
-          # repository, so that PRs a maintainer has reviewed do too.  It gets
+          # The review labels of an open PR tell who has reviewed the code it
+          # has now, other than its author and bots, and with what verdict:
+          # "Status: Maintainer" when the reviewer can push to the
+          # repository, "Status: Contributor" otherwise, then "Approved" when
+          # their latest approval, request for changes or dismissed review
+          # is an approval of that code, and "Reviewed" for any other review
+          # of it, a comment included.  A review is of that code when its
+          # commit is the head, or has the same diff as the push job compares
+          # them.  A label goes when another one outranks it in both,
+          # Maintainer above Contributor and Approved above Reviewed, so that
+          # a PR carries two at most, or when no review gives it any more,
+          # unless someone other than a bot added it last.  The PR gets
           # "Status: Revision Needed", unless it is a draft, when the latest
-          # verdict of someone with write access asks for changes to its
-          # head commit, which no push has replaced yet; a push removes it.
-          # A review event cannot label a PR from a fork, hence a periodic
-          # run.  It reads only the reviews submitted since 10 minutes
+          # verdict of someone with write access asks for changes to its head
+          # commit, which no push has replaced yet; a push removes it.  A
+          # review event cannot label a PR from a fork, hence a periodic run.
+          # Labels are added only for the reviews submitted since 10 minutes
           # before the last successful periodic run started, so that a
           # failed or skipped run misses none and a label removed by hand
           # comes back only with a new review (or once more, for a review
           # submitted just before a run); a manual run reads all of them.
           labels=$(gh label list --limit 1000 --json name --jq '.[].name')
-          for l in "Status: Reviewed|0e8a16|Reviewed by someone other than its author" \
-              "Status: Revision Needed|e60000|Changes are required for the PR to be accepted" \
-              "Status: Maintainer Reviewed|0a5c2b|Reviewed by someone with push access other than its author"; do
-            IFS='|' read -r name color desc <<< "$l"
-            if ! grep -qixF "$name" <<< "$labels"; then
+          # The last field names the label that one replaces, which is
+          # renamed so that the PRs that have it keep it.
+          for l in "Status: Contributor Reviewed|0e8a16|Reviewed by someone without push access other than its author|Status: Reviewed" \
+              "Status: Contributor Approved|2da44e|Approved by someone without push access other than its author|" \
+              "Status: Maintainer Reviewed|0a5c2b|Reviewed by someone with push access other than its author|" \
+              "Status: Maintainer Approved|116329|Approved by someone with push access other than its author|" \
+              "Status: Revision Needed|e60000|Changes are required for the PR to be accepted|"; do
+            IFS='|' read -r name color desc old <<< "$l"
+            if grep -qixF "$name" <<< "$labels"; then
+              continue
+            elif [ -n "$old" ] && grep -qixF "$old" <<< "$labels"; then
+              gh label edit "$old" --name "$name" --description "$desc"
+            else
               gh label create "$name" --color "$color" --description "$desc"
             fi
           done
@@ -421,6 +494,7 @@ jobs:
                     nodes {
                       number
                       author { login }
+                      baseRefName
                       headRefOid
                       isDraft
                       labels(first: 100) { nodes { name } }
@@ -430,6 +504,7 @@ jobs:
                           state
                           submittedAt
                           authorCanPushToRepository
+                          commit { oid }
                         }
                       }
                       latestOpinionatedReviews(first: 100, writersOnly: true) {
@@ -438,27 +513,196 @@ jobs:
                     }
                   }
                 }
-              }' --jq '.data.repository.pullRequests.nodes[]' |
-          jq -r --arg since "$since" '.number as $n | .author.login as $a |
-              .headRefOid as $head | [.labels.nodes[].name] as $have |
-              (select(any(.reviews.nodes[]; .state != "PENDING" and
-                  .submittedAt > $since and .author.__typename != "Bot" and
-                  .author.login != $a)) | "Status: Reviewed"),
-              (select(any(.reviews.nodes[]; .state != "PENDING" and
-                  .submittedAt > $since and .author.__typename != "Bot" and
-                  .author.login != $a and .authorCanPushToRepository)) |
-                  "Status: Maintainer Reviewed"),
-              (select((.isDraft | not) and
-                  any(.latestOpinionatedReviews.nodes[];
-                  .state == "CHANGES_REQUESTED" and .commit.oid == $head and
-                  .submittedAt > $since)) | "Status: Revision Needed") |
-              select(. as $l | all($have[]; . != $l)) | "\($n)\t\(.)"' |
-          while IFS=$'\t' read -r pr l; do
-            gh api --silent -X POST "repos/$GH_REPO/issues/$pr/labels" \
-                -f "labels[]=$l" < /dev/null
-            # GitHub allows 80 label changes a minute; leave room for the
-            # other jobs doing the same.
-            sleep 3
+              }' --jq '.data.repository.pullRequests.nodes[]' \
+              > "$RUNNER_TEMP/prs.json"
+          # The names that start with $ are jq variables.
+          # shellcheck disable=SC2016
+          defs='
+              # Who reviewed and their verdict, from the label.
+              def rank: {"Status: Contributor Reviewed": [0, 0],
+                  "Status: Contributor Approved": [0, 1],
+                  "Status: Maintainer Reviewed": [1, 0],
+                  "Status: Maintainer Approved": [1, 1]}[.];
+              # The labels that no other one outranks in both.
+              def top: . as $s | [.[] | rank as $r | select(all($s[]; rank |
+                  . == $r or .[0] < $r[0] or .[1] < $r[1]))] | unique;
+              # The reviews that count.
+              def reviews: .author.login as $a | [.reviews.nodes[] |
+                  select(.state != "PENDING" and .author.__typename != "Bot" and
+                  .author.login != $a)];
+              # The commits of the reviews other than the head, when a review
+              # can change the labels: the PR has some, or a review is new.
+              def compared($since): .headRefOid as $head |
+                  [.labels.nodes[].name | select(rank != null)] as $have |
+                  reviews | select($have != [] or
+                  any(.[]; .submittedAt > $since)) |
+                  [.[].commit.oid | select(. != null and . != $head)] | unique;
+              # The label of each reviewer of the commits in $current, and
+              # whether one of these reviews is new.
+              def verdicts($since; $current): [reviews |
+                  group_by(.author.login)[] | sort_by(.submittedAt) |
+                  (map(select(.state | IN("APPROVED", "CHANGES_REQUESTED",
+                      "DISMISSED"))) | last) as $v |
+                  map(select(.commit.oid | IN($current[]))) as $c |
+                  select($c != []) | {new: any($c[]; .submittedAt > $since),
+                  label: ("Status: " + (if any(.[]; .authorCanPushToRepository)
+                      then "Maintainer" else "Contributor" end) + " " +
+                      (if $v.state == "APPROVED" and
+                      ($v.commit.oid | IN($current[])) then "Approved"
+                      else "Reviewed" end))}];
+              # The labels the PR is to carry: those it has that a review
+              # gives or that are in $keep, and those of new reviews that no
+              # review outranks.
+              def wanted($since; $current; $keep):
+                  verdicts($since; $current) as $v | [$v[].label] as $given |
+                  ($given | top) as $top |
+                  [.labels.nodes[].name | select(rank != null) |
+                      select(IN($given[], $keep[]))] +
+                  [$v[] | select(.new) | .label | select(IN($top[]))] | top;
+              # The labels it has that no review gives, and that those it is
+              # sure to carry do not outrank.
+              def unsure($since; $current):
+                  wanted($since; $current; []) as $sure |
+                  [verdicts($since; $current)[].label] as $given |
+                  [.labels.nodes[].name | select(rank != null) |
+                      select(IN($given[]) | not) |
+                      select(IN($sure + [.] | top | .[]))];'
+          # The review of a commit other than the head counts when the diff
+          # of that commit is that of the head, as the push job compares
+          # them, for the PRs whose labels such a review can change.  git
+          # fetches the base branches and heads at once, and a failure fails
+          # the job, which the next run covers; then the other commits, one
+          # at a time if they cannot all be; then the blobs of all the diffs
+          # at once, which each diff would otherwise fetch on its own.
+          jq -r --arg since "$since" "$defs"'compared($since) as $c |
+              select($c != []) | [.baseRefName, .headRefOid, $c[]] | @tsv' \
+              "$RUNNER_TEMP/prs.json" > "$RUNNER_TEMP/compared"
+          if [ -s "$RUNNER_TEMP/compared" ]; then
+            export GIT_DIR=$RUNNER_TEMP/prs.git
+            git init -q --bare
+            git remote add origin "$GITHUB_SERVER_URL/$GH_REPO"
+            awk -F '\t' '{ print "+refs/heads/" $1 ":refs/base/" $1
+                print "+" $2 ":refs/c/" $2 }' "$RUNNER_TEMP/compared" |
+                sort -u |
+                git fetch -q --no-tags --filter=blob:none --stdin origin
+            awk -F '\t' '{ for (i = 3; i <= NF; i++) print $i }' \
+                "$RUNNER_TEMP/compared" | sort -u > "$RUNNER_TEMP/commits"
+            if ! sed 's|.*|+&:refs/c/&|' "$RUNNER_TEMP/commits" |
+                git fetch -q --no-tags --filter=blob:none --stdin origin; then
+              while read -r c; do
+                git fetch -q --no-tags --filter=blob:none origin \
+                    "+$c:refs/c/$c" < /dev/null ||
+                    echo "::warning::Could not fetch $c"
+              done < "$RUNNER_TEMP/commits"
+            fi
+            awk -F '\t' '{ for (i = 2; i <= NF; i++) print $1 "\t" $i }' \
+                "$RUNNER_TEMP/compared" |
+            while IFS=$'\t' read -r base c; do
+              if git show-ref -q --verify "refs/c/$c"; then
+                git diff-tree -r "$(git merge-base "refs/base/$base" \
+                    "refs/c/$c")" "refs/c/$c" < /dev/null
+              fi
+            done | awk '{ print $3; print $4 }' | grep -v '^0*$' |
+                sort -u > "$RUNNER_TEMP/blobs" || true
+            if [ -s "$RUNNER_TEMP/blobs" ]; then
+              git -c fetch.negotiationAlgorithm=noop fetch -q --no-tags \
+                  --no-write-fetch-head --filter=blob:none --stdin origin \
+                  < "$RUNNER_TEMP/blobs" || true
+            fi
+          fi
+          # The diff of commit $2 from its merge base with base branch $1,
+          # as the push job compares them.
+          diff_of() {
+            local from
+            from=$(git merge-base "refs/base/$1" "refs/c/$2") &&
+            git diff-tree -r -p -U0 --binary -M "$from" "refs/c/$2" \
+                < /dev/null |
+                sed -E '/^(index|(dis)?similarity index) /d; s/^@@ .*/@@/'
+          }
+          jq -c . "$RUNNER_TEMP/prs.json" | while read -r p; do
+            IFS=$'\t' read -r pr base head compared <<< "$(jq -r \
+                --arg since "$since" "$defs"'[.number, .baseRefName,
+                .headRefOid, (compared($since) | join(" "))] | @tsv' <<< "$p")"
+            same=("$head")
+            failed=
+            if [ -n "$compared" ]; then
+              if diff_of "$base" "$head" > "$RUNNER_TEMP/head.diff"; then
+                for c in $compared; do
+                  if git show-ref -q --verify "refs/c/$c" &&
+                      diff_of "$base" "$c" > "$RUNNER_TEMP/commit.diff"; then
+                    if cmp -s "$RUNNER_TEMP/head.diff" \
+                        "$RUNNER_TEMP/commit.diff"; then
+                      same+=("$c")
+                    fi
+                  else
+                    failed=true
+                  fi
+                done
+              else
+                failed=true
+              fi
+            fi
+            current=$(jq -nc '$ARGS.positional' --args "${same[@]}")
+            # A label that no review gives any more stays when a commit of a
+            # review could not be compared, or when someone other than a bot
+            # added it last; the names that start with $ are GraphQL
+            # variables.
+            unsure=$(jq -c --arg since "$since" --argjson current "$current" \
+                "$defs"'unsure($since; $current)' <<< "$p")
+            keep=$unsure
+            if [ "$unsure" != '[]' ] && [ -z "$failed" ]; then
+              # shellcheck disable=SC2016
+              if ! keep=$(gh api graphql -F number="$pr" \
+                  -f owner="${GH_REPO%/*}" -f repo="${GH_REPO#*/}" -f query='
+                  query($owner: String!, $repo: String!, $number: Int!) {
+                    repository(owner: $owner, name: $repo) {
+                      pullRequest(number: $number) {
+                        timelineItems(last: 100, itemTypes: [LABELED_EVENT]) {
+                          nodes {
+                            ... on LabeledEvent {
+                              actor { __typename } label { name }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }' < /dev/null | jq -c --argjson unsure "$unsure" '
+                  (reduce (.data.repository.pullRequest.timelineItems.nodes[] |
+                      select(.label)) as $e ({};
+                      .[$e.label.name] = $e.actor.__typename)) as $by |
+                  [$unsure[] | select($by[.] != "Bot")]'); then
+                echo "::warning::Could not read who labelled PR #$pr"
+                keep=$unsure
+              fi
+            fi
+            jq -r --arg since "$since" --argjson current "$current" \
+                --argjson keep "$keep" "$defs"'.headRefOid as $head |
+                [.labels.nodes[].name] as $have |
+                wanted($since; $current; $keep) as $want |
+                ($want - $have | .[] | "POST\t\(.)"),
+                ([$have[] | select(rank != null)] - $want | .[] |
+                    "DELETE\t\(.)"),
+                (select((.isDraft | not) and
+                    all($have[]; . != "Status: Revision Needed") and
+                    any(.latestOpinionatedReviews.nodes[];
+                    .state == "CHANGES_REQUESTED" and .commit.oid == $head and
+                    .submittedAt > $since)) |
+                    "POST\tStatus: Revision Needed")' <<< "$p" |
+            while IFS=$'\t' read -r method l; do
+              if [ "$method" = POST ]; then
+                gh api --silent -X POST "repos/$GH_REPO/issues/$pr/labels" \
+                    -f "labels[]=$l" < /dev/null
+              # Another run may have removed it already.
+              elif ! error=$(gh api --silent -X DELETE \
+                  "repos/$GH_REPO/issues/$pr/labels/$(jq -rn --arg l "$l" '$l | @uri')" \
+                  2>&1 < /dev/null) && ! grep -q 'HTTP 404' <<< "$error"; then
+                echo "$error" >&2
+                exit 1
+              fi
+              # GitHub allows 80 label changes a minute; leave room for the
+              # other jobs doing the same.
+              sleep 3
+            done
           done
 
   conflict:
