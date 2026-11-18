@@ -184,6 +184,15 @@ static uint_t zfs_vdev_nia_delay = 5;
 static uint_t zfs_vdev_nia_credit = 5;
 
 /*
+ * When non-zero, sync reads and sync writes active for longer than this
+ * many milliseconds stop counting against their class's limits, so that
+ * one whose completion is held up below the queue does not hold back
+ * those queued behind it.  At most *_max_active of them per class are
+ * discounted.
+ */
+static uint_t zfs_vdev_queue_age_ms = 0;
+
+/*
  * To reduce IOPs, we aggregate small adjacent I/Os into one large I/O.
  * For read I/Os, we also aggregate across small adjacency gaps; for writes
  * we include spans of optional I/Os to aid aggregation at the disk even when
@@ -391,17 +400,53 @@ vdev_queue_class_max_active(vdev_queue_t *vq, zio_priority_t p)
 }
 
 /*
+ * Count the sync reads and sync writes that took their slot before limit.
+ * vq_active_list is in issue order, so the walk stops at the first later
+ * one; issue times are read before vq_lock is taken, so one issued
+ * concurrently may be missed.
+ */
+static void
+vdev_queue_count_aged(vdev_queue_t *vq, hrtime_t limit, uint32_t *aged)
+{
+	for (zio_t *zio = list_head(&vq->vq_active_list);
+	    zio != NULL && zio->io_qissue < limit;
+	    zio = list_next(&vq->vq_active_list, zio)) {
+		zio_priority_t p = zio->io_priority;
+		if (p == ZIO_PRIORITY_SYNC_READ || p == ZIO_PRIORITY_SYNC_WRITE)
+			aged[p]++;
+	}
+}
+
+static uint32_t
+vdev_queue_class_active(vdev_queue_t *vq, zio_priority_t p,
+    const uint32_t *aged)
+{
+	uint32_t active = vq->vq_cactive[p];
+
+	ASSERT3U(aged[p], <=, active);
+	if (aged[p] != 0)
+		active -= MIN(aged[p], vdev_queue_class_max_active(vq, p));
+	return (active);
+}
+
+/*
  * Return the i/o class to issue from, or ZIO_PRIORITY_NUM_QUEUEABLE if
  * there is no eligible class.
  */
 static zio_priority_t
-vdev_queue_class_to_issue(vdev_queue_t *vq)
+vdev_queue_class_to_issue(vdev_queue_t *vq, hrtime_t now)
 {
 	uint32_t cq = vq->vq_cqueued;
+	uint32_t aged[ZIO_PRIORITY_NUM_QUEUEABLE] = { 0 };
+	uint_t age_ms = zfs_vdev_queue_age_ms;
 	zio_priority_t p, p1;
 
 	if (cq == 0 || vq->vq_active >= zfs_vdev_max_active)
 		return (ZIO_PRIORITY_NUM_QUEUEABLE);
+
+	if (age_ms != 0 && (cq & ((1U << ZIO_PRIORITY_SYNC_READ) |
+	    (1U << ZIO_PRIORITY_SYNC_WRITE))) != 0)
+		vdev_queue_count_aged(vq, now - MSEC2NSEC(age_ms), aged);
 
 	/*
 	 * Find a queue that has not reached its minimum # outstanding i/os.
@@ -412,12 +457,14 @@ vdev_queue_class_to_issue(vdev_queue_t *vq)
 	if (p1 >= ZIO_PRIORITY_NUM_QUEUEABLE)
 		p1 = 0;
 	for (p = p1; p < ZIO_PRIORITY_NUM_QUEUEABLE; p++) {
-		if ((cq & (1U << p)) != 0 && vq->vq_cactive[p] <
+		if ((cq & (1U << p)) != 0 &&
+		    vdev_queue_class_active(vq, p, aged) <
 		    vdev_queue_class_min_active(vq, p))
 			goto found;
 	}
 	for (p = 0; p < p1; p++) {
-		if ((cq & (1U << p)) != 0 && vq->vq_cactive[p] <
+		if ((cq & (1U << p)) != 0 &&
+		    vdev_queue_class_active(vq, p, aged) <
 		    vdev_queue_class_min_active(vq, p))
 			goto found;
 	}
@@ -427,7 +474,8 @@ vdev_queue_class_to_issue(vdev_queue_t *vq)
 	 * maximum # outstanding i/os.
 	 */
 	for (p = 0; p < ZIO_PRIORITY_NUM_QUEUEABLE; p++) {
-		if ((cq & (1U << p)) != 0 && vq->vq_cactive[p] <
+		if ((cq & (1U << p)) != 0 &&
+		    vdev_queue_class_active(vq, p, aged) <
 		    vdev_queue_class_max_active(vq, p))
 			break;
 	}
@@ -524,10 +572,11 @@ vdev_queue_is_interactive(zio_priority_t p)
 }
 
 static void
-vdev_queue_pending_add(vdev_queue_t *vq, zio_t *zio)
+vdev_queue_pending_add(vdev_queue_t *vq, zio_t *zio, hrtime_t now)
 {
 	ASSERT(MUTEX_HELD(&vq->vq_lock));
 	ASSERT3U(zio->io_priority, <, ZIO_PRIORITY_NUM_QUEUEABLE);
+	zio->io_qissue = now;
 	vq->vq_cactive[zio->io_priority]++;
 	vq->vq_active++;
 	if (vdev_queue_is_interactive(zio->io_priority)) {
@@ -798,7 +847,7 @@ vdev_queue_aggregate(vdev_queue_t *vq, zio_t *zio)
 }
 
 static zio_t *
-vdev_queue_io_to_issue(vdev_queue_t *vq)
+vdev_queue_io_to_issue(vdev_queue_t *vq, hrtime_t now)
 {
 	zio_t *zio, *aio;
 	zio_priority_t p;
@@ -808,7 +857,7 @@ vdev_queue_io_to_issue(vdev_queue_t *vq)
 again:
 	ASSERT(MUTEX_HELD(&vq->vq_lock));
 
-	p = vdev_queue_class_to_issue(vq);
+	p = vdev_queue_class_to_issue(vq, now);
 
 	if (p == ZIO_PRIORITY_NUM_QUEUEABLE) {
 		/* No eligible queued i/os */
@@ -857,12 +906,13 @@ again:
 			mutex_exit(&vq->vq_lock);
 			zio_vdev_io_bypass(zio);
 			zio_execute(zio);
+			now = gethrtime();
 			mutex_enter(&vq->vq_lock);
 			goto again;
 		}
 	}
 
-	vdev_queue_pending_add(vq, zio);
+	vdev_queue_pending_add(vq, zio, now);
 	vq->vq_last_offset = zio->io_offset + zio->io_size;
 
 	return (zio);
@@ -960,7 +1010,7 @@ vdev_queue_io(zio_t *zio)
 
 	mutex_enter(&vq->vq_lock);
 	vdev_queue_io_add(vq, zio);
-	nio = vdev_queue_io_to_issue(vq);
+	nio = vdev_queue_io_to_issue(vq, zio->io_timestamp);
 	mutex_exit(&vq->vq_lock);
 
 	if (nio == NULL)
@@ -1006,7 +1056,7 @@ vdev_queue_io_done(zio_t *zio)
 	mutex_enter(&vq->vq_lock);
 	vdev_queue_pending_remove(vq, zio);
 
-	while ((nio = vdev_queue_io_to_issue(vq)) != NULL) {
+	while ((nio = vdev_queue_io_to_issue(vq, now)) != NULL) {
 		mutex_exit(&vq->vq_lock);
 		if (nio->io_done == vdev_queue_agg_io_done) {
 			while ((dio = zio_walk_parents(nio, &zl)) != NULL) {
@@ -1019,6 +1069,7 @@ vdev_queue_io_done(zio_t *zio)
 			zio_vdev_io_reissue(nio);
 			zio_execute(nio);
 		}
+		now = gethrtime();
 		mutex_enter(&vq->vq_lock);
 	}
 
@@ -1192,3 +1243,6 @@ ZFS_MODULE_PARAM(zfs_vdev, zfs_vdev_, nia_credit, UINT, ZMOD_RW,
 
 ZFS_MODULE_PARAM(zfs_vdev, zfs_vdev_, nia_delay, UINT, ZMOD_RW,
 	"Number of non-interactive I/Os before _max_active");
+
+ZFS_MODULE_PARAM(zfs_vdev, zfs_vdev_, queue_age_ms, UINT, ZMOD_RW,
+	"Age in ms after which active sync I/Os stop counting against limits");
