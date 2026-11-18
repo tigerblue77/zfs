@@ -1644,7 +1644,9 @@ spa_deactivate_mos_feature(spa_t *spa, const char *feature)
 /*
  * Return the spa_t associated with given pool_guid, if it exists.  If
  * device_guid is non-zero, determine whether the pool exists *and* contains
- * a device with the specified device_guid.
+ * a device with the specified device_guid.  A pool whose guid
+ * spa_change_guid() is changing is found by both guids until the change
+ * has synced: its labels may carry either.
  */
 spa_t *
 spa_by_guid(uint64_t pool_guid, uint64_t device_guid)
@@ -1659,7 +1661,9 @@ spa_by_guid(uint64_t pool_guid, uint64_t device_guid)
 			continue;
 		if (spa->spa_root_vdev == NULL)
 			continue;
-		if (spa_guid(spa) == pool_guid) {
+		if (spa_guid(spa) == pool_guid ||
+		    (spa->spa_pending_guid != 0 &&
+		    spa->spa_pending_guid == pool_guid)) {
 			if (device_guid == 0)
 				break;
 
