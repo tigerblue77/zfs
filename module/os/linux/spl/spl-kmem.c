@@ -130,6 +130,58 @@ kmem_strfree(char *str)
 }
 EXPORT_SYMBOL(kmem_strfree);
 
+/*
+ * Return the flags to use for a vmalloc() of the given size.
+ *
+ * Since Linux 6.19, vmalloc() first tries to back an area with pages of
+ * order up to ilog2(nr_pages).  Those attempts skip direct reclaim, but
+ * each failure wakes kswapd, although the order-0 fallback then succeeds.
+ * When free memory is fragmented the attempts fail however much of it
+ * there is, and kswapd, which cannot produce a costly order by reclaim,
+ * shrinks the ARC each time.
+ *
+ * So a costly vmalloc() does not wake kswapd itself; spl_vmalloc_costly()
+ * keeps an order-0 wake-up.  This is limited to masks that allow direct
+ * reclaim: the order-0 allocations keep it, so the request cannot fail
+ * where it would not have failed before.
+ */
+static inline gfp_t
+spl_vmalloc_lflags(size_t size, gfp_t lflags)
+{
+	if ((size > PAGE_SIZE << PAGE_ALLOC_COSTLY_ORDER) &&
+	    (lflags & __GFP_DIRECT_RECLAIM))
+		lflags &= ~__GFP_KSWAPD_RECLAIM;
+
+	return (lflags);
+}
+
+/*
+ * vmalloc() with the flags of spl_vmalloc_lflags().  Without
+ * __GFP_KSWAPD_RECLAIM its order-0 pages no longer wake kswapd, neither
+ * below the low watermark nor when they reclaim directly, and a watermark
+ * boost that they cause no longer arms a wake-up either.  When free memory
+ * is fragmented most pages of a costly request are such order-0 pages, and
+ * without their wake-up the reclaim falls to the allocating threads.
+ * wakeup_kswapd() is not exported, so keep the wake-up this way: first
+ * make one order-0 attempt that may wake kswapd but does not reclaim, and
+ * free the page at once.
+ */
+static void *
+spl_vmalloc_costly(size_t size, gfp_t lflags)
+{
+	gfp_t vflags = spl_vmalloc_lflags(size, lflags);
+
+	if (vflags != lflags) {
+		struct page *page = alloc_page(__GFP_KSWAPD_RECLAIM |
+		    __GFP_HIGHMEM | __GFP_NOWARN);
+
+		if (page != NULL)
+			__free_page(page);
+	}
+
+	return (spl_vmalloc(size, vflags));
+}
+
 void *
 spl_kvmalloc(size_t size, gfp_t lflags)
 {
@@ -211,7 +263,7 @@ spl_kvmalloc(size_t size, gfp_t lflags)
 	 * __GFP_COMP, which is not a valid flag for vmalloc.
 	 */
 	lflags &= ~__GFP_COMP;
-	return (spl_vmalloc(size, lflags));
+	return (spl_vmalloc_costly(size, lflags));
 }
 
 /*
@@ -260,7 +312,7 @@ spl_kmem_alloc_impl(size_t size, int flags, int node)
 		 */
 		if (size > spl_kmem_alloc_max) {
 			if (flags & KM_VMEM) {
-				ptr = spl_vmalloc(size, lflags);
+				ptr = spl_vmalloc_costly(size, lflags);
 			} else {
 				return (NULL);
 			}
