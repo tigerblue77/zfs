@@ -468,7 +468,7 @@ aes_common_init_ctx(aes_ctx_t *aes_ctx, crypto_spi_ctx_template_t *template,
 			return (CRYPTO_MECHANISM_PARAM_INVALID);
 		}
 		rv = ccm_init_ctx((ccm_ctx_t *)aes_ctx, mechanism->cm_param,
-		    kmflag, is_encrypt_init, AES_BLOCK_LEN, aes_encrypt_block,
+		    is_encrypt_init, AES_BLOCK_LEN, aes_encrypt_block,
 		    aes_xor_block);
 		break;
 	case AES_GCM_MECH_INFO_TYPE:
