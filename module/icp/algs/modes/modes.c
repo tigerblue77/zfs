@@ -149,7 +149,7 @@ explicit_memset(void *s, int c, size_t n)
  *
  * ctx->gcm_remainder may contain a plaintext remainder. ctx->gcm_H and
  * ctx->gcm_Htable contain the hash sub key which protects authentication.
- * ctx->gcm_pt_buf contains the plaintext result of decryption.
+ * ctx->gcm_pt_buf may contain the plaintext result of decryption.
  *
  * Although extremely unlikely, ctx->gcm_J0 and ctx->gcm_tmp could be used for
  * a known plaintext attack, they consist of the IV and the first and last
