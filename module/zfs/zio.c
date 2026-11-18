@@ -2302,14 +2302,11 @@ zio_issue_async(zio_t *zio)
 	/*
 	 * The thread that writes out a ZIL block waits for it next, so a
 	 * taskq would only add a thread wakeup to the latency of each
-	 * synchronous write.  Issue the block here, as Direct I/O writes are;
-	 * the vdevs issue its I/O as ZFS's own threads do (ZIO_FLAG_ZILWRITE),
-	 * not as this writer.  Bulk slog writes, at ZIO_PRIORITY_ASYNC_WRITE,
-	 * keep the taskq.
+	 * synchronous write.  When the ZIL asks for it, issue the block here,
+	 * as Direct I/O writes are; the vdevs issue its I/O as ZFS's own
+	 * threads do (ZIO_FLAG_ZILWRITE), not as this writer.
 	 */
-	if (zio->io_priority == ZIO_PRIORITY_SYNC_WRITE &&
-	    zio->io_bookmark.zb_level == ZB_ZIL_LEVEL &&
-	    zio->io_bookmark.zb_object == ZB_ZIL_OBJECT)
+	if (zio->io_flags & ZIO_FLAG_ISSUE_INLINE)
 		return (zio);
 #endif
 

@@ -2764,6 +2764,20 @@ The default value of
 .Sy 100%
 will create a maximum of one thread per CPU.
 .
+.It Sy zil_issue_inline_committers Ns = Ns Sy 4 Pq uint
+A ZIL block written at synchronous priority is issued by the thread that
+writes it out, rather than by the write issue taskq, while at most this many
+threads are committing to the same ZIL.
+Issuing inline saves a thread wakeup in the latency of each synchronous write;
+with more committers, the taskq lets more log records share each block.
+.Sy 0
+always uses the taskq,
+.Sy UINT_MAX
+always issues inline.
+Blocks written at asynchronous priority
+.Pq see Sy zil_slog_bulk
+always use the taskq, and so does every ZIL block on Linux kernels before 5.0.
+.
 .It Sy zil_maxblocksize Ns = Ns Sy 131072 Ns B Po 128 KiB Pc Pq uint
 This sets the maximum block size used by the ZIL.
 On very fragmented pools, lowering this
