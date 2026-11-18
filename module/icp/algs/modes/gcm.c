@@ -327,31 +327,23 @@ gcm_mode_decrypt_contiguous_blocks(gcm_ctx_t *ctx, char *data, size_t length,
 {
 	(void) out, (void) block_size, (void) encrypt_block, (void) copy_block,
 	    (void) xor_block;
-	size_t new_len;
-	uint8_t *new;
+	size_t total = ctx->gcm_ct_len + ctx->gcm_tag_len;
+
+	if (length > total - ctx->gcm_processed_data_len)
+		return (CRYPTO_ENCRYPTED_DATA_LEN_RANGE);
 
 	/*
 	 * Copy contiguous ciphertext input blocks to plaintext buffer.
-	 * Ciphertext will be decrypted in the final.
+	 * Ciphertext will be decrypted in the final. The buffer is allocated
+	 * once, at the full length of the ciphertext and tag.
 	 */
 	if (length > 0) {
-		new_len = ctx->gcm_pt_buf_len + length;
-		new = vmem_alloc(new_len, KM_SLEEP);
-		if (new == NULL) {
-			vmem_free(ctx->gcm_pt_buf, ctx->gcm_pt_buf_len);
-			ctx->gcm_pt_buf = NULL;
-			return (CRYPTO_HOST_MEMORY);
+		if (ctx->gcm_pt_buf == NULL) {
+			ctx->gcm_pt_buf = vmem_alloc(total, KM_SLEEP);
+			if (ctx->gcm_pt_buf == NULL)
+				return (CRYPTO_HOST_MEMORY);
+			ctx->gcm_pt_buf_len = total;
 		}
-
-		if (ctx->gcm_pt_buf != NULL) {
-			memcpy(new, ctx->gcm_pt_buf, ctx->gcm_pt_buf_len);
-			vmem_free(ctx->gcm_pt_buf, ctx->gcm_pt_buf_len);
-		} else {
-			ASSERT0(ctx->gcm_pt_buf_len);
-		}
-
-		ctx->gcm_pt_buf = new;
-		ctx->gcm_pt_buf_len = new_len;
 		memcpy(&ctx->gcm_pt_buf[ctx->gcm_processed_data_len], data,
 		    length);
 		ctx->gcm_processed_data_len += length;

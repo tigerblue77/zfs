@@ -143,6 +143,9 @@ typedef enum gcm_impl {
  *
  * gcm_pt_buf_len:	Length of the plaintext buffer.
  *
+ * gcm_ct_len:		Length of the ciphertext without the tag (decrypt),
+ *			set by the caller before the first call.
+ *
  * gcm_H:		Subkey.
  *
  * gcm_Htable:		Pre-computed and pre-shifted H, H^2, ... H^6 for the
@@ -175,6 +178,7 @@ typedef struct gcm_ctx {
 #ifdef CAN_USE_GCM_ASM
 	enum gcm_impl impl;
 #endif
+	size_t gcm_ct_len;
 } gcm_ctx_t;
 
 #define	gcm_keysched		gcm_common.cc_keysched
