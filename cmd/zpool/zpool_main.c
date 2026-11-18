@@ -9791,8 +9791,6 @@ class_vdevs_nvlist(zpool_handle_t *zhp, status_cbdata_t *cb, nvlist_t *nv,
 		uint64_t is_log = B_FALSE;
 		const char *bias = NULL;
 		const char *type = NULL;
-		char *name = zpool_vdev_name(g_zfs, zhp, child[c],
-		    cb->cb_name_flags | VDEV_NAME_TYPE_ID);
 
 		(void) nvlist_lookup_uint64(child[c], ZPOOL_CONFIG_IS_LOG,
 		    &is_log);
@@ -9818,7 +9816,6 @@ class_vdevs_nvlist(zpool_handle_t *zhp, status_cbdata_t *cb, nvlist_t *nv,
 			vdev_stats_nvlist(zhp, cb, child[c], 2, B_FALSE,
 			    NULL, class_obj);
 		}
-		free(name);
 	}
 	if (!cb->cb_flat_vdevs) {
 		if (!nvlist_empty(class_obj))
