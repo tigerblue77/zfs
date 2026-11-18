@@ -286,7 +286,12 @@ aes_decrypt_atomic(crypto_mechanism_t *mechanism,
 		length_needed = aes_ctx.ac_data_len;
 		break;
 	case AES_GCM_MECH_INFO_TYPE:
+		if (ciphertext->cd_length < aes_ctx.ac_tag_len) {
+			ret = CRYPTO_ENCRYPTED_DATA_LEN_RANGE;
+			goto out;
+		}
 		length_needed = ciphertext->cd_length - aes_ctx.ac_tag_len;
+		aes_ctx.acu.acu_gcm.gcm_ct_len = length_needed;
 		break;
 	default:
 		__builtin_unreachable();
