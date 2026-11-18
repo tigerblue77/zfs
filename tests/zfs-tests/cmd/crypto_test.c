@@ -90,6 +90,12 @@ static const char *crypto_errstr[] = {
 	[CRYPTO_UNKNOWN_PROVIDER] =	    "CRYPTO_UNKNOWN_PROVIDER",
 };
 
+/*
+ * The decrypt output buffer is filled with this before each decrypt; after a
+ * failed decrypt, it may only hold this or zeroes.
+ */
+#define	DECRYPT_FILL	0xa5
+
 /* what to output; driven by -v switch */
 typedef enum {
 	OUT_SUMMARY,
@@ -802,6 +808,7 @@ test_result(const crypto_test_t *test, int encrypt_rv, uint8_t *encrypt_buf,
 {
 	boolean_t ct_match = B_FALSE, tag_match = B_FALSE, msg_match = B_FALSE;
 	boolean_t encrypt_pass = B_FALSE, decrypt_pass = B_FALSE;
+	boolean_t decrypt_left = B_FALSE;
 	boolean_t pass = B_FALSE;
 
 	/* check if the encrypt output matches the expected ciphertext */
@@ -819,6 +826,18 @@ test_result(const crypto_test_t *test, int encrypt_rv, uint8_t *encrypt_buf,
 	/* check if the decrypt output matches the expected plaintext */
 	if (memcmp(decrypt_buf, test->msg.val, test->msg.len) == 0)
 		msg_match = B_TRUE;
+
+	/*
+	 * check that a failed decrypt left no data in the output, such as
+	 * plaintext that the tag (MAC) does not authenticate
+	 */
+	if (decrypt_rv != CRYPTO_SUCCESS) {
+		for (size_t i = 0; i < test->ct.len; i++) {
+			if (decrypt_buf[i] != DECRYPT_FILL &&
+			    decrypt_buf[i] != 0)
+				decrypt_left = B_TRUE;
+		}
+	}
 
 	if (test->result == RS_VALID) {
 		/*
@@ -851,7 +870,7 @@ test_result(const crypto_test_t *test, int encrypt_rv, uint8_t *encrypt_buf,
 		 */
 		if (encrypt_rv != CRYPTO_SUCCESS || !tag_match)
 			encrypt_pass = B_TRUE;
-		if (decrypt_rv != CRYPTO_SUCCESS)
+		if (decrypt_rv != CRYPTO_SUCCESS && !decrypt_left)
 			decrypt_pass = B_TRUE;
 	}
 
@@ -911,6 +930,12 @@ test_result(const crypto_test_t *test, int encrypt_rv, uint8_t *encrypt_buf,
 		printf("  decrypt rv = 0x%02x [%s]\n", decrypt_rv,
 		    crypto_errstr[decrypt_rv] ?
 		    crypto_errstr[decrypt_rv] : "???");
+
+		/* print data left in the output by a failed decrypt */
+		if (decrypt_left) {
+			printf("  failed decrypt left data in the output:\n");
+			hexdump("got", decrypt_buf, test->ct.len);
+		}
 
 		/* print mismatched plaintext */
 		if (!msg_match) {
@@ -972,6 +997,7 @@ run_tests(const char *alginfo, const crypto_test_t *tests,
 		init_mech(&mech, test->alg, test->iv.val, test->iv.len,
 		    test->aad.val, test->aad.len, test->msg.len, test->tag.len,
 		    B_TRUE);
+		memset(decrypt_buf, DECRYPT_FILL, sizeof (decrypt_buf));
 		int decrypt_rv = decrypt_one(&mech,
 		    test->key.val, test->key.len,
 		    test->ct.val, test->ct.len,
