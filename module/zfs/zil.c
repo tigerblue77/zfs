@@ -857,7 +857,7 @@ zil_alloc_lwb(zilog_t *zilog, blkptr_t *bp, int min_sz, int sz,
 	lwb->lwb_child_zio = NULL;
 	lwb->lwb_write_zio = NULL;
 	lwb->lwb_root_zio = NULL;
-	lwb->lwb_issued_timestamp = 0;
+	lwb->lwb_close_timestamp = 0;
 	lwb->lwb_issued_txg = 0;
 	lwb->lwb_alloc_txg = txg;
 	lwb->lwb_max_txg = 0;
@@ -1526,7 +1526,7 @@ zil_lwb_flush_vdevs_done(zio_t *zio)
 
 	spa_config_exit(zilog->zl_spa, SCL_STATE, lwb);
 
-	hrtime_t t = gethrtime() - lwb->lwb_issued_timestamp;
+	hrtime_t t = gethrtime() - lwb->lwb_close_timestamp;
 
 	mutex_enter(&zilog->zl_lock);
 
@@ -1947,6 +1947,13 @@ zil_lwb_write_close(zilog_t *zilog, lwb_t *lwb)
 	lwb->lwb_state = LWB_STATE_CLOSED;
 
 	/*
+	 * zfs_commit_timeout_pct is a share of the latency an itx sees once
+	 * its lwb stops taking records, so time the lwb from here to its
+	 * flush, whichever thread issues it and however long that takes.
+	 */
+	lwb->lwb_close_timestamp = gethrtime();
+
+	/*
 	 * If there was an allocation failure then returned NULL will trigger
 	 * zil_commit_writer_stall() at the caller.  This is inherently racy,
 	 * since allocation may not have happened yet.
@@ -2212,7 +2219,6 @@ next_lwb:
 		ZIL_STAT_INCR(zilog, zil_itx_metaslab_normal_alloc,
 		    BP_GET_LSIZE(&lwb->lwb_blk));
 	}
-	lwb->lwb_issued_timestamp = gethrtime();
 	if (lwb->lwb_child_zio)
 		zio_nowait(lwb->lwb_child_zio);
 	zio_nowait(lwb->lwb_write_zio);

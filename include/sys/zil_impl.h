@@ -112,7 +112,7 @@ typedef struct lwb {
 	zio_t		*lwb_child_zio;	/* parent zio for children */
 	zio_t		*lwb_write_zio;	/* zio for the lwb buffer */
 	zio_t		*lwb_root_zio;	/* root zio for lwb write and flushes */
-	hrtime_t	lwb_issued_timestamp; /* when was the lwb issued? */
+	hrtime_t	lwb_close_timestamp; /* when was the lwb closed? */
 	uint64_t	lwb_issued_txg;	/* the txg when the write is issued */
 	uint64_t	lwb_alloc_txg;	/* the txg when lwb_blk is allocated */
 	uint64_t	lwb_max_txg;	/* highest txg in this lwb */
@@ -192,7 +192,7 @@ struct zilog {
 	objset_t	*zl_os;		/* object set we're logging */
 	zil_get_data_t	*zl_get_data;	/* callback to get object content */
 	lwb_t		*zl_last_lwb_opened; /* most recent lwb opened */
-	hrtime_t	zl_last_lwb_latency; /* zio latency of last lwb done */
+	hrtime_t	zl_last_lwb_latency; /* lwb close-to-flush latency */
 	uint64_t	zl_lr_seq;	/* on-disk log record sequence number */
 	uint64_t	zl_commit_lr_seq; /* last committed on-disk lr seq */
 	uint64_t	zl_lwb_error_txg; /* issue txg of last failed lwb */

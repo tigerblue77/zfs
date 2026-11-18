@@ -1162,8 +1162,9 @@ or else the daemon may not trigger any action.
 This controls the amount of time that a ZIL block (lwb) will remain "open"
 when it isn't "full", and it has a thread waiting for it to be committed to
 stable storage.
-The timeout is scaled based on a percentage of the last lwb
-latency to avoid significantly impacting the latency of each individual
+The timeout is scaled based on a percentage of the latency of recent lwbs,
+from when each was closed until it was on stable storage,
+to avoid significantly impacting the latency of each individual
 transaction record (itx).
 .
 .It Sy zfs_compressed_arc_enabled Ns = Ns Sy 1 Ns | Ns 0 Pq int
