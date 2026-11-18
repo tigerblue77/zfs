@@ -1480,6 +1480,12 @@ vdev_autotrim_thread(void *arg)
 
 	spa_config_exit(spa, SCL_CONFIG, FTAG);
 
+	if (zio_injection_enabled) {
+		int ignored = 0;
+		(void) zio_handle_func_injection(spa,
+		    "vdev_autotrim_thread:exit", &ignored);
+	}
+
 	/*
 	 * When exiting because the autotrim property was set to off, then
 	 * abandon any unprocessed ms_trim ranges to reclaim the memory.

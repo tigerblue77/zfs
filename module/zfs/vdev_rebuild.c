@@ -945,6 +945,12 @@ vdev_rebuild_thread(void *arg)
 	mutex_destroy(&vr->vr_io_lock);
 	cv_destroy(&vr->vr_io_cv);
 
+	if (zio_injection_enabled) {
+		int ignored = 0;
+		(void) zio_handle_func_injection(spa,
+		    "vdev_rebuild_thread:exit", &ignored);
+	}
+
 	spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
 
 	dmu_tx_t *tx = dmu_tx_create_dd(dp->dp_mos_dir);
@@ -1094,7 +1100,7 @@ vdev_rebuild_restart_impl(vdev_t *vd)
 void
 vdev_rebuild_restart(spa_t *spa)
 {
-	ASSERT(spa_namespace_held() ||
+	ASSERT(MUTEX_HELD(&spa->spa_vdev_top_lock) ||
 	    spa->spa_load_thread == curthread);
 
 	vdev_rebuild_restart_impl(spa->spa_root_vdev);
@@ -1110,6 +1116,7 @@ vdev_rebuild_stop_wait(vdev_t *vd)
 	spa_t *spa = vd->vdev_spa;
 
 	ASSERT(spa_namespace_held() ||
+	    MUTEX_HELD(&spa->spa_vdev_top_lock) ||
 	    spa->spa_export_thread == curthread);
 
 	if (vd == spa->spa_root_vdev) {
