@@ -206,6 +206,7 @@ struct zilog {
 	uint8_t		zl_replay;	/* replaying records while set */
 	uint8_t		zl_stop_sync;	/* for debugging */
 	kmutex_t	zl_issuer_lock;	/* single writer, per ZIL, at a time */
+	uint32_t	zl_issuer_waiters; /* zl_issuer_lock waiters */
 	uint8_t		zl_logbias;	/* latency or throughput */
 	uint8_t		zl_sync;	/* synchronous or asynchronous */
 	int		zl_parse_error;	/* last zil_parse() error */
