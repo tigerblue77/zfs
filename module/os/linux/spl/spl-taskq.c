@@ -748,7 +748,14 @@ taskq_dispatch(taskq_t *tq, task_func_t func, void *arg, uint_t flags)
 
 	spin_unlock(&t->tqent_lock);
 
-	wake_up(&tq->tq_work_waitq);
+	/*
+	 * A worker that found no task joined tq_work_waitq under tq_lock,
+	 * so an empty queue means there is no one to wake.  The wake-up
+	 * stays under tq_lock: once it is dropped the task can run and
+	 * complete, and the taskq be destroyed, before this thread goes on.
+	 */
+	if (wq_has_sleeper(&tq->tq_work_waitq))
+		wake_up(&tq->tq_work_waitq);
 
 	TQSTAT_INC(tq, tasks_dispatched);
 
@@ -871,7 +878,9 @@ taskq_dispatch_ent(taskq_t *tq, task_func_t func, void *arg, uint_t flags,
 
 	spin_unlock(&t->tqent_lock);
 
-	wake_up(&tq->tq_work_waitq);
+	/* See taskq_dispatch(). */
+	if (wq_has_sleeper(&tq->tq_work_waitq))
+		wake_up(&tq->tq_work_waitq);
 
 	TQSTAT_INC(tq, tasks_dispatched);
 
@@ -998,6 +1007,19 @@ taskq_thread_should_stop(taskq_t *tq, taskq_thread_t *tqt)
 	return (1);
 }
 
+/*
+ * Wake the taskq_wait*() callers if a task completed since the last call.
+ * They test their condition under tq_lock after joining tq_wait_waitq, so
+ * the wake-up may follow the drop of the tq_lock that covered the change.
+ */
+static void
+taskq_wake_waiters(taskq_t *tq, boolean_t *pending)
+{
+	if (*pending && wq_has_sleeper(&tq->tq_wait_waitq))
+		wake_up_all(&tq->tq_wait_waitq);
+	*pending = B_FALSE;
+}
+
 static int
 taskq_thread(void *args)
 {
@@ -1009,6 +1031,7 @@ taskq_thread(void *args)
 	int seq_tasks = 0;
 	unsigned long flags;
 	taskq_ent_t dup_task = {};
+	boolean_t wake_waiters = B_FALSE;
 
 	ASSERT(tqt);
 	ASSERT(tqt->tqt_tq);
@@ -1053,6 +1076,7 @@ taskq_thread(void *args)
 
 			add_wait_queue_exclusive(&tq->tq_work_waitq, &wait);
 			spin_unlock_irqrestore(&tq->tq_lock, flags);
+			taskq_wake_waiters(tq, &wake_waiters);
 
 			TQSTAT_INC(tq, thread_sleeps);
 			TQSTAT_INC(tq, threads_idle);
@@ -1092,6 +1116,7 @@ taskq_thread(void *args)
 			taskq_insert_in_order(tq, tqt);
 			tq->tq_nactive++;
 			spin_unlock_irqrestore(&tq->tq_lock, flags);
+			taskq_wake_waiters(tq, &wake_waiters);
 
 			TQSTAT_INC(tq, threads_active);
 
@@ -1134,7 +1159,12 @@ taskq_thread(void *args)
 
 			tqt->tqt_id = TASKQID_INVALID;
 			tqt->tqt_flags = 0;
-			wake_up_all(&tq->tq_wait_waitq);
+			/*
+			 * Wake waiters after the next tq_lock drop rather than
+			 * under it.  taskq_destroy() frees tq only once every
+			 * thread on tq_thread_list has returned.
+			 */
+			wake_waiters = B_TRUE;
 		} else
 			TQSTAT_INC(tq, thread_wakeups_nowork);
 
@@ -1143,6 +1173,8 @@ taskq_thread(void *args)
 	}
 
 	__set_current_state(TASK_RUNNING);
+	/* Off tq_thread_list, tq may be freed: wake under tq_lock. */
+	taskq_wake_waiters(tq, &wake_waiters);
 	tq->tq_nthreads--;
 	list_del_init(&tqt->tqt_thread_list);
 
