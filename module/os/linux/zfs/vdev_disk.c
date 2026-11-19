@@ -31,6 +31,7 @@
 #include <linux/msdos_fs.h>
 #include <linux/vfs_compat.h>
 #include <linux/blk-cgroup.h>
+#include <linux/ioprio.h>
 
 /*
  * Linux 6.8.x uses a bdev_handle as an instance/refcount for an underlying
@@ -694,6 +695,17 @@ vdev_bio_alloc(struct block_device *bdev, gfp_t gfp_mask,
 	if (likely(bio != NULL))
 		bio_set_dev(bio, bdev);
 #endif
+	if (unlikely(bio == NULL))
+		return (NULL);
+
+	/*
+	 * ZFS schedules pool I/O itself and issues it from whatever thread
+	 * is at hand.  A bio left at IOPRIO_CLASS_NONE takes the I/O priority
+	 * of that thread (since Linux 6.0), so a thread under ionice -c3
+	 * would demote I/O it merely issues for the whole pool.  Give all of
+	 * it the default best-effort priority instead.
+	 */
+	bio->bi_ioprio = IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, IOPRIO_NORM);
 
 	return (bio);
 }
