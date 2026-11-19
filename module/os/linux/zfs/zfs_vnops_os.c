@@ -981,6 +981,86 @@ zfs_tmpfile(struct inode *dip, vattr_t *vap, int excl,
 }
 
 /*
+ * Create the orphan zfs_rewrite() copies a file into at a new block size:
+ * an unlinked regular file, as for O_TMPFILE, so that a crash frees it, and
+ * owned as the file is, so that its space is charged to the same owners.
+ */
+int
+zfs_rewrite_shadow(znode_t *zp, uint64_t blksz, znode_t **szpp)
+{
+	zfsvfs_t *zfsvfs = ZTOZSB(zp);
+	const uint64_t projid = zp->z_projid;
+	zfs_acl_ids_t acl_ids;
+	vattr_t vattr = { 0 };
+	znode_t *dzp, *szp;
+	dmu_tx_t *tx;
+	int error;
+
+	error = zfs_zget(zfsvfs, zfsvfs->z_root, &dzp);
+	if (error != 0)
+		return (error);
+
+	vattr.va_mask = ATTR_MODE | ATTR_UID | ATTR_GID;
+	vattr.va_mode = S_IFREG;
+	vattr.va_uid = KUID_TO_SUID(ZTOUID(zp));
+	vattr.va_gid = KGID_TO_SGID(ZTOGID(zp));
+	error = zfs_acl_ids_create(dzp, 0, &vattr, kcred, NULL, &acl_ids,
+	    zfs_init_idmap);
+	if (error != 0) {
+		zrele(dzp);
+		return (error);
+	}
+	if (zfs_acl_ids_overquota(zfsvfs, &acl_ids, projid)) {
+		zfs_acl_ids_free(&acl_ids);
+		zrele(dzp);
+		return (SET_ERROR(EDQUOT));
+	}
+
+	tx = dmu_tx_create(zfsvfs->z_os);
+	dmu_tx_hold_sa_create(tx, acl_ids.z_aclp->z_acl_bytes +
+	    ZFS_SA_BASE_ATTR_SIZE);
+	dmu_tx_hold_zap(tx, zfsvfs->z_unlinkedobj, FALSE, NULL);
+	boolean_t fuid_dirtied = zfsvfs->z_fuid_dirty;
+	if (fuid_dirtied)
+		zfs_fuid_txhold(zfsvfs, tx);
+	if (!zfsvfs->z_use_sa &&
+	    acl_ids.z_aclp->z_acl_bytes > ZFS_ACE_SPACE) {
+		dmu_tx_hold_write(tx, DMU_NEW_OBJECT,
+		    0, acl_ids.z_aclp->z_acl_bytes);
+	}
+	error = dmu_tx_assign(tx, DMU_TX_WAIT);
+	if (error != 0) {
+		dmu_tx_abort(tx);
+		zfs_acl_ids_free(&acl_ids);
+		zrele(dzp);
+		return (error);
+	}
+
+	zfs_mknode(dzp, &vattr, tx, kcred, IS_TMPFILE, &szp, &acl_ids);
+	if (fuid_dirtied)
+		zfs_fuid_sync(zfsvfs, tx);
+	szp->z_unlinked = B_TRUE;
+	zfs_unlinked_add(szp, tx);
+
+	/* The project is inherited from the directory; take the file's. */
+	if (szp->z_projid != projid && (szp->z_pflags & ZFS_PROJID)) {
+		VERIFY0(sa_update(szp->z_sa_hdl, SA_ZPL_PROJID(zfsvfs),
+		    (void *)&projid, sizeof (projid), tx));
+		szp->z_projid = projid;
+	}
+
+	zfs_grow_blocksize(szp, blksz, tx);
+	ASSERT3U(szp->z_blksz, ==, blksz);
+
+	zfs_acl_ids_free(&acl_ids);
+	dmu_tx_commit(tx);
+	zrele(dzp);
+
+	*szpp = szp;
+	return (0);
+}
+
+/*
  * Remove an entry from a directory.
  *
  *	IN:	dzp	- znode of directory to remove entry from.

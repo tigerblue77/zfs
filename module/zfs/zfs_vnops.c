@@ -1156,6 +1156,232 @@ zfs_rewrite_skip(dmu_buf_t *db, objset_t *os, uint64_t flags,
 }
 
 /*
+ * Copy the data of a file into its shadow, one block of the shadow at a
+ * time.  Blocks that hold no data are skipped, so that holes stay holes;
+ * a block read across the holes of the file reads them as zeros.
+ */
+static int
+zfs_rewrite_copy(znode_t *zp, znode_t *szp, uint64_t size, uint64_t blksz,
+    uint64_t *nrp, uint64_t *nwp)
+{
+	zfsvfs_t *zfsvfs = ZTOZSB(zp);
+	objset_t *os = zfsvfs->z_os;
+	const uint64_t uid = KUID_TO_SUID(ZTOUID(zp));
+	const uint64_t gid = KGID_TO_SGID(ZTOGID(zp));
+	const uint64_t projid = zp->z_projid;
+	void *buf = vmem_alloc(blksz, KM_SLEEP);
+	uint64_t off = 0;
+	int error = 0;
+
+	dmu_buf_impl_t *db = (dmu_buf_impl_t *)sa_get_db(zp->z_sa_hdl);
+	dmu_buf_impl_t *sdb = (dmu_buf_impl_t *)sa_get_db(szp->z_sa_hdl);
+	DB_DNODE_ENTER(db);
+	DB_DNODE_ENTER(sdb);
+	dnode_t *dn = DB_DNODE(db);
+	dnode_t *sdn = DB_DNODE(sdb);
+
+	while (off < size) {
+		uint64_t doff = off;
+
+		error = dnode_next_offset(dn, 0, &doff, 1, 1, 0);
+		if (error == ESRCH) {	/* No more data. */
+			error = 0;
+			break;
+		}
+		if (error != 0 || doff >= size)
+			break;
+		off = doff - doff % blksz;
+		uint64_t n = MIN(blksz, size - off);
+
+		if (zfs_id_overblockquota(zfsvfs, DMU_USERUSED_OBJECT, uid) ||
+		    zfs_id_overblockquota(zfsvfs, DMU_GROUPUSED_OBJECT, gid) ||
+		    (projid != ZFS_DEFAULT_PROJID &&
+		    zfs_id_overblockquota(zfsvfs, DMU_PROJECTUSED_OBJECT,
+		    projid))) {
+			error = SET_ERROR(EDQUOT);
+			break;
+		}
+
+		error = dmu_read_by_dnode(dn, off, n, buf,
+		    DMU_READ_PREFETCH | DMU_UNCACHEDIO);
+		if (error != 0)
+			break;
+		*nrp += n;
+
+		dmu_tx_t *tx = dmu_tx_create(os);
+		dmu_tx_hold_write_by_dnode(tx, sdn, off, n);
+		error = dmu_tx_assign(tx, DMU_TX_WAIT);
+		if (error != 0) {
+			dmu_tx_abort(tx);
+			break;
+		}
+		error = dmu_write_by_dnode(sdn, off, n, buf, tx,
+		    DMU_UNCACHEDIO);
+		dmu_tx_commit(tx);
+		if (error != 0)
+			break;
+		*nwp += n;
+		off += n;
+
+		if (issig()) {
+			error = SET_ERROR(EINTR);
+			break;
+		}
+	}
+
+	DB_DNODE_EXIT(sdb);
+	DB_DNODE_EXIT(db);
+	vmem_free(buf, blksz);
+	return (error);
+}
+
+/*
+ * Give a file the block tree of its shadow, and the shadow the old one.
+ * A dbuf someone briefly holds, such as for a prefetch, makes the exchange
+ * give up; it is tried again a few times.
+ */
+static int
+zfs_rewrite_swap(znode_t *zp, znode_t *szp)
+{
+	objset_t *os = ZTOZSB(zp)->z_os;
+	int error = 0;
+
+	for (int tries = 0; ; tries++) {
+		int swap_error;
+
+		dmu_tx_t *tx = dmu_tx_create(os);
+		dmu_tx_hold_bonus(tx, zp->z_id);
+		dmu_tx_hold_bonus(tx, szp->z_id);
+		error = dmu_tx_assign(tx, DMU_TX_WAIT);
+		if (error != 0) {
+			dmu_tx_abort(tx);
+			break;
+		}
+		uint64_t txg = dmu_tx_get_txg(tx);
+		error = dmu_object_swap_data(os, zp->z_id, szp->z_id,
+		    &swap_error, tx);
+		dmu_tx_commit(tx);
+		if (error != 0)
+			break;
+
+		txg_wait_synced(dmu_objset_pool(os), txg);
+		error = swap_error;
+		if (error != EBUSY || tries == 2)
+			break;
+	}
+
+	return (error);
+}
+
+/*
+ * Rewrite a whole regular file at a larger block size.  The data is copied
+ * into a shadow object of the new block size, which the platform creates
+ * in the unlinked set so that a crash frees it.  The two objects then
+ * exchange their block trees in one txg (dmu_object_swap_data()), and the
+ * shadow, holding the old blocks by then, is released and freed.
+ *
+ * The file stays locked for writing throughout, as for a range rewrite, and
+ * has no dirty data when the copy starts or when the trees are exchanged.
+ * Its log records from before are then in synced txgs, which replay skips,
+ * so none can replay a clone range onto the new block size.  The rewrite
+ * itself logs nothing: if the exchange is lost, the file is as before.
+ */
+static int
+zfs_rewrite_blocksize(znode_t *zp, uint64_t off, uint64_t len,
+    uint64_t flags, uint64_t blksz)
+{
+	zfsvfs_t *zfsvfs = ZTOZSB(zp);
+	znode_t *szp = NULL;
+	uint64_t size, newblksz, nr = 0, nw = 0;
+	int error;
+
+	/* Whole files only: a file has one block size. */
+	const uint64_t valid_flags =
+	    ZFS_REWRITE_BLOCKSIZE | ZFS_REWRITE_SKIP_CURRENT;
+	if (off != 0 || len != 0 || (flags & ~valid_flags) != 0 ||
+	    blksz < SPA_MINBLOCKSIZE || blksz > SPA_MAXBLOCKSIZE ||
+	    !ISP2(blksz))
+		return (SET_ERROR(EINVAL));
+
+	if ((error = zfs_enter_verify_zp(zfsvfs, zp, FTAG)) != 0)
+		return (error);
+
+	objset_t *os = zfsvfs->z_os;
+	if (zfs_is_readonly(zfsvfs)) {
+		zfs_exit(zfsvfs, FTAG);
+		return (SET_ERROR(EROFS));
+	}
+	if (!S_ISREG(zp->z_mode)) {
+		zfs_exit(zfsvfs, FTAG);
+		return (SET_ERROR(EINVAL));
+	}
+	if (blksz > spa_maxblocksize(dmu_objset_spa(os)) ||
+	    blksz > zfs_max_recordsize) {
+		zfs_exit(zfsvfs, FTAG);
+		return (SET_ERROR(ENOTSUP));
+	}
+
+	if (zp->z_size != 0 && zn_has_cached_data(zp, 0, zp->z_size - 1))
+		zn_flush_cached_data(zp, B_TRUE);
+
+	zfs_locked_range_t *lr = zfs_rangelock_enter(&zp->z_rangelock, 0,
+	    UINT64_MAX, RL_WRITER);
+
+	/*
+	 * A file of one block grows it as it is written, so it has nothing
+	 * to gain.  Smaller blocks are refused: an incremental receive into
+	 * an existing replica refuses a smaller block size.
+	 */
+	size = zp->z_size;
+	if (size <= zp->z_blksz || blksz == zp->z_blksz) {
+		error = 0;
+	} else if (blksz < zp->z_blksz) {
+		error = SET_ERROR(ENOTSUP);
+	} else {
+		/* What writing the file anew gives: one block if it fits. */
+		newblksz = MIN(blksz, P2ROUNDUP(size, SPA_MINBLOCKSIZE));
+
+		/* Write out what the file has dirty: copy synced data. */
+		dmu_buf_impl_t *db = (dmu_buf_impl_t *)sa_get_db(zp->z_sa_hdl);
+		DB_DNODE_ENTER(db);
+		boolean_t dirty = dnode_is_dirty(DB_DNODE(db));
+		DB_DNODE_EXIT(db);
+		if (dirty)
+			txg_wait_synced(dmu_objset_pool(os), 0);
+
+		error = zfs_rewrite_shadow(zp, newblksz, &szp);
+		if (error == 0)
+			error = zfs_rewrite_copy(zp, szp, size, newblksz,
+			    &nr, &nw);
+		if (error == 0) {
+			/* The exchange needs the shadow written out too. */
+			txg_wait_synced(dmu_objset_pool(os), 0);
+			error = zfs_rewrite_swap(zp, szp);
+		}
+		if (error == 0) {
+			u_longlong_t nblks;
+
+			dmu_object_size_from_db(sa_get_db(zp->z_sa_hdl),
+			    &zp->z_blksz, &nblks);
+			ASSERT3U(zp->z_blksz, ==, newblksz);
+			zfs_znode_update_vfs(zp);
+		}
+	}
+
+	zfs_rangelock_exit(lr);
+
+	/* The shadow holds the old blocks, or the copy if that failed. */
+	if (szp != NULL)
+		zrele(szp);
+
+	dataset_kstats_update_read_kstats(&zfsvfs->z_kstat, nr);
+	dataset_kstats_update_write_kstats(&zfsvfs->z_kstat, nw);
+
+	zfs_exit(zfsvfs, FTAG);
+	return (error);
+}
+
+/*
  * Rewrite a range of file as-is without modification.
  *
  *	IN:	zp	- znode of file to be rewritten.
@@ -1176,6 +1402,9 @@ zfs_rewrite(znode_t *zp, uint64_t off, uint64_t len, uint64_t flags,
 #define	ZFS_REWRITE_VALID_FLAGS \
 	(ZFS_REWRITE_PHYSICAL | ZFS_REWRITE_SKIP_SNAPSHOT | \
 	ZFS_REWRITE_SKIP_BRT | ZFS_REWRITE_SKIP_CURRENT)
+
+	if (flags & ZFS_REWRITE_BLOCKSIZE)
+		return (zfs_rewrite_blocksize(zp, off, len, flags, arg));
 
 	if ((flags & ~ZFS_REWRITE_VALID_FLAGS) != 0 || arg != 0)
 		return (SET_ERROR(EINVAL));

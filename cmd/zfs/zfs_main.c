@@ -413,7 +413,8 @@ get_usage(zfs_help_t idx)
 		    "<redaction_snapshot> ...\n");
 	case HELP_REWRITE:
 		return ("\trewrite [-CPSWrvx] [-o <offset>] "
-		    "[-l <length>] <directory|file ...>\n");
+		    "[-l <length>] <directory|file ...>\n"
+		    "\trewrite -b <blocksize> [-Wrvx] <directory|file ...>\n");
 	case HELP_JAIL:
 		return ("\tjail <jailid|jailname> <filesystem>\n");
 	case HELP_UNJAIL:
@@ -9223,10 +9224,21 @@ zfs_do_rewrite(int argc, char **argv)
 	zfs_rewrite_args_t args;
 	memset(&args, 0, sizeof (args));
 
-	while ((c = getopt(argc, argv, "CPSWl:o:rvx")) != -1) {
+	while ((c = getopt(argc, argv, "CPSWb:l:o:rvx")) != -1) {
 		switch (c) {
 		case 'C':
 			args.flags |= ZFS_REWRITE_SKIP_BRT;
+			break;
+		case 'b':
+			if (zfs_nicestrtonum(g_zfs, optarg, &args.arg) != 0 ||
+			    args.arg < SPA_MINBLOCKSIZE ||
+			    args.arg > SPA_MAXBLOCKSIZE || !ISP2(args.arg)) {
+				(void) fprintf(stderr, "invalid block size "
+				    "'%s': must be a power of 2 from 512 to "
+				    "16M\n", optarg);
+				usage(B_FALSE);
+			}
+			args.flags |= ZFS_REWRITE_BLOCKSIZE;
 			break;
 		case 'P':
 			args.flags |= ZFS_REWRITE_PHYSICAL;
@@ -9264,6 +9276,13 @@ zfs_do_rewrite(int argc, char **argv)
 	if (argc == 0) {
 		(void) fprintf(stderr,
 		    "missing file or directory target(s)\n");
+		usage(B_FALSE);
+	}
+	if ((args.flags & ZFS_REWRITE_BLOCKSIZE) && (args.off != 0 ||
+	    args.len != 0 || (args.flags & (ZFS_REWRITE_PHYSICAL |
+	    ZFS_REWRITE_SKIP_SNAPSHOT | ZFS_REWRITE_SKIP_BRT)) != 0)) {
+		(void) fprintf(stderr, "-b rewrites whole files, and "
+		    "cannot be combined with -C, -P, -S, -l or -o\n");
 		usage(B_FALSE);
 	}
 

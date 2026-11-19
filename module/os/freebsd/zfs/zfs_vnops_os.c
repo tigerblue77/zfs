@@ -1001,6 +1001,17 @@ is_nametoolong(zfsvfs_t *zfsvfs, const char *name)
 }
 
 /*
+ * Creating the orphan zfs_rewrite() copies a file into at a new block size
+ * is only implemented on Linux for now.
+ */
+int
+zfs_rewrite_shadow(znode_t *zp, uint64_t blksz, znode_t **szpp)
+{
+	(void) zp, (void) blksz, (void) szpp;
+	return (SET_ERROR(ENOTSUP));
+}
+
+/*
  * Attempt to create a new entry in a directory.  If the entry
  * already exists, truncate the file if permissible, else return
  * an error.  Return the vp of the created or trunc'd file.

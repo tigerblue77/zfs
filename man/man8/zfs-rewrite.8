@@ -12,7 +12,7 @@
 .\" Copyright (c) 2025 iXsystems, Inc.
 .\" Copyright (c) 2025, Klara, Inc.
 .\"
-.Dd November 3, 2026
+.Dd November 19, 2026
 .Dt ZFS-REWRITE 8
 .Os
 .
@@ -26,6 +26,11 @@
 .Op Fl l Ar length
 .Op Fl o Ar offset
 .Ar file Ns | Ns Ar directory Ns …
+.Nm zfs
+.Cm rewrite
+.Fl b Ar blocksize
+.Oo Fl Wrvx Ns Oc
+.Ar file Ns | Ns Ar directory Ns …
 .
 .Sh DESCRIPTION
 Rewrite blocks of specified
@@ -35,6 +40,27 @@ as if they were atomically read and written back.
 .No See Sx NOTES .
 for more information about property changes that may be applied during rewrite.
 .Bl -tag -width "-r"
+.It Fl b Ar blocksize
+Rewrite each whole regular file with blocks of
+.Ar blocksize
+bytes, a power of 2 from 512 bytes to 16 MiB, or one block if the file fits
+in one.
+The file keeps its inode, links, attributes and open descriptors.
+Its data is copied into an unlinked object of the new block size, and the
+two objects then exchange their data in one transaction group, so the file
+has either the old or the new blocks after a crash, and the space of the
+other is freed once the file system is mounted again.
+The file is locked for the duration, and the dataset needs free space for
+a copy of it.
+The block size can only grow: a file whose blocks are larger is refused
+with
+.Er ENOTSUP ,
+and a file of one block, or already of this block size, is left as it is.
+This option cannot be combined with
+.Fl C , P , S , l
+or
+.Fl o .
+Only Linux implements it.
 .It Fl C
 Skip blocks that are shared via block cloning (BRT).
 Cloned blocks are referenced by multiple files or datasets.
@@ -106,7 +132,17 @@ and
 .Sy copies .
 Changes to properties that affect the size of a logical block, like
 .Sy recordsize ,
-will have no effect.
+will have no effect, unless the
+.Fl b
+option asks for a new size.
+.Pp
+With
+.Fl b ,
+the old blocks of a file are freed, but those also referenced by
+snapshots, by block clones or through deduplication stay allocated until
+nothing references them, while the file now holds a copy.
+Deduplicated data at the new block size does not match blocks written at the
+old one.
 .Pp
 Rewrite of cloned blocks and blocks that are part of any snapshots,
 same as some property changes may increase pool space usage.
