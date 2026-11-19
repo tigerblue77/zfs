@@ -5533,6 +5533,18 @@ zio_vdev_io_reissue(zio_t *zio)
 	zio->io_stage >>= 1;
 }
 
+/*
+ * Like zio_vdev_io_reissue(), but leave the execution to the issue taskq
+ * instead of the caller.
+ */
+void
+zio_vdev_io_reissue_async(zio_t *zio)
+{
+	zio_vdev_io_reissue(zio);
+	zio_taskq_dispatch(zio, ZIO_TASKQ_ISSUE,
+	    zio_requeue_io_start_cut_in_line);
+}
+
 void
 zio_vdev_io_redone(zio_t *zio)
 {

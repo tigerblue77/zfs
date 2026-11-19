@@ -692,6 +692,7 @@ extern zio_t *zio_vdev_delegated_io(vdev_t *vd, uint64_t offset,
 
 extern void zio_vdev_io_bypass(zio_t *zio);
 extern void zio_vdev_io_reissue(zio_t *zio);
+extern void zio_vdev_io_reissue_async(zio_t *zio);
 extern void zio_vdev_io_redone(zio_t *zio);
 
 extern void zio_change_priority(zio_t *pio, zio_priority_t priority);

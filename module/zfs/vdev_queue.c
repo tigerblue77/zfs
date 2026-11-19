@@ -976,6 +976,12 @@ vdev_queue_io(zio_t *zio)
 		return (NULL);
 	}
 
+	/* As in vdev_queue_io_done(), leave a queued TRIM to its taskq. */
+	if (nio != zio && nio->io_type == ZIO_TYPE_TRIM) {
+		zio_vdev_io_reissue_async(nio);
+		return (NULL);
+	}
+
 	return (nio);
 }
 
@@ -1015,6 +1021,14 @@ vdev_queue_io_done(zio_t *zio)
 				zio_execute(dio);
 			}
 			zio_nowait(nio);
+		} else if (nio->io_type == ZIO_TYPE_TRIM) {
+			/*
+			 * Submitting a TRIM can sleep, as Linux's blk-wbt
+			 * throttles every discard and secure erase waits for
+			 * the device: leave that to the TRIM issue threads
+			 * rather than this completion thread.
+			 */
+			zio_vdev_io_reissue_async(nio);
 		} else {
 			zio_vdev_io_reissue(nio);
 			zio_execute(nio);
