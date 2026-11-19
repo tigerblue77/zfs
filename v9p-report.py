@@ -30,8 +30,7 @@
 # whatever the size of the drop.
 #
 # Decision rules for v9, fixed before the run; means are over the passes:
-#  (1) n32: v9/master not significantly below (v9/v6 is printed beside
-#      it and decides nothing).
+#  (1) n32: v9/master not significantly below, and v9/v6 "gain".
 #  (2) n8, n8e, r1, w4 and w8, each: v9/v6 not significantly below.
 #  (3) r1 and x1: v9/master and v9/v6 not "tail cost"; x1: v9/master
 #      not "loss".
@@ -423,11 +422,13 @@ def rule_lines(data, v):
         b = below(st)
         return None if b is None else not b
 
-    # (1) n32; v/v6 is shown, not judged
+    # (1) n32
     row = "n32"
     sm, t1 = pv(row, v, "master")
     s6, t2 = pv(row, v, "v6")
-    out.append(("1", row, "%s; (%s)" % (t1, t2), res([notbelow(sm)])))
+    out.append(("1", row, "%s; %s" % (t1, t2), res([
+        notbelow(sm),
+        None if s6 is None else verdict(s6[2], s6[4]) == "gain"])))
     # (2) the rows where v6 gained
     for row in ("n8", "n8e", "r1", "w4", "w8"):
         s6, t1 = pv(row, v, "v6")
