@@ -857,7 +857,7 @@ zil_alloc_lwb(zilog_t *zilog, blkptr_t *bp, int min_sz, int sz,
 	lwb->lwb_child_zio = NULL;
 	lwb->lwb_write_zio = NULL;
 	lwb->lwb_root_zio = NULL;
-	lwb->lwb_issued_timestamp = 0;
+	lwb->lwb_latency_start = 0;
 	lwb->lwb_issued_txg = 0;
 	lwb->lwb_alloc_txg = txg;
 	lwb->lwb_max_txg = 0;
@@ -1526,7 +1526,7 @@ zil_lwb_flush_vdevs_done(zio_t *zio)
 
 	spa_config_exit(zilog->zl_spa, SCL_STATE, lwb);
 
-	hrtime_t t = gethrtime() - lwb->lwb_issued_timestamp;
+	hrtime_t t = gethrtime() - lwb->lwb_latency_start;
 
 	mutex_enter(&zilog->zl_lock);
 
@@ -1945,6 +1945,7 @@ zil_lwb_write_close(zilog_t *zilog, lwb_t *lwb)
 	ASSERT3S(lwb->lwb_state, ==, LWB_STATE_OPENED);
 	membar_producer();
 	lwb->lwb_state = LWB_STATE_CLOSED;
+	lwb->lwb_latency_start = gethrtime();	/* see zil_lwb_write_issue() */
 
 	/*
 	 * If there was an allocation failure then returned NULL will trigger
@@ -2212,7 +2213,15 @@ next_lwb:
 		ZIL_STAT_INCR(zilog, zil_itx_metaslab_normal_alloc,
 		    BP_GET_LSIZE(&lwb->lwb_blk));
 	}
-	lwb->lwb_issued_timestamp = gethrtime();
+	/*
+	 * The wait of open lwbs for more records is a share of this latency
+	 * (zfs_commit_timeout_pct).  While committers queue for
+	 * zl_issuer_lock the log is behind and fuller lwbs pay, so count it
+	 * from the close, with the time this lwb took to be issued;
+	 * otherwise from here, which keeps that wait short.
+	 */
+	if (atomic_load_32(&zilog->zl_issuer_waiters) == 0)
+		lwb->lwb_latency_start = gethrtime();
 	if (lwb->lwb_child_zio)
 		zio_nowait(lwb->lwb_child_zio);
 	zio_nowait(lwb->lwb_write_zio);
@@ -3494,6 +3503,20 @@ zil_process_commit_list(zilog_t *zilog, zil_commit_waiter_t *zcw, list_t *ilwbs)
 }
 
 /*
+ * Take zl_issuer_lock, counting the threads that find it held for
+ * zil_lwb_write_issue().
+ */
+static void
+zil_issuer_enter(zilog_t *zilog)
+{
+	if (mutex_tryenter(&zilog->zl_issuer_lock))
+		return;
+	atomic_inc_32(&zilog->zl_issuer_waiters);
+	mutex_enter(&zilog->zl_issuer_lock);
+	atomic_dec_32(&zilog->zl_issuer_waiters);
+}
+
+/*
  * This function is responsible for ensuring the passed in commit waiter
  * (and associated commit itx) is committed to an lwb. If the waiter is
  * not already committed to an lwb, all itxs in the zilog's queue of
@@ -3518,7 +3541,7 @@ zil_commit_writer(zilog_t *zilog, zil_commit_waiter_t *zcw)
 	ASSERT(spa_writeable(zilog->zl_spa));
 
 	list_create(&ilwbs, sizeof (lwb_t), offsetof(lwb_t, lwb_issue_node));
-	mutex_enter(&zilog->zl_issuer_lock);
+	zil_issuer_enter(zilog);
 
 	if (zcw->zcw_lwb != NULL || zcw->zcw_done) {
 		/*
@@ -3596,7 +3619,7 @@ zil_commit_waiter_timeout(zilog_t *zilog, zil_commit_waiter_t *zcw)
 	 * elsewhere.
 	 */
 	mutex_exit(&zcw->zcw_lock);
-	mutex_enter(&zilog->zl_issuer_lock);
+	zil_issuer_enter(zilog);
 	mutex_enter(&zcw->zcw_lock);
 
 	/*
@@ -4465,6 +4488,7 @@ zil_free(zilog_t *zilog)
 	ASSERT0(zilog->zl_suspend);
 	ASSERT0(zilog->zl_suspending);
 	ASSERT0(zilog->zl_restart_txg);
+	ASSERT0(zilog->zl_issuer_waiters);
 
 	ASSERT(list_is_empty(&zilog->zl_lwb_list));
 	list_destroy(&zilog->zl_lwb_list);
