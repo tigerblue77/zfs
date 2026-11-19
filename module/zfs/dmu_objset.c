@@ -663,6 +663,10 @@ dmu_objset_open_impl(spa_t *spa, dsl_dataset_t *ds, blkptr_t *bp,
 	    offsetof(dnode_t, dn_link));
 	list_create(&os->os_downgraded_dbufs, sizeof (dmu_buf_impl_t),
 	    offsetof(dmu_buf_impl_t, db_link));
+	for (i = 0; i < TXG_SIZE; i++) {
+		list_create(&os->os_swap_data[i], sizeof (dmu_swap_data_t),
+		    offsetof(dmu_swap_data_t, dsd_node));
+	}
 
 	list_link_init(&os->os_evicting_node);
 
@@ -1049,8 +1053,11 @@ dmu_objset_evict_done(objset_t *os)
 	mutex_destroy(&os->os_obj_lock);
 	mutex_destroy(&os->os_user_ptr_lock);
 	mutex_destroy(&os->os_upgrade_lock);
-	for (int i = 0; i < TXG_SIZE; i++)
+	for (int i = 0; i < TXG_SIZE; i++) {
 		multilist_destroy(&os->os_dirty_dnodes[i]);
+		ASSERT(list_is_empty(&os->os_swap_data[i]));
+		list_destroy(&os->os_swap_data[i]);
+	}
 	spa_evicting_os_deregister(os->os_spa, os);
 	kmem_free(os, sizeof (objset_t));
 }
@@ -1627,6 +1634,35 @@ sync_meta_dnode_task(void *arg)
 	kmem_free(soa, sizeof (*soa));
 }
 
+/*
+ * Carry out the data exchanges dmu_object_swap_data() scheduled in this txg.
+ * Like dnode_sync(), this changes dnode blocks the meta-dnode sync has
+ * released.  It must precede dnode_sync() of the dnodes involved, which
+ * records the space they used before (see dnode_swap_data_sync()), so it
+ * runs before any of them, while nothing else touches those blocks.
+ */
+static void
+dmu_objset_sync_swap_data(objset_t *os, dmu_tx_t *tx)
+{
+	list_t pending;
+	dmu_swap_data_t *dsd;
+
+	list_create(&pending, sizeof (dmu_swap_data_t),
+	    offsetof(dmu_swap_data_t, dsd_node));
+	mutex_enter(&os->os_lock);
+	list_move_tail(&pending, &os->os_swap_data[tx->tx_txg & TXG_MASK]);
+	mutex_exit(&os->os_lock);
+
+	while ((dsd = list_remove_head(&pending)) != NULL) {
+		*dsd->dsd_errorp = dnode_swap_data_sync(dsd->dsd_dn1,
+		    dsd->dsd_dn2, tx);
+		dnode_rele(dsd->dsd_dn1, dsd);
+		dnode_rele(dsd->dsd_dn2, dsd);
+		kmem_free(dsd, sizeof (*dsd));
+	}
+	list_destroy(&pending);
+}
+
 /* called from dsl */
 void
 dmu_objset_sync(objset_t *os, zio_t *pio, dmu_tx_t *tx)
@@ -1704,6 +1740,9 @@ dmu_objset_sync(objset_t *os, zio_t *pio, dmu_tx_t *tx)
 		DMU_PROJECTUSED_DNODE(os)->dn_zio = zio;
 		dnode_sync(DMU_PROJECTUSED_DNODE(os), tx);
 	}
+
+	/* The dnode blocks are released for writing by now. */
+	dmu_objset_sync_swap_data(os, tx);
 
 	txgoff = tx->tx_txg & TXG_MASK;
 

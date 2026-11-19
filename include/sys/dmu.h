@@ -500,6 +500,25 @@ int dmu_object_set_blocksize(objset_t *os, uint64_t object, uint64_t size,
     int ibs, dmu_tx_t *tx);
 
 /*
+ * Exchange the data of two objects of the same objset: their block trees,
+ * data block sizes, indirect block sizes and space used.  Their types,
+ * bonus buffers and spill blocks stay where they are.  Both objects must
+ * be held in the transaction with dmu_tx_hold_bonus().
+ *
+ * The exchange happens when the transaction group syncs.  It needs both
+ * objects to have no dirty data and no held data buffers then: otherwise
+ * neither object changes and *errorp is set to EBUSY, else to 0.  *errorp
+ * is written in syncing context, so it must stay valid until the txg has
+ * synced, and it is read only after that.
+ *
+ * Returns 0 if the exchange is scheduled, ENOTSUP if the two objects
+ * cannot exchange their data (their dnodes differ in the number of block
+ * pointers, or one accounts space in sectors), or EINVAL.
+ */
+int dmu_object_swap_data(objset_t *os, uint64_t obj1, uint64_t obj2,
+    int *errorp, dmu_tx_t *tx);
+
+/*
  * Manually set the maxblkid on a dnode. This will adjust nlevels accordingly
  * to accommodate the change. When calling this function, the caller must
  * ensure that the object's nlevels can sufficiently support the new maxblkid.

@@ -73,6 +73,7 @@ extern "C" {
 #define	DN_ID_CHKED_SPILL	0x2
 #define	DN_ID_OLD_EXIST		0x4
 #define	DN_ID_NEW_EXIST		0x8
+#define	DN_ID_OLDUSED_SWAP	0x10	/* dn_oldused predates a data swap */
 
 /*
  * Derived constants.
@@ -446,6 +447,9 @@ void dnode_fini(void);
 int dnode_next_offset(dnode_t *dn, int flags, uint64_t *off,
     int minlvl, uint64_t blkfill, uint64_t txg);
 void dnode_evict_dbufs(dnode_t *dn);
+boolean_t dnode_evict_data_dbufs(dnode_t *dn);
+int dnode_swap_data_check(dnode_t *dn1, dnode_t *dn2);
+int dnode_swap_data_sync(dnode_t *dn1, dnode_t *dn2, dmu_tx_t *tx);
 int dnode_decrypt_bonus(dnode_t *dn);
 void dnode_evict_bonus(dnode_t *dn);
 void dnode_free_interior_slots(dnode_t *dn);

@@ -1996,6 +1996,158 @@ fail:
 	return (SET_ERROR(ENOTSUP));
 }
 
+/*
+ * Whether two dnodes can exchange their data with dnode_swap_data_sync().
+ */
+int
+dnode_swap_data_check(dnode_t *dn1, dnode_t *dn2)
+{
+	if (dn1 == dn2 || dn1->dn_objset != dn2->dn_objset ||
+	    DMU_OBJECT_IS_SPECIAL(dn1->dn_object) ||
+	    DMU_OBJECT_IS_SPECIAL(dn2->dn_object) ||
+	    dn1->dn_type == DMU_OT_NONE || dn1->dn_type != dn2->dn_type)
+		return (SET_ERROR(EINVAL));
+
+	if (dn1->dn_nblkptr != dn2->dn_nblkptr ||
+	    !(dn1->dn_phys->dn_flags & DNODE_FLAG_USED_BYTES) ||
+	    !(dn2->dn_phys->dn_flags & DNODE_FLAG_USED_BYTES))
+		return (SET_ERROR(ENOTSUP));
+
+	return (0);
+}
+
+/*
+ * A dnode's block tree can move to another dnode only if nothing refers to
+ * it by position: no data dbuf, held or cached, and nothing dirty or pending
+ * in any txg but its bonus and spill blocks.
+ */
+static boolean_t
+dnode_swap_data_ready(dnode_t *dn)
+{
+	boolean_t ready = B_TRUE;
+
+	ASSERT(RW_WRITE_HELD(&dn->dn_struct_rwlock));
+
+	if (!dnode_evict_data_dbufs(dn))
+		return (B_FALSE);
+
+	mutex_enter(&dn->dn_mtx);
+	if (dn->dn_free_txg != 0)
+		ready = B_FALSE;
+	for (int t = 0; ready && t < TXG_SIZE; t++) {
+		if (dn->dn_next_nlevels[t] != 0 ||
+		    dn->dn_next_indblkshift[t] != 0 ||
+		    dn->dn_next_blksz[t] != 0 ||
+		    dn->dn_next_nblkptr[t] != 0 ||
+		    dn->dn_next_maxblkid[t] != 0 ||
+		    (dn->dn_free_ranges[t] != NULL &&
+		    !zfs_range_tree_is_empty(dn->dn_free_ranges[t]))) {
+			ready = B_FALSE;
+			break;
+		}
+		for (dbuf_dirty_record_t *dr =
+		    list_head(&dn->dn_dirty_records[t]); dr != NULL;
+		    dr = list_next(&dn->dn_dirty_records[t], dr)) {
+			if (dr->dr_dbuf == NULL ||
+			    (dr->dr_dbuf->db_blkid != DMU_BONUS_BLKID &&
+			    dr->dr_dbuf->db_blkid != DMU_SPILL_BLKID)) {
+				ready = B_FALSE;
+				break;
+			}
+		}
+	}
+	mutex_exit(&dn->dn_mtx);
+
+	return (ready);
+}
+
+#define	DNODE_SWAP(a, b, type)	do {	\
+	type __tmp = (a);		\
+	(a) = (b);			\
+	(b) = __tmp;			\
+} while (0)
+
+/*
+ * Exchange the block trees of two dnodes, with everything that describes
+ * them, in syncing context, before either dnode is synced in this txg (see
+ * dmu_objset_sync()).  Both dnodes must be dirty in this txg, so that their
+ * dnode blocks are written out.  The swap moves no block, so the space
+ * accounting of the dataset does not change; the space charged to the
+ * owners of the two objects does, through dn_oldused (see dnode_sync()).
+ * Return EBUSY, changing nothing, if either dnode is not ready.
+ */
+int
+dnode_swap_data_sync(dnode_t *dn1, dnode_t *dn2, dmu_tx_t *tx)
+{
+	objset_t *os = dn1->dn_objset;
+	dnode_t *dna = dn1->dn_object < dn2->dn_object ? dn1 : dn2;
+	dnode_t *dnb = dna == dn1 ? dn2 : dn1;
+	int err;
+
+	ASSERT(dmu_tx_is_syncing(tx));
+	ASSERT(multilist_link_active(&dn1->dn_dirty_link[tx->tx_txg &
+	    TXG_MASK]));
+	ASSERT(multilist_link_active(&dn2->dn_dirty_link[tx->tx_txg &
+	    TXG_MASK]));
+
+	rw_enter(&dna->dn_struct_rwlock, RW_WRITER);
+	rw_enter(&dnb->dn_struct_rwlock, RW_WRITER);
+
+	err = dnode_swap_data_check(dn1, dn2);
+	if (err == 0 &&
+	    (!dnode_swap_data_ready(dn1) || !dnode_swap_data_ready(dn2)))
+		err = SET_ERROR(EBUSY);
+	if (err != 0) {
+		rw_exit(&dnb->dn_struct_rwlock);
+		rw_exit(&dna->dn_struct_rwlock);
+		return (err);
+	}
+
+	dnode_phys_t *dnp1 = dn1->dn_phys;
+	dnode_phys_t *dnp2 = dn2->dn_phys;
+	uint64_t used1 = DN_USED_BYTES(dnp1);
+	uint64_t used2 = DN_USED_BYTES(dnp2);
+
+	for (int i = 0; i < dn1->dn_nblkptr; i++) {
+		DNODE_SWAP(dnp1->dn_blkptr[i], dnp2->dn_blkptr[i],
+		    blkptr_t);
+	}
+	DNODE_SWAP(dnp1->dn_nlevels, dnp2->dn_nlevels, uint8_t);
+	DNODE_SWAP(dnp1->dn_indblkshift, dnp2->dn_indblkshift, uint8_t);
+	DNODE_SWAP(dnp1->dn_datablkszsec, dnp2->dn_datablkszsec, uint16_t);
+	DNODE_SWAP(dnp1->dn_maxblkid, dnp2->dn_maxblkid, uint64_t);
+	DNODE_SWAP(dnp1->dn_used, dnp2->dn_used, uint64_t);
+
+	/* The in-core state may be ahead of the phys, e.g. dn_maxblkid. */
+	uint32_t blksz1 = dn1->dn_datablksz;
+	dnode_setdblksz(dn1, dn2->dn_datablksz);
+	dnode_setdblksz(dn2, blksz1);
+	DNODE_SWAP(dn1->dn_nlevels, dn2->dn_nlevels, uint8_t);
+	DNODE_SWAP(dn1->dn_indblkshift, dn2->dn_indblkshift, uint8_t);
+	DNODE_SWAP(dn1->dn_maxblkid, dn2->dn_maxblkid, uint64_t);
+
+	dmu_zfetch_reset(&dn1->dn_zfetch);
+	dmu_zfetch_reset(&dn2->dn_zfetch);
+
+	if (dmu_objset_userused_enabled(os) && !os->os_raw_receive) {
+		mutex_enter(&dn1->dn_mtx);
+		dn1->dn_oldused = used1;
+		dn1->dn_id_flags |= DN_ID_OLDUSED_SWAP;
+		mutex_exit(&dn1->dn_mtx);
+		mutex_enter(&dn2->dn_mtx);
+		dn2->dn_oldused = used2;
+		dn2->dn_id_flags |= DN_ID_OLDUSED_SWAP;
+		mutex_exit(&dn2->dn_mtx);
+	}
+
+	DNODE_VERIFY(dn1);
+	DNODE_VERIFY(dn2);
+
+	rw_exit(&dnb->dn_struct_rwlock);
+	rw_exit(&dna->dn_struct_rwlock);
+	return (0);
+}
+
 static void
 dnode_set_nlevels_impl(dnode_t *dn, int new_nlevels, dmu_tx_t *tx)
 {

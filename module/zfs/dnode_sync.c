@@ -438,18 +438,24 @@ dnode_sync_free_range_impl(dnode_t *dn, uint64_t blkid, uint64_t nblks,
 }
 
 /*
- * Try to kick all the dnode's dbufs out of the cache.
+ * Try to kick the dnode's dbufs out of the cache, all of them or only those
+ * of its data (not its spill block).  Return whether no such dbuf is left.
  */
-void
-dnode_evict_dbufs(dnode_t *dn)
+static boolean_t
+dnode_evict_dbufs_impl(dnode_t *dn, boolean_t data_only)
 {
 	dmu_buf_impl_t *db_marker;
 	dmu_buf_impl_t *db, *db_next;
+	boolean_t evicted = B_TRUE;
 
 	db_marker = kmem_alloc(sizeof (dmu_buf_impl_t), KM_SLEEP);
 
 	mutex_enter(&dn->dn_dbufs_mtx);
 	for (db = avl_first(&dn->dn_dbufs); db != NULL; db = db_next) {
+		if (data_only && db->db_blkid == DMU_SPILL_BLKID) {
+			db_next = AVL_NEXT(&dn->dn_dbufs, db);
+			continue;
+		}
 
 #ifdef	ZFS_DEBUG
 		DB_DNODE_ENTER(db);
@@ -497,11 +503,34 @@ dnode_evict_dbufs(dnode_t *dn)
 			db_next = AVL_NEXT(&dn->dn_dbufs, db);
 		}
 	}
+	for (db = avl_first(&dn->dn_dbufs); db != NULL;
+	    db = AVL_NEXT(&dn->dn_dbufs, db)) {
+		if (!data_only || db->db_blkid != DMU_SPILL_BLKID) {
+			evicted = B_FALSE;
+			break;
+		}
+	}
 	mutex_exit(&dn->dn_dbufs_mtx);
 
 	kmem_free(db_marker, sizeof (dmu_buf_impl_t));
+	return (evicted);
+}
 
+void
+dnode_evict_dbufs(dnode_t *dn)
+{
+	(void) dnode_evict_dbufs_impl(dn, B_FALSE);
 	dnode_evict_bonus(dn);
+}
+
+/*
+ * Evict the dbufs of the dnode's data, leaving its bonus and spill blocks.
+ * Return B_FALSE if some are still held.
+ */
+boolean_t
+dnode_evict_data_dbufs(dnode_t *dn)
+{
+	return (dnode_evict_dbufs_impl(dn, B_TRUE));
 }
 
 void
@@ -707,7 +736,11 @@ dnode_sync(dnode_t *dn, dmu_tx_t *tx)
 	    !DMU_OBJECT_IS_SPECIAL(dn->dn_object) &&
 	    !os->os_raw_receive) {
 		mutex_enter(&dn->dn_mtx);
-		dn->dn_oldused = DN_USED_BYTES(dn->dn_phys);
+		/* A data swap has already recorded what was charged. */
+		if (dn->dn_id_flags & DN_ID_OLDUSED_SWAP)
+			dn->dn_id_flags &= ~DN_ID_OLDUSED_SWAP;
+		else
+			dn->dn_oldused = DN_USED_BYTES(dn->dn_phys);
 		dn->dn_oldflags = dn->dn_phys->dn_flags;
 		dn->dn_phys->dn_flags |= DNODE_FLAG_USERUSED_ACCOUNTED;
 		if (dmu_objset_userobjused_enabled(dn->dn_objset))

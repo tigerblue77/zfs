@@ -418,6 +418,7 @@ static ztest_shared_callstate_t *ztest_shared_callstate;
 ztest_func_t ztest_dmu_read_write;
 ztest_func_t ztest_dmu_write_parallel;
 ztest_func_t ztest_dmu_object_alloc_free;
+ztest_func_t ztest_dmu_object_swap_data;
 ztest_func_t ztest_dmu_object_next_chunk;
 ztest_func_t ztest_dmu_commit_callbacks;
 ztest_func_t ztest_zap;
@@ -475,6 +476,7 @@ static ztest_info_t ztest_info[] = {
 	ZTI_INIT(ztest_dmu_write_parallel, 10, &zopt_always),
 	ZTI_INIT(ztest_dmu_object_alloc_free, 1, &zopt_always),
 	ZTI_INIT(ztest_dmu_object_next_chunk, 1, &zopt_sometimes),
+	ZTI_INIT(ztest_dmu_object_swap_data, 1, &zopt_sometimes),
 	ZTI_INIT(ztest_dmu_commit_callbacks, 1, &zopt_always),
 	ZTI_INIT(ztest_zap, 30, &zopt_always),
 	ZTI_INIT(ztest_zap_parallel, 100, &zopt_always),
@@ -5250,6 +5252,166 @@ ztest_dmu_object_next_chunk(ztest_ds_t *zd, uint64_t id)
 	os->os_obj_next_chunk = P2ALIGN_TYPED(object, dnodes_per_chunk,
 	    uint64_t);
 	mutex_exit(&os->os_obj_lock);
+}
+
+static uint64_t
+ztest_swap_word(uint64_t seed, uint64_t blkid, uint64_t word)
+{
+	return (seed ^ (blkid << 32) ^ word ^ 0x5a5a5a5a5a5a5a5aULL);
+}
+
+/*
+ * Check what an object of ztest_dmu_object_swap_data() holds: the pattern
+ * in the blocks of blksz bytes marked in hasdata, zeros elsewhere.
+ */
+static void
+ztest_swap_verify(objset_t *os, uint64_t obj, uint64_t seed,
+    const uint8_t *hasdata, uint64_t nblks, uint64_t blksz, uint64_t *buf)
+{
+	uint64_t words = blksz / sizeof (uint64_t);
+
+	VERIFY0(dmu_read(os, obj, 0, nblks * blksz, buf, DMU_READ_PREFETCH));
+	for (uint64_t b = 0; b < nblks; b++) {
+		for (uint64_t w = 0; w < words; w++) {
+			uint64_t expect = hasdata[b] ?
+			    ztest_swap_word(seed, b, w) : 0;
+			if (buf[b * words + w] != expect) {
+				fatal(B_FALSE, "object %llu block %llu word "
+				    "%llu: %llx, expected %llx",
+				    (u_longlong_t)obj, (u_longlong_t)b,
+				    (u_longlong_t)w,
+				    (u_longlong_t)buf[b * words + w],
+				    (u_longlong_t)expect);
+			}
+		}
+	}
+}
+
+/*
+ * Verify dmu_object_swap_data(): write an object at a small block size,
+ * with holes, copy it into an object of a larger block size as zfs rewrite
+ * -b does, exchange the two, and check what each one holds afterwards.
+ */
+void
+ztest_dmu_object_swap_data(ztest_ds_t *zd, uint64_t id)
+{
+	objset_t *os = zd->zd_os;
+	dsl_pool_t *dp = dmu_objset_pool(os);
+	uint64_t blksz1 = 1ULL << (SPA_MINBLOCKSHIFT + ztest_random(5));
+	uint64_t blksz2 = blksz1 << (1 + ztest_random(4));
+	uint64_t ratio = blksz2 / blksz1;
+	uint64_t nblks2 = 1 + ztest_random(16);
+	uint64_t nblks1 = nblks2 * ratio;
+	uint64_t size = nblks1 * blksz1;
+	uint64_t seed = ztest_random(-1ULL) ^ id;
+	uint64_t obj1, obj2, txg;
+	dmu_object_info_t doi1, doi2, doi;
+	int error, swap_error;
+
+	uint8_t *hasdata1 = kmem_zalloc(nblks1, KM_SLEEP);
+	uint8_t *hasdata2 = kmem_zalloc(nblks2, KM_SLEEP);
+	uint64_t *buf = vmem_alloc(size, KM_SLEEP);
+
+	dmu_tx_t *tx = dmu_tx_create(os);
+	dmu_tx_hold_bonus(tx, DMU_NEW_OBJECT);
+	dmu_tx_hold_bonus(tx, DMU_NEW_OBJECT);
+	dmu_tx_hold_write(tx, DMU_NEW_OBJECT, 0, size);
+	txg = ztest_tx_assign(tx, DMU_TX_WAIT, FTAG);
+	if (txg == 0)
+		goto out;
+	obj1 = dmu_object_alloc(os, DMU_OT_UINT64_OTHER, blksz1,
+	    DMU_OT_NONE, 0, tx);
+	obj2 = dmu_object_alloc(os, DMU_OT_UINT64_OTHER, blksz2,
+	    DMU_OT_NONE, 0, tx);
+
+	/* Leave about a quarter of the small blocks as holes. */
+	uint64_t words = blksz1 / sizeof (uint64_t);
+	for (uint64_t b = 0; b < nblks1; b++) {
+		if (ztest_random(4) == 0)
+			continue;
+		hasdata1[b] = 1;
+		hasdata2[b / ratio] = 1;
+		for (uint64_t w = 0; w < words; w++)
+			buf[w] = ztest_swap_word(seed, b, w);
+		dmu_write(os, obj1, b * blksz1, blksz1, buf, tx,
+		    DMU_READ_PREFETCH);
+	}
+	dmu_tx_commit(tx);
+	txg_wait_synced(dp, 0);
+
+	/* The copy: each large block that spans some data, whole. */
+	for (uint64_t b = 0; b < nblks2; b++) {
+		if (!hasdata2[b])
+			continue;
+		VERIFY0(dmu_read(os, obj1, b * blksz2, blksz2, buf,
+		    DMU_READ_PREFETCH));
+		tx = dmu_tx_create(os);
+		dmu_tx_hold_write(tx, obj2, b * blksz2, blksz2);
+		if (ztest_tx_assign(tx, DMU_TX_WAIT, FTAG) == 0)
+			goto out_free;
+		dmu_write(os, obj2, b * blksz2, blksz2, buf, tx,
+		    DMU_READ_PREFETCH);
+		dmu_tx_commit(tx);
+	}
+	txg_wait_synced(dp, 0);
+
+	VERIFY0(dmu_object_info(os, obj1, &doi1));
+	VERIFY0(dmu_object_info(os, obj2, &doi2));
+
+	tx = dmu_tx_create(os);
+	dmu_tx_hold_bonus(tx, obj1);
+	dmu_tx_hold_bonus(tx, obj2);
+	txg = ztest_tx_assign(tx, DMU_TX_WAIT, FTAG);
+	if (txg == 0)
+		goto out_free;
+	error = dmu_object_swap_data(os, obj1, obj2, &swap_error, tx);
+	dmu_tx_commit(tx);
+	if (error == ENOTSUP)	/* A pool too old to count bytes used. */
+		goto out_free;
+	VERIFY0(error);
+	txg_wait_synced(dp, txg);
+
+	/* Nothing else holds these objects, so nothing should be busy. */
+	VERIFY0(swap_error);
+
+	/* obj1 now has the large blocks, and obj2 the small ones. */
+	VERIFY0(dmu_object_info(os, obj1, &doi));
+	VERIFY3U(doi.doi_data_block_size, ==, blksz2);
+	VERIFY3U(doi.doi_physical_blocks_512, ==, doi2.doi_physical_blocks_512);
+	VERIFY3U(doi.doi_fill_count, ==, doi2.doi_fill_count);
+	VERIFY3U(doi.doi_max_offset, ==, doi2.doi_max_offset);
+	VERIFY3U(doi.doi_indirection, ==, doi2.doi_indirection);
+	ztest_swap_verify(os, obj1, seed, hasdata1, nblks1, blksz1, buf);
+
+	VERIFY0(dmu_object_info(os, obj2, &doi));
+	VERIFY3U(doi.doi_data_block_size, ==, blksz1);
+	VERIFY3U(doi.doi_physical_blocks_512, ==, doi1.doi_physical_blocks_512);
+	VERIFY3U(doi.doi_fill_count, ==, doi1.doi_fill_count);
+	VERIFY3U(doi.doi_max_offset, ==, doi1.doi_max_offset);
+	VERIFY3U(doi.doi_indirection, ==, doi1.doi_indirection);
+	ztest_swap_verify(os, obj2, seed, hasdata1, nblks1, blksz1, buf);
+
+	if (ztest_opts.zo_verbose >= 6) {
+		(void) printf("swapped data of objects %llu and %llu, "
+		    "blocks %llu and %llu\n", (u_longlong_t)obj1,
+		    (u_longlong_t)obj2, (u_longlong_t)blksz1,
+		    (u_longlong_t)blksz2);
+	}
+
+out_free:
+	tx = dmu_tx_create(os);
+	dmu_tx_hold_free(tx, obj1, 0, DMU_OBJECT_END);
+	dmu_tx_hold_free(tx, obj2, 0, DMU_OBJECT_END);
+	txg = ztest_tx_assign(tx, DMU_TX_WAIT, FTAG);
+	if (txg != 0) {
+		VERIFY0(dmu_object_free(os, obj1, tx));
+		VERIFY0(dmu_object_free(os, obj2, tx));
+		dmu_tx_commit(tx);
+	}
+out:
+	vmem_free(buf, size);
+	kmem_free(hasdata2, nblks2);
+	kmem_free(hasdata1, nblks1);
 }
 
 #undef OD_ARRAY_SIZE

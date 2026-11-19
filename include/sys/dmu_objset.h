@@ -175,6 +175,7 @@ struct objset {
 	multilist_t os_dirty_dnodes[TXG_SIZE];
 	list_t os_dnodes;
 	list_t os_downgraded_dbufs;
+	list_t os_swap_data[TXG_SIZE];	/* dmu_object_swap_data() */
 
 	/* Protects changes to DMU_{USER,GROUP,PROJECT}USED_OBJECT */
 	kmutex_t os_userused_lock;
@@ -191,6 +192,14 @@ struct objset {
 	boolean_t os_upgrade_exit;
 	int os_upgrade_status;
 };
+
+/* A data exchange pending on os_swap_data[], see dmu_object_swap_data(). */
+typedef struct dmu_swap_data {
+	list_node_t	dsd_node;
+	struct dnode	*dsd_dn1;
+	struct dnode	*dsd_dn2;
+	int		*dsd_errorp;
+} dmu_swap_data_t;
 
 #define	DMU_META_OBJSET		0
 #define	DMU_META_DNODE_OBJECT	0

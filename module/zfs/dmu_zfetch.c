@@ -229,6 +229,20 @@ dmu_zfetch_fini(zfetch_t *zf)
 }
 
 /*
+ * Forget all streams, as when the block size of the dnode changes.
+ */
+void
+dmu_zfetch_reset(zfetch_t *zf)
+{
+	zstream_t *zs;
+
+	mutex_enter(&zf->zf_lock);
+	while ((zs = list_head(&zf->zf_stream)) != NULL)
+		dmu_zfetch_stream_remove(zf, zs);
+	mutex_exit(&zf->zf_lock);
+}
+
+/*
  * If there aren't too many active streams already, create one more.
  * In process delete/reuse all streams without hits for zfetch_max_sec_reap.
  * If needed, reuse oldest stream without hits for zfetch_min_sec_reap or ever.

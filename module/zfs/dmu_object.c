@@ -496,6 +496,60 @@ dmu_object_free_zapified(objset_t *mos, uint64_t object, dmu_tx_t *tx)
 	VERIFY0(dmu_object_free(mos, object, tx));
 }
 
+/*
+ * See the comment above the declaration in dmu.h.  The exchange itself is
+ * done by dnode_swap_data_sync(), called from dmu_objset_sync().
+ */
+int
+dmu_object_swap_data(objset_t *os, uint64_t obj1, uint64_t obj2,
+    int *errorp, dmu_tx_t *tx)
+{
+	dnode_t *dn1, *dn2;
+	int err;
+
+	ASSERT(!dmu_tx_is_syncing(tx));
+
+	if (obj1 == obj2)
+		return (SET_ERROR(EINVAL));
+
+	err = dnode_hold(os, obj1, FTAG, &dn1);
+	if (err != 0)
+		return (err);
+	err = dnode_hold(os, obj2, FTAG, &dn2);
+	if (err != 0) {
+		dnode_rele(dn1, FTAG);
+		return (err);
+	}
+
+	err = dnode_swap_data_check(dn1, dn2);
+	if (err == 0) {
+		dmu_swap_data_t *dsd = kmem_alloc(sizeof (*dsd), KM_SLEEP);
+
+		/* Most cached dbufs can go now; syncing context checks. */
+		(void) dnode_evict_data_dbufs(dn1);
+		(void) dnode_evict_data_dbufs(dn2);
+
+		*errorp = EBUSY;
+		dsd->dsd_dn1 = dn1;
+		dsd->dsd_dn2 = dn2;
+		dsd->dsd_errorp = errorp;
+		VERIFY(dnode_add_ref(dn1, dsd));
+		VERIFY(dnode_add_ref(dn2, dsd));
+
+		dnode_setdirty(dn1, tx);
+		dnode_setdirty(dn2, tx);
+
+		mutex_enter(&os->os_lock);
+		list_insert_tail(&os->os_swap_data[tx->tx_txg & TXG_MASK],
+		    dsd);
+		mutex_exit(&os->os_lock);
+	}
+
+	dnode_rele(dn2, FTAG);
+	dnode_rele(dn1, FTAG);
+	return (err);
+}
+
 EXPORT_SYMBOL(dmu_object_alloc);
 EXPORT_SYMBOL(dmu_object_alloc_ibs);
 EXPORT_SYMBOL(dmu_object_alloc_dnsize);
@@ -506,6 +560,7 @@ EXPORT_SYMBOL(dmu_object_reclaim);
 EXPORT_SYMBOL(dmu_object_reclaim_dnsize);
 EXPORT_SYMBOL(dmu_object_rm_spill);
 EXPORT_SYMBOL(dmu_object_free);
+EXPORT_SYMBOL(dmu_object_swap_data);
 EXPORT_SYMBOL(dmu_object_next);
 EXPORT_SYMBOL(dmu_object_zapify);
 EXPORT_SYMBOL(dmu_object_free_zapified);
