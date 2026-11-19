@@ -235,6 +235,41 @@ AC_DEFUN([ZFS_AC_KERNEL_BIO_ALLOC_4ARG], [
 ])
 
 dnl #
+dnl # Linux 5.18 API
+dnl #
+dnl # bio_clone_fast() was replaced by bio_alloc_clone(), which gives the
+dnl # clone a reference on the blkg of its source bio.
+dnl #
+AC_DEFUN([ZFS_AC_KERNEL_SRC_BIO_ALLOC_CLONE], [
+	ZFS_LINUX_TEST_SRC([bio_alloc_clone], [
+		#include <linux/bio.h>
+	],[
+		struct block_device *bdev = NULL;
+		struct bio *src = NULL;
+		struct bio *bio __attribute__ ((unused));
+		bio = bio_alloc_clone(bdev, src, GFP_NOIO, &fs_bio_set);
+	], [], [ZFS_META_LICENSE])
+])
+
+AC_DEFUN([ZFS_AC_KERNEL_BIO_ALLOC_CLONE], [
+	AC_MSG_CHECKING([whether bio_alloc_clone() is available])
+	ZFS_LINUX_TEST_RESULT([bio_alloc_clone], [
+		AC_MSG_RESULT(yes)
+
+		AC_MSG_CHECKING([whether bio_alloc_clone() is GPL-only])
+		ZFS_LINUX_TEST_RESULT([bio_alloc_clone_license], [
+			AC_MSG_RESULT(no)
+			AC_DEFINE(HAVE_BIO_ALLOC_CLONE, 1,
+			    [bio_alloc_clone() is available])
+		],[
+			AC_MSG_RESULT(yes)
+		])
+	],[
+		AC_MSG_RESULT(no)
+	])
+])
+
+dnl #
 dnl # Linux 7.3 API
 dnl #
 dnl # bi_iter.bi_bvec_done renamed to bi_iter.bi_offset
@@ -267,6 +302,7 @@ AC_DEFUN([ZFS_AC_KERNEL_SRC_BIO], [
 	ZFS_AC_KERNEL_SRC_BDEV_SUBMIT_BIO_RETURNS_VOID
 	ZFS_AC_KERNEL_SRC_BIO_SET_DEV_MACRO
 	ZFS_AC_KERNEL_SRC_BIO_ALLOC_4ARG
+	ZFS_AC_KERNEL_SRC_BIO_ALLOC_CLONE
 	ZFS_AC_KERNEL_SRC_BVEC_ITER_OFFSET
 ])
 
@@ -278,5 +314,6 @@ AC_DEFUN([ZFS_AC_KERNEL_BIO], [
 	ZFS_AC_KERNEL_BIO_BDEV_DISK
 	ZFS_AC_KERNEL_BDEV_SUBMIT_BIO_RETURNS_VOID
 	ZFS_AC_KERNEL_BIO_ALLOC_4ARG
+	ZFS_AC_KERNEL_BIO_ALLOC_CLONE
 	ZFS_AC_KERNEL_BVEC_ITER_OFFSET
 ])

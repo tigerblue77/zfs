@@ -682,6 +682,42 @@ vdev_submit_bio_wait(struct bio *bio)
 	current->bio_list = bio_list;
 }
 
+/*
+ * Charge a bio to the root blkcg.  The compatibility code above always did
+ * on kernels whose bio_set_dev() is GPL-only, but bio_alloc() charges the
+ * bio to the blkcg of the submitting thread since Linux 5.18.  ZFS issues
+ * pool I/O from whatever thread is at hand, so the io.max, io.latency or
+ * io.weight settings of one thread's cgroup would throttle I/O it merely
+ * issues for the whole pool.
+ *
+ * bio_associate_blkg_from_css() is GPL-only, and struct blkcg_gq private
+ * since Linux 6.0, but bio_alloc_clone() gives the clone a reference on the
+ * blkg of its source.  So lend the bio the root blkg, clone it, and swap:
+ * the bio keeps the clone's root reference, the clone drops the bio's own.
+ */
+static inline void
+vdev_bio_associate_root_blkg(struct bio *bio, struct block_device *bdev,
+    gfp_t gfp_mask)
+{
+#if defined(CONFIG_BLK_CGROUP) && defined(HAVE_BIO_ALLOC_CLONE)
+	struct blkcg_gq *root = bdev_get_queue(bdev)->root_blkg;
+	struct blkcg_gq *blkg = bio->bi_blkg;
+	struct bio *clone;
+
+	if (root == NULL || blkg == NULL || blkg == root)
+		return;
+
+	bio->bi_blkg = root;
+	clone = bio_alloc_clone(bdev, bio, gfp_mask, &fs_bio_set);
+	if (clone != NULL && clone->bi_blkg == root)
+		clone->bi_blkg = blkg;
+	else
+		bio->bi_blkg = blkg;
+	if (clone != NULL)
+		bio_put(clone);
+#endif
+}
+
 static inline struct bio *
 vdev_bio_alloc(struct block_device *bdev, gfp_t gfp_mask,
     unsigned short nr_vecs)
@@ -697,6 +733,8 @@ vdev_bio_alloc(struct block_device *bdev, gfp_t gfp_mask,
 #endif
 	if (unlikely(bio == NULL))
 		return (NULL);
+
+	vdev_bio_associate_root_blkg(bio, bdev, gfp_mask);
 
 	/*
 	 * ZFS schedules pool I/O itself and issues it from whatever thread
