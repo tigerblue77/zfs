@@ -195,15 +195,24 @@ wait_for_children(boolean_t do_pause, boolean_t wait)
 	struct rusage usage;
 	int status;
 	struct launched_process_node node, *pnode;
+	sigset_t mask;
 
-	for (_reap_children_stop = B_FALSE; !_reap_children_stop; ) {
+	/*
+	 * The reaper keeps SIGCHLD blocked and takes it only in sigsuspend(),
+	 * so a SIGCHLD sent after the test of _reap_children_stop still ends
+	 * the wait, where pause() would sleep through it.
+	 */
+	(void) sigfillset(&mask);
+	(void) sigdelset(&mask, SIGCHLD);
+
+	while (!_reap_children_stop) {
 		(void) pthread_mutex_lock(&_launched_processes_lock);
 		pid = wait4(0, &status, wait ? 0 : WNOHANG, &usage);
 		if (pid == 0 || pid == (pid_t)-1) {
 			(void) pthread_mutex_unlock(&_launched_processes_lock);
 			if ((pid == 0) || (errno == ECHILD)) {
 				if (do_pause)
-					pause();
+					(void) sigsuspend(&mask);
 			} else if (errno != EINTR)
 				zed_log_msg(LOG_WARNING,
 				    "Failed to wait for children: %s",
@@ -270,8 +279,8 @@ _reap_children(void *arg)
 	(void) arg;
 	struct sigaction sa = {};
 
+	/* SIGCHLD is taken in wait_for_children() only */
 	(void) sigfillset(&sa.sa_mask);
-	(void) sigdelset(&sa.sa_mask, SIGCHLD);
 	(void) pthread_sigmask(SIG_SETMASK, &sa.sa_mask, NULL);
 
 	(void) sigemptyset(&sa.sa_mask);
@@ -380,6 +389,8 @@ zed_exec_process(uint64_t eid, const char *class, const char *subclass,
 
 	if (_reap_children_tid == (pthread_t)-1) {
 		_launched_processes_limit = zcp->max_jobs;
+		/* not in the thread: zed_exec_fini() may run before it does */
+		_reap_children_stop = B_FALSE;
 
 		if (pthread_create(&_reap_children_tid, NULL,
 		    _reap_children, NULL) != 0)
