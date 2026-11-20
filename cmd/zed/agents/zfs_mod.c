@@ -86,6 +86,12 @@
 typedef void (*zfs_process_func_t)(zpool_handle_t *, nvlist_t *, boolean_t);
 
 libzfs_handle_t *g_zfshdl;
+/*
+ * A libzfs handle is not thread-safe, yet the enum-pools thread, the agents
+ * thread and the tasks of g_taskq all use g_zfshdl: zpool_iter() in one can
+ * free the pool namespace that zpool_iter() in another is walking.
+ */
+static pthread_mutex_t g_zfshdl_lock = PTHREAD_MUTEX_INITIALIZER;
 list_t g_pool_list;	/* list of unavailable pools at initialization */
 list_t g_device_list;	/* list of disks with asynchronous label request */
 taskq_t *g_taskq;
@@ -695,8 +701,10 @@ zfs_enable_ds(void *arg)
 {
 	unavailpool_t *pool = (unavailpool_t *)arg;
 
+	(void) pthread_mutex_lock(&g_zfshdl_lock);
 	(void) zpool_enable_datasets(pool->uap_zhp, NULL, 0, 512);
 	zpool_close(pool->uap_zhp);
+	(void) pthread_mutex_unlock(&g_zfshdl_lock);
 	free(pool);
 }
 
@@ -1340,6 +1348,7 @@ zfs_enum_pools(void *arg)
 {
 	(void) arg;
 
+	(void) pthread_mutex_lock(&g_zfshdl_lock);
 	(void) zpool_iter(g_zfshdl, zfs_unavail_pool, (void *)&g_pool_list);
 	/*
 	 * Linux - instead of using a thread pool, each list entry
@@ -1347,6 +1356,7 @@ zfs_enum_pools(void *arg)
 	 * to available. zfs_slm_fini will wait for these threads.
 	 */
 	g_enumeration_done = B_TRUE;
+	(void) pthread_mutex_unlock(&g_zfshdl_lock);
 	return (NULL);
 }
 
@@ -1414,5 +1424,7 @@ void
 zfs_slm_event(const char *class, const char *subclass, nvlist_t *nvl)
 {
 	zed_log_msg(LOG_INFO, "zfs_slm_event: %s.%s", class, subclass);
+	(void) pthread_mutex_lock(&g_zfshdl_lock);
 	(void) zfs_slm_deliver_event(class, subclass, nvl);
+	(void) pthread_mutex_unlock(&g_zfshdl_lock);
 }
