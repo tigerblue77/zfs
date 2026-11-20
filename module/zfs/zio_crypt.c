@@ -1143,18 +1143,24 @@ zio_crypt_init_uios_zil(boolean_t encrypt, uint8_t *plainbuf,
 	}
 	memset(dst, 0, datalen);
 
-	/* find the start and end record of the log block */
+	/*
+	 * Find the start and end record of the log block.  On decryption
+	 * these lengths are not authenticated yet, so check that every
+	 * record lies within the block before anything is allocated.
+	 */
 	zilc = (zil_chain_t *)src;
 	slrp = src + sizeof (zil_chain_t);
 	nused = ((byteswap) ? BSWAP_64(zilc->zc_nused) : zilc->zc_nused);
-	ASSERT3U(nused, >=, sizeof (zil_chain_t));
-	ASSERT3U(nused, <=, datalen);
+	if (nused < sizeof (zil_chain_t) || nused > datalen)
+		return (SET_ERROR(ECKSUM));
 	blkend = src + nused;
 
 	/* calculate the number of encrypted iovecs we will need */
 	for (; slrp < blkend; slrp += lr_len) {
 		lr = (lr_t *)slrp;
 
+		if (blkend - slrp < sizeof (lr_t))
+			return (SET_ERROR(ECKSUM));
 		if (!byteswap) {
 			txtype = lr->lrc_txtype;
 			lr_len = lr->lrc_reclen;
@@ -1162,8 +1168,11 @@ zio_crypt_init_uios_zil(boolean_t encrypt, uint8_t *plainbuf,
 			txtype = BSWAP_64(lr->lrc_txtype);
 			lr_len = BSWAP_64(lr->lrc_reclen);
 		}
-		ASSERT3U(lr_len, >=, sizeof (lr_t));
-		ASSERT3U(lr_len, <=, blkend - slrp);
+		if (lr_len < sizeof (lr_t) || lr_len > blkend - slrp ||
+		    (txtype == TX_WRITE && lr_len < sizeof (lr_write_t)) ||
+		    (txtype == TX_CLONE_RANGE &&
+		    lr_len < offsetof(lr_clone_range_t, lr_nbps)))
+			return (SET_ERROR(ECKSUM));
 
 		nr_iovecs++;
 		if (txtype == TX_WRITE && lr_len != sizeof (lr_write_t))
@@ -1210,6 +1219,9 @@ zio_crypt_init_uios_zil(boolean_t encrypt, uint8_t *plainbuf,
 			txtype = BSWAP_64(lr->lrc_txtype);
 			lr_len = BSWAP_64(lr->lrc_reclen);
 		}
+		/* the first pass checked these records */
+		ASSERT3U(lr_len, >=, sizeof (lr_t));
+		ASSERT3U(lr_len, <=, blkend - slrp);
 
 		/* copy the common lr_t */
 		memcpy(dlrp, slrp, sizeof (lr_t));
@@ -1321,14 +1333,25 @@ zio_crypt_init_uios_dnode(boolean_t encrypt, uint64_t version,
 	/*
 	 * Count the number of iovecs we will need to do the encryption by
 	 * counting the number of bonus buffers that need to be encrypted.
+	 * On decryption the dnodes are not authenticated yet, so check
+	 * first that each one, with its block pointers, bonus buffer and
+	 * spill pointer, lies within the block.
 	 */
 	for (i = 0; i < max_dnp; i += sdnp[i].dn_extra_slots + 1) {
+		dnp = &sdnp[i];
+
 		/*
 		 * This block may still be byteswapped. However, all of the
 		 * values we use are either uint8_t's (for which byteswapping
 		 * is a noop) or a * != 0 check, which will work regardless
 		 * of whether or not we byteswap.
 		 */
+		if (dnp->dn_extra_slots >= max_dnp - i ||
+		    dnp->dn_nblkptr > DN_MAX_NBLKPTR ||
+		    ((dnp->dn_flags & DNODE_FLAG_SPILL_BLKPTR) &&
+		    (uint8_t *)DN_BONUS(dnp) > (uint8_t *)DN_SPILL_BLKPTR(dnp)))
+			return (SET_ERROR(ECKSUM));
+
 		if (sdnp[i].dn_type != DMU_OT_NONE &&
 		    DMU_OT_IS_ENCRYPTED(sdnp[i].dn_bonustype) &&
 		    sdnp[i].dn_bonuslen != 0) {
@@ -1360,6 +1383,10 @@ zio_crypt_init_uios_dnode(boolean_t encrypt, uint64_t version,
 	 */
 	for (i = 0; i < max_dnp; i += sdnp[i].dn_extra_slots + 1) {
 		dnp = &sdnp[i];
+
+		/* the first pass checked these dnodes */
+		ASSERT3U(dnp->dn_extra_slots, <, max_dnp - i);
+		ASSERT3U(dnp->dn_nblkptr, <=, DN_MAX_NBLKPTR);
 
 		/* copy over the core fields and blkptrs (kept as plaintext) */
 		memcpy(&ddnp[i], dnp,
@@ -1466,7 +1493,8 @@ zio_crypt_init_uios_normal(boolean_t encrypt, uint8_t *plainbuf,
  * Most blocks will use zio_crypt_init_uios_normal(), with ZIL and dnode blocks
  * requiring special handling to parse out pieces that are to be encrypted. The
  * authbuf is used by these special cases to store additional authenticated
- * data (AAD) for the encryption modes.
+ * data (AAD) for the encryption modes.  On failure, the uios are not set up
+ * and nothing is left allocated.
  */
 static int
 zio_crypt_init_uios(boolean_t encrypt, uint64_t version, dmu_object_type_t ot,
@@ -1523,6 +1551,7 @@ zio_do_crypt_data(boolean_t encrypt, zio_crypt_key_t *key,
 	crypto_key_t tmp_ckey, *ckey = NULL;
 	zio_crypt_session_t *sess;
 	uint8_t *authbuf = NULL;
+	boolean_t uios = B_FALSE;
 
 	memset(&puio, 0, sizeof (puio));
 	memset(&cuio, 0, sizeof (cuio));
@@ -1592,6 +1621,7 @@ zio_do_crypt_data(boolean_t encrypt, zio_crypt_key_t *key,
 	    &authbuf, &auth_len, no_crypt);
 	if (ret != 0)
 		goto error;
+	uios = B_TRUE;
 
 	/* perform the encryption / decryption in software */
 	if (encrypt)
@@ -1623,7 +1653,8 @@ error:
 		zio_buf_free(authbuf, datalen);
 	if (ckey == &tmp_ckey)
 		memset(enc_keydata, 0, ci->ci_keylen);
-	zio_crypt_uios_fini_os(&puio, &cuio);
+	if (uios)
+		zio_crypt_uios_fini_os(&puio, &cuio);
 	return (SET_ERROR(ret));
 }
 
