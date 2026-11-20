@@ -1,0 +1,36 @@
+// SPDX-License-Identifier: CDDL-1.0
+//
+// Time spent waiting for contended locks, by thread name and by kernel
+// stack (lock:contention_begin/end).  Run-queue waits come from
+// /proc/<tid>/schedstat instead (report.py schedsample): a sched_switch
+// program keyed by thread name does not load on the runners' kernel.
+// Stop it with SIGINT.
+
+BEGIN
+{
+	@t0 = nsecs;
+}
+
+tracepoint:lock:contention_begin
+{
+	@lt[tid] = nsecs;
+}
+
+tracepoint:lock:contention_end
+{
+	$l = @lt[tid];
+	if ($l != 0) {
+		$d = (nsecs - $l) / 1000;
+		@lock_us[comm] = sum($d);
+		@lock_n[comm] = count();
+		@lock_stk_us[kstack(6)] = sum($d);
+		delete(@lt[tid]);
+	}
+}
+
+END
+{
+	printf("elapsed_ms %d\n", (nsecs - @t0) / 1000000);
+	clear(@t0);
+	clear(@lt);
+}
