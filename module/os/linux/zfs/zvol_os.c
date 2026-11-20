@@ -1506,12 +1506,33 @@ zvol_os_remove_minor(zvol_state_t *zv)
 
 	/*
 	 * Drop the state lock before calling del_gendisk(). There may be
-	 * callers waiting to acquire it, but del_gendisk() will block until
-	 * they exit, which would deadlock.
+	 * callers waiting to acquire it, but del_gendisk() or the wait below
+	 * will block until they exit, which would deadlock.
 	 */
 	mutex_exit(&zv->zv_state_lock);
 
+#ifdef HAVE_BLKDEV_BD_MUTEX
+	/*
+	 * zvol_open() and zvol_release() run under the whole disk's bd_mutex,
+	 * which del_gendisk() does not take on Linux 5.10 and older. Take it
+	 * once del_gendisk() is done, so that a caller that read private_data
+	 * before it was cleared is gone before zv is freed. Look the bdev up
+	 * first, as del_gendisk() unhashes it. bdget_disk() only allocates if
+	 * nobody holds the bdev, so if it fails there is nobody to wait for.
+	 */
+	struct block_device *bdev = bdget_disk(zso->zvo_disk, 0);
+#endif
+
 	del_gendisk(zso->zvo_disk);
+
+#ifdef HAVE_BLKDEV_BD_MUTEX
+	if (bdev != NULL) {
+		mutex_lock(&bdev->bd_mutex);
+		mutex_unlock(&bdev->bd_mutex);
+		bdput(bdev);
+	}
+#endif
+
 #if defined(HAVE_SUBMIT_BIO_IN_BLOCK_DEVICE_OPERATIONS) && \
 	(defined(HAVE_BLK_ALLOC_DISK) || defined(HAVE_BLK_ALLOC_DISK_2ARG))
 #if defined(HAVE_BLK_CLEANUP_DISK)

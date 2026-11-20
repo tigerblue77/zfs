@@ -711,6 +711,35 @@ AC_DEFUN([ZFS_AC_KERNEL_BLKDEV_GET_ERESTARTSYS], [
 ])
 
 dnl #
+dnl # 5.14 API change
+dnl # The bd_mutex of struct block_device became the open_mutex of
+dnl # struct gendisk.
+dnl #
+AC_DEFUN([ZFS_AC_KERNEL_SRC_BLKDEV_BD_MUTEX], [
+	ZFS_LINUX_TEST_SRC([blkdev_bd_mutex], [
+		#include <linux/fs.h>
+		#include <linux/blkdev.h>
+	],[
+		struct gendisk *disk = NULL;
+		struct block_device *bdev = bdget_disk(disk, 0);
+		mutex_lock(&bdev->bd_mutex);
+		mutex_unlock(&bdev->bd_mutex);
+		bdput(bdev);
+	], [], [ZFS_META_LICENSE])
+])
+
+AC_DEFUN([ZFS_AC_KERNEL_BLKDEV_BD_MUTEX], [
+	AC_MSG_CHECKING([whether bdget_disk() and bd_mutex are available])
+	ZFS_LINUX_TEST_RESULT([blkdev_bd_mutex_license], [
+		AC_MSG_RESULT(yes)
+		AC_DEFINE(HAVE_BLKDEV_BD_MUTEX, 1,
+		    [bdget_disk() and bd_mutex are available])
+	],[
+		AC_MSG_RESULT(no)
+	])
+])
+
+dnl #
 dnl # 6.5.x API change
 dnl # BLK_STS_NEXUS replaced with BLK_STS_RESV_CONFLICT
 dnl #
@@ -757,6 +786,7 @@ AC_DEFUN([ZFS_AC_KERNEL_SRC_BLKDEV], [
 	ZFS_AC_KERNEL_SRC_BLKDEV_DISK_CHECK_MEDIA_CHANGE
 	ZFS_AC_KERNEL_SRC_BLKDEV_BLK_STS_RESV_CONFLICT
 	ZFS_AC_KERNEL_SRC_BLKDEV_BLK_MODE_T
+	ZFS_AC_KERNEL_SRC_BLKDEV_BD_MUTEX
 ])
 
 AC_DEFUN([ZFS_AC_KERNEL_BLKDEV], [
@@ -779,4 +809,5 @@ AC_DEFUN([ZFS_AC_KERNEL_BLKDEV], [
 	ZFS_AC_KERNEL_BLKDEV_DISK_CHECK_MEDIA_CHANGE
 	ZFS_AC_KERNEL_BLKDEV_BLK_STS_RESV_CONFLICT
 	ZFS_AC_KERNEL_BLKDEV_BLK_MODE_T
+	ZFS_AC_KERNEL_BLKDEV_BD_MUTEX
 ])
