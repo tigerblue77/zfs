@@ -1165,6 +1165,11 @@ stable storage.
 The timeout is scaled based on a percentage of the last lwb
 latency to avoid significantly impacting the latency of each individual
 transaction record (itx).
+That latency is timed from when an lwb is issued until it is on stable
+storage.
+While at least one commit in 8 finds its records already put into an lwb
+by another thread's commit, it is timed from when the lwb was closed
+instead, so that open lwbs wait longer and take more records.
 .
 .It Sy zfs_compressed_arc_enabled Ns = Ns Sy 1 Ns | Ns 0 Pq int
 Enables storing ARC buffers in their on-disk compressed form, reducing

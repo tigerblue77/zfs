@@ -858,6 +858,7 @@ zil_alloc_lwb(zilog_t *zilog, blkptr_t *bp, int min_sz, int sz,
 	lwb->lwb_write_zio = NULL;
 	lwb->lwb_root_zio = NULL;
 	lwb->lwb_issued_timestamp = 0;
+	lwb->lwb_close_timestamp = 0;
 	lwb->lwb_issued_txg = 0;
 	lwb->lwb_alloc_txg = txg;
 	lwb->lwb_max_txg = 0;
@@ -1526,11 +1527,15 @@ zil_lwb_flush_vdevs_done(zio_t *zio)
 
 	spa_config_exit(zilog->zl_spa, SCL_STATE, lwb);
 
-	hrtime_t t = gethrtime() - lwb->lwb_issued_timestamp;
+	hrtime_t now = gethrtime();
+	hrtime_t t = now - lwb->lwb_issued_timestamp;
+	hrtime_t tc = now - lwb->lwb_close_timestamp;
 
 	mutex_enter(&zilog->zl_lock);
 
 	zilog->zl_last_lwb_latency = (zilog->zl_last_lwb_latency * 7 + t) / 8;
+	zilog->zl_last_lwb_close_latency =
+	    (zilog->zl_last_lwb_close_latency * 7 + tc) / 8;
 
 	lwb->lwb_root_zio = NULL;
 
@@ -1945,6 +1950,7 @@ zil_lwb_write_close(zilog_t *zilog, lwb_t *lwb)
 	ASSERT3S(lwb->lwb_state, ==, LWB_STATE_OPENED);
 	membar_producer();
 	lwb->lwb_state = LWB_STATE_CLOSED;
+	lwb->lwb_close_timestamp = gethrtime();
 
 	/*
 	 * If there was an allocation failure then returned NULL will trigger
@@ -3494,6 +3500,29 @@ zil_process_commit_list(zilog_t *zilog, zil_commit_waiter_t *zcw, list_t *ilwbs)
 }
 
 /*
+ * Count a commit for the share of commits whose itxs another thread's
+ * writer pass has already committed to an lwb (the early exit below).
+ * When it is at least one in 8 over a window, committers queue behind
+ * the writer passes: the log is behind them, and zil_commit_waiter()
+ * lets open lwbs wait longer for more itxs.
+ */
+#define	ZIL_BEHIND_WINDOW	1024
+
+static void
+zil_commit_count_carried(zilog_t *zilog, boolean_t carried)
+{
+	ASSERT(MUTEX_HELD(&zilog->zl_issuer_lock));
+
+	zilog->zl_window_carried += carried;
+	if (++zilog->zl_window_commits < ZIL_BEHIND_WINDOW)
+		return;
+	zilog->zl_behind =
+	    (zilog->zl_window_carried >= ZIL_BEHIND_WINDOW / 8);
+	zilog->zl_window_commits = 0;
+	zilog->zl_window_carried = 0;
+}
+
+/*
  * This function is responsible for ensuring the passed in commit waiter
  * (and associated commit itx) is committed to an lwb. If the waiter is
  * not already committed to an lwb, all itxs in the zilog's queue of
@@ -3520,6 +3549,8 @@ zil_commit_writer(zilog_t *zilog, zil_commit_waiter_t *zcw)
 	list_create(&ilwbs, sizeof (lwb_t), offsetof(lwb_t, lwb_issue_node));
 	mutex_enter(&zilog->zl_issuer_lock);
 
+	zil_commit_count_carried(zilog,
+	    zcw->zcw_lwb != NULL || zcw->zcw_done);
 	if (zcw->zcw_lwb != NULL || zcw->zcw_done) {
 		/*
 		 * It's possible that, while we were waiting to acquire
@@ -3708,11 +3739,15 @@ zil_commit_waiter(zilog_t *zilog, zil_commit_waiter_t *zcw)
 	/*
 	 * The timeout is scaled based on the lwb latency to avoid
 	 * significantly impacting the latency of each individual itx.
-	 * For more details, see the comment at the bottom of the
-	 * zil_process_commit_list() function.
+	 * While the log is behind its committers, fuller lwbs pay, so
+	 * scale it on the latency from each lwb's close, which also counts
+	 * the wait to issue the lwb.  For more details, see the comment at
+	 * the bottom of the zil_process_commit_list() function.
 	 */
 	int pct = MAX(zfs_commit_timeout_pct, 1);
-	hrtime_t sleep = (zilog->zl_last_lwb_latency * pct) / 100;
+	hrtime_t latency = zilog->zl_behind ?
+	    zilog->zl_last_lwb_close_latency : zilog->zl_last_lwb_latency;
+	hrtime_t sleep = (latency * pct) / 100;
 	hrtime_t wakeup = gethrtime() + sleep;
 	boolean_t timedout = B_FALSE;
 
@@ -4423,6 +4458,7 @@ zil_alloc(objset_t *os, zil_header_t *zh_phys)
 	zilog->zl_dirty_max_txg = 0;
 	zilog->zl_last_lwb_opened = NULL;
 	zilog->zl_last_lwb_latency = 0;
+	zilog->zl_last_lwb_close_latency = 0;
 	zilog->zl_max_block_size = MIN(MAX(P2ALIGN_TYPED(zil_maxblocksize,
 	    ZIL_MIN_BLKSZ, uint64_t), ZIL_MIN_BLKSZ),
 	    spa_maxblocksize(dmu_objset_spa(os)));
