@@ -14,7 +14,7 @@
 .\"
 .\" lint-ok: WARNING: sections out of conventional order: Sh SYNOPSIS
 .\"
-.Dd November 17, 2026
+.Dd November 20, 2026
 .Dt ZINJECT 8
 .Os
 .
@@ -189,6 +189,10 @@ last TRIM I/O is done and before the thread is marked as stopped.
 .It Sy vdev_rebuild_thread:exit
 In the thread of a sequential rebuild, when it finishes or stops, after its
 last I/O is done and before the state of the rebuild is updated.
+.It Sy spa_sync:config
+In the sync of each transaction group, with the configuration lock held as
+reader and before anything of the group is written, as during a sync that
+waits for a device that does not answer.
 .El
 .
 .It Xo

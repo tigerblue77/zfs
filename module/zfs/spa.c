@@ -11469,6 +11469,8 @@ spa_sync(spa_t *spa, uint64_t txg)
 	}
 	spa_config_exit(spa, SCL_STATE, FTAG);
 
+	zio_inject_point(spa, ZIO_INJECT_POINT_SYNC_CONFIG);
+
 	dsl_pool_t *dp = spa->spa_dsl_pool;
 	dmu_tx_t *tx = dmu_tx_create_assigned(dp, txg);
 
