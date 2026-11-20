@@ -2256,6 +2256,8 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/replacement/resilver_restart_002.ksh \
 	functional/replacement/scrub_cancel.ksh \
 	functional/replacement/setup.ksh \
+	functional/replacement/vdev_change_load_wait.ksh \
+	functional/replacement/vdev_change_sync_wait.ksh \
 	functional/replacement/vdev_change_thread_wait.ksh \
 	functional/reservation/cleanup.ksh \
 	functional/reservation/reservation_001_pos.ksh \
