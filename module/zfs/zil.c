@@ -858,6 +858,7 @@ zil_alloc_lwb(zilog_t *zilog, blkptr_t *bp, int min_sz, int sz,
 	lwb->lwb_write_zio = NULL;
 	lwb->lwb_root_zio = NULL;
 	lwb->lwb_issued_timestamp = 0;
+	lwb->lwb_close_timestamp = 0;
 	lwb->lwb_issued_txg = 0;
 	lwb->lwb_alloc_txg = txg;
 	lwb->lwb_max_txg = 0;
@@ -1526,11 +1527,15 @@ zil_lwb_flush_vdevs_done(zio_t *zio)
 
 	spa_config_exit(zilog->zl_spa, SCL_STATE, lwb);
 
-	hrtime_t t = gethrtime() - lwb->lwb_issued_timestamp;
+	hrtime_t now = gethrtime();
+	hrtime_t t = now - lwb->lwb_issued_timestamp;
+	hrtime_t tc = now - lwb->lwb_close_timestamp;
 
 	mutex_enter(&zilog->zl_lock);
 
 	zilog->zl_last_lwb_latency = (zilog->zl_last_lwb_latency * 7 + t) / 8;
+	zilog->zl_last_lwb_close_latency =
+	    (zilog->zl_last_lwb_close_latency * 7 + tc) / 8;
 
 	lwb->lwb_root_zio = NULL;
 
@@ -1945,6 +1950,7 @@ zil_lwb_write_close(zilog_t *zilog, lwb_t *lwb)
 	ASSERT3S(lwb->lwb_state, ==, LWB_STATE_OPENED);
 	membar_producer();
 	lwb->lwb_state = LWB_STATE_CLOSED;
+	lwb->lwb_close_timestamp = gethrtime();
 
 	/*
 	 * If there was an allocation failure then returned NULL will trigger
@@ -3708,11 +3714,17 @@ zil_commit_waiter(zilog_t *zilog, zil_commit_waiter_t *zcw)
 	/*
 	 * The timeout is scaled based on the lwb latency to avoid
 	 * significantly impacting the latency of each individual itx.
-	 * For more details, see the comment at the bottom of the
-	 * zil_process_commit_list() function.
+	 * While more threads commit than there are CPUs to run them, the
+	 * log falls behind its committers and fuller lwbs pay, so scale it
+	 * on the latency from each lwb's close, which also counts the wait
+	 * to issue the lwb.  For more details, see the comment at the
+	 * bottom of the zil_process_commit_list() function.
 	 */
 	int pct = MAX(zfs_commit_timeout_pct, 1);
-	hrtime_t sleep = (zilog->zl_last_lwb_latency * pct) / 100;
+	hrtime_t latency =
+	    atomic_load_32(&zilog->zl_committers) > (uint32_t)boot_ncpus ?
+	    zilog->zl_last_lwb_close_latency : zilog->zl_last_lwb_latency;
+	hrtime_t sleep = (latency * pct) / 100;
 	hrtime_t wakeup = gethrtime() + sleep;
 	boolean_t timedout = B_FALSE;
 
@@ -4171,6 +4183,7 @@ out:
 static int
 zil_commit_impl(zilog_t *zilog, uint64_t foid)
 {
+	atomic_inc_32(&zilog->zl_committers);
 	ZIL_STAT_BUMP(zilog, zil_commit_count);
 
 	/*
@@ -4229,6 +4242,7 @@ zil_commit_impl(zilog_t *zilog, uint64_t foid)
 	}
 
 	zil_free_commit_waiter(zcw);
+	atomic_dec_32(&zilog->zl_committers);
 
 	if (err == 0)
 		return (0);
@@ -4423,6 +4437,7 @@ zil_alloc(objset_t *os, zil_header_t *zh_phys)
 	zilog->zl_dirty_max_txg = 0;
 	zilog->zl_last_lwb_opened = NULL;
 	zilog->zl_last_lwb_latency = 0;
+	zilog->zl_last_lwb_close_latency = 0;
 	zilog->zl_max_block_size = MIN(MAX(P2ALIGN_TYPED(zil_maxblocksize,
 	    ZIL_MIN_BLKSZ, uint64_t), ZIL_MIN_BLKSZ),
 	    spa_maxblocksize(dmu_objset_spa(os)));
@@ -4465,6 +4480,7 @@ zil_free(zilog_t *zilog)
 	ASSERT0(zilog->zl_suspend);
 	ASSERT0(zilog->zl_suspending);
 	ASSERT0(zilog->zl_restart_txg);
+	ASSERT0(zilog->zl_committers);
 
 	ASSERT(list_is_empty(&zilog->zl_lwb_list));
 	list_destroy(&zilog->zl_lwb_list);
