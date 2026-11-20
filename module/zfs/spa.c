@@ -235,6 +235,13 @@ static uint_t	zio_taskq_write_pct = 25;
 static int	zio_taskq_bulk_lowpri = 1;
 
 /*
+ * Where zio_taskq_bulk_lowpri places those taskqs, in percent of the way
+ * from the I/O taskqs' priority (0, maxclsyspri) to the default priority
+ * (100, defclsyspri).  On Linux, nice = (pct / 5) - 20.
+ */
+static uint_t	zio_taskq_bulk_pri_pct = 100;
+
+/*
  * Let the threads of those bulk taskqs give their CPU to waiting threads
  * between tasks (TASKQ_YIELD, Linux only), so that a burst of compression
  * delays a woken I/O completion or application thread by at most one task.
@@ -1395,10 +1402,14 @@ spa_taskqs_init(spa_t *spa, zio_type_t t, zio_taskq_type_t q)
 			boolean_t bulk = (q == ZIO_TASKQ_ISSUE ||
 			    q == ZIO_TASKQ_INTERRUPT) &&
 			    zio_taskqs[t][q + 1].zti_mode != ZTI_MODE_NULL;
-			if (bulk && zio_taskq_bulk_lowpri)
-				pri = defclsyspri;
-			else if (t == ZIO_TYPE_WRITE && q == ZIO_TASKQ_ISSUE)
+			if (bulk && zio_taskq_bulk_lowpri) {
+				uint_t pct = MIN(zio_taskq_bulk_pri_pct, 100);
+				pri = maxclsyspri + (pri_t)(((int)defclsyspri -
+				    (int)maxclsyspri) * (int)pct / 100);
+			} else if (t == ZIO_TYPE_WRITE &&
+			    q == ZIO_TASKQ_ISSUE) {
 				pri = wtqclsyspri;
+			}
 			if (bulk && zio_taskq_bulk_yield)
 				tqflags |= TASKQ_YIELD;
 			tq = taskq_create_proc(name, value, pri, 50,
@@ -12931,6 +12942,9 @@ ZFS_MODULE_PARAM(zfs_zio, zio_, taskq_write_pct, UINT, ZMOD_RW,
 
 ZFS_MODULE_PARAM(zfs_zio, zio_, taskq_bulk_lowpri, INT, ZMOD_RW,
 	"Run bulk I/O taskqs at the default priority");
+
+ZFS_MODULE_PARAM(zfs_zio, zio_, taskq_bulk_pri_pct, UINT, ZMOD_RW,
+	"Priority of the bulk I/O taskqs, 0 (I/O taskqs) to 100 (default)");
 
 ZFS_MODULE_PARAM(zfs_spa, spa_, sync_light_pri, INT, ZMOD_RW,
 	"Run the sync threads of lightly dirty pools at the default priority");

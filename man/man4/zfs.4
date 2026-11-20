@@ -2979,6 +2979,16 @@ completions and user processes of other pools, at the cost of slower bulk
 I/O when user processes keep every CPU busy.
 Set value only applies to pools imported/created after that.
 .
+.It Sy zio_taskq_bulk_pri_pct Ns = Ns Sy 100 Ns % Pq uint
+Priority given to the queues that
+.Sy zio_taskq_bulk_lowpri
+lowers, as a percentage of the way from the priority of the other I/O queues
+.Pq Sy 0
+to the default thread priority
+.Pq Sy 100 .
+On Linux, the nice value is this percentage divided by 5, minus 20.
+Set value only applies to pools imported/created after that.
+.
 .It Sy zio_taskq_bulk_yield Ns = Ns Sy 1 Ns | Ns 0 Pq int
 Let the threads of the bulk queues described under
 .Sy zio_taskq_bulk_lowpri
