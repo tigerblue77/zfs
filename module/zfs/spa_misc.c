@@ -2897,6 +2897,7 @@ spa_init(spa_mode_t mode)
 	brt_init();
 	ddt_init();
 	zio_init();
+	spa_wgate_stat_init();
 	dmu_init();
 	zil_init();
 	vdev_mirror_stat_init();
@@ -2924,6 +2925,7 @@ spa_fini(void)
 	chksum_fini();
 	zil_fini();
 	dmu_fini();
+	spa_wgate_stat_fini();
 	zio_fini();
 	ddt_fini();
 	brt_fini();

@@ -576,6 +576,11 @@ struct zio {
 	/* Taskq dispatching state */
 	taskq_ent_t	io_tqent;
 
+	/* Write issue budget state, see spa_wgate_enter() */
+	list_node_t	io_wgate_node;	/* waiting for a slot */
+	struct spa_wgate *io_wgate;	/* the gate it passes */
+	boolean_t	io_wgate_front;	/* cut in line */
+
 	/* Completion batching state */
 	zio_batch_t	*io_batch;	/* batch this zio is a member of */
 	zio_batch_t	*io_child_batch; /* batch its vdev children join */

@@ -186,9 +186,22 @@ typedef enum spa_proc_state {
 	SPA_PROC_GONE		/* spa_thread() is exiting, spa_proc = &p0 */
 } spa_proc_state_t;
 
+/*
+ * The write issue budget's gate in front of one write issue taskq, see
+ * spa_wgate_enter().
+ */
+typedef struct spa_wgate {
+	kmutex_t	wg_lock;
+	list_t		wg_list;	/* zios waiting for a slot */
+	uint_t		wg_active;	/* gated tasks dispatched, not ended */
+	uint_t		wg_threads;	/* threads of wg_tq: the pool's share */
+	taskq_t		*wg_tq;
+} spa_wgate_t;
+
 typedef struct spa_taskqs {
 	uint_t stqs_count;
 	taskq_t **stqs_taskq;
+	spa_wgate_t *stqs_wgate;	/* write issue only, one per taskq */
 } spa_taskqs_t;
 
 /* one for each thread in the spa sync taskq */
@@ -254,6 +267,7 @@ struct spa {
 	spa_config_source_t spa_config_source;	/* where config comes from? */
 	uint64_t	spa_import_flags;	/* import specific flags */
 	spa_taskqs_t	spa_zio_taskq[ZIO_TYPES][ZIO_TASKQ_TYPES];
+	uint32_t	spa_wgate_counted; /* in spa_wgate_npools */
 	dsl_pool_t	*spa_dsl_pool;
 	boolean_t	spa_is_initializing;	/* true while opening pool */
 	boolean_t	spa_is_exporting;	/* true while exporting pool */
@@ -523,6 +537,8 @@ extern const char *zfs_deadman_failmode;
 extern uint_t spa_slop_shift;
 extern void spa_taskq_dispatch(spa_t *spa, zio_type_t t, zio_taskq_type_t q,
     task_func_t *func, zio_t *zio, boolean_t cutinline);
+extern void spa_wgate_stat_init(void);
+extern void spa_wgate_stat_fini(void);
 extern void spa_load_spares(spa_t *spa);
 extern void spa_load_l2cache(spa_t *spa);
 extern sysevent_t *spa_event_create(spa_t *spa, vdev_t *vd, nvlist_t *hist_nvl,

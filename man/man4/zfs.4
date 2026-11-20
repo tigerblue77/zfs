@@ -2989,6 +2989,26 @@ compression.
 Only effective on Linux.
 Set value only applies to pools imported/created after that.
 .
+.It Sy zio_taskq_write_budget Ns = Ns Sy 0 Ns | Ns 1 Ns | Ns 2 Pq uint
+Share the write issue threads among the pools that issue the asynchronous
+writes of a txg at the same time.
+With
+.Sy 1 ,
+while
+.Em N
+pools do, each runs at most
+.Em 1/N
+of its write issue threads at once, rounded up, and never fewer than one;
+a pool issuing alone runs all of them.
+These threads compress, encrypt, checksum and compute parity at a priority
+above user processes, and their count is sized for one pool, so several pools
+syncing together would otherwise take that many times their share of the CPUs.
+Synchronous writes are never limited.
+.Sy 2
+limits every pool to one write issue task per queue, for debugging.
+.Sy 0
+turns the budget off.
+.
 .It Sy zio_taskq_write_light Ns = Ns Sy 1 Ns | Ns 0 Pq int
 Issue the asynchronous writes of a pool that holds no more than its small share
 of the dirty data in the ARC (the share exempt from the ARC's dirty-data

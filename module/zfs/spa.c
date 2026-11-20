@@ -84,6 +84,7 @@
 #include <sys/zfeature.h>
 #include <sys/dsl_destroy.h>
 #include <sys/zvol.h>
+#include <sys/wmsum.h>
 
 #ifdef	_KERNEL
 #include <sys/fm/protocol.h>
@@ -239,6 +240,13 @@ static int	zio_taskq_bulk_lowpri = 1;
  * delays a woken I/O completion or application thread by at most one task.
  */
 static int	zio_taskq_bulk_yield = 1;
+
+/*
+ * Share the write issue threads among the pools issuing the writes of a txg
+ * at the same time, see spa_wgate_enter(): 0 off, 1 on, 2 (debugging) limit
+ * every pool to one task per write issue taskq, as if alone on one CPU.
+ */
+static uint_t	zio_taskq_write_budget = 0;
 
 /*
  * Run the dp_sync_taskq threads of a pool, which run at minclsyspri, at the
@@ -1350,6 +1358,10 @@ spa_taskqs_init(spa_t *spa, zio_type_t t, zio_taskq_type_t q)
 	ASSERT3U(count, >, 0);
 	tqs->stqs_count = count;
 	tqs->stqs_taskq = kmem_alloc(count * sizeof (taskq_t *), KM_SLEEP);
+	if (t == ZIO_TYPE_WRITE && q == ZIO_TASKQ_ISSUE) {
+		tqs->stqs_wgate = kmem_zalloc(count * sizeof (spa_wgate_t),
+		    KM_SLEEP);
+	}
 
 	for (uint_t i = 0; i < count; i++) {
 		taskq_t *tq;
@@ -1396,6 +1408,18 @@ spa_taskqs_init(spa_t *spa, zio_type_t t, zio_taskq_type_t q)
 #endif
 
 		tqs->stqs_taskq[i] = tq;
+
+		if (tqs->stqs_wgate != NULL) {
+			spa_wgate_t *wg = &tqs->stqs_wgate[i];
+
+			mutex_init(&wg->wg_lock, NULL, MUTEX_DEFAULT, NULL);
+			list_create(&wg->wg_list, sizeof (zio_t),
+			    offsetof(zio_t, io_wgate_node));
+			wg->wg_tq = tq;
+			/* The thread count the SPL derives from value. */
+			wg->wg_threads = (flags & TASKQ_THREADS_CPU_PCT) ?
+			    MAX(boot_ncpus * value / 100, 1) : value;
+		}
 	}
 }
 
@@ -1412,6 +1436,20 @@ spa_taskqs_fini(spa_t *spa, zio_type_t t, zio_taskq_type_t q)
 	for (uint_t i = 0; i < tqs->stqs_count; i++) {
 		ASSERT3P(tqs->stqs_taskq[i], !=, NULL);
 		taskq_destroy(tqs->stqs_taskq[i]);
+	}
+
+	/* After taskq_destroy(): no gated task runs any more. */
+	if (tqs->stqs_wgate != NULL) {
+		for (uint_t i = 0; i < tqs->stqs_count; i++) {
+			spa_wgate_t *wg = &tqs->stqs_wgate[i];
+
+			ASSERT0(wg->wg_active);
+			list_destroy(&wg->wg_list);
+			mutex_destroy(&wg->wg_lock);
+		}
+		kmem_free(tqs->stqs_wgate,
+		    tqs->stqs_count * sizeof (spa_wgate_t));
+		tqs->stqs_wgate = NULL;
 	}
 
 	kmem_free(tqs->stqs_taskq, tqs->stqs_count * sizeof (taskq_t *));
@@ -1743,6 +1781,253 @@ spa_taskq_free_param(ZFS_MODULE_PARAM_ARGS)
 #endif /* _KERNEL */
 
 /*
+ * The write issue budget (zio_taskq_write_budget).
+ *
+ * A pool's write issue threads take zio_taskq_batch_pct of the CPUs, a share
+ * sized for one pool.  They compress, encrypt, checksum and compute the
+ * parity of a txg's writes, all dispatched at once, above every user thread,
+ * so pools syncing together ask for that share several times over.  With the
+ * budget on, while N pools issue the writes of a txg, each runs at most
+ * ceil(threads / N) tasks at once in each of its write issue taskqs.  A pool
+ * that issues alone runs as many as it has threads, as without the budget.
+ *
+ * Gated: the asynchronous logical writes of a txg, i.e. zio_execute() in a
+ * write issue taskq with io_vd == NULL, io_txg != 0 and a priority other
+ * than ZIO_PRIORITY_SYNC_WRITE.  Synchronous writes (ZIL, dmu_sync, Direct
+ * I/O), the ZIL's bulk blocks (txg 0) and vdev child I/O are never gated.
+ *
+ * Deadlock freedom.  No thread waits in the gate: a zio over the limit waits
+ * on wg_list holding nothing, and the task that ends hands its slot over.
+ * A gate never allows fewer than one task, which is what a one-CPU host runs
+ * in its single write issue thread.  A gated task, which runs a logical
+ * write up to its vdev I/O, blocks only on reads (DDT lookup and dedup
+ * verify, metaslab loads), on short locks, and on the config lock or RAID-Z
+ * expansion range lock, whose holders wait for vdev child I/O.  None of it
+ * waits for a gated zio, so a slot holder always ends and frees its slot.
+ * Gates of different pools share only N, which sets limits and blocks
+ * nothing.
+ */
+static uint32_t spa_wgate_npools;	/* pools issuing the writes of a txg */
+
+static struct {
+	wmsum_t	wgs_gated;
+	wmsum_t	wgs_waited;
+	wmsum_t	wgs_npools_sum;
+	wmsum_t	wgs_limit_sum;
+} spa_wgate_sums;
+
+typedef struct spa_wgate_stats {
+	kstat_named_t	wgs_npools;	/* now */
+	kstat_named_t	wgs_gated;	/* gated zios */
+	kstat_named_t	wgs_waited;	/* of which waited for a slot */
+	kstat_named_t	wgs_npools_sum;	/* N seen by each, summed */
+	kstat_named_t	wgs_limit_sum;	/* limit seen by each, summed */
+} spa_wgate_stats_t;
+
+static spa_wgate_stats_t spa_wgate_stats = {
+	{ "npools",		KSTAT_DATA_UINT64 },
+	{ "gated",		KSTAT_DATA_UINT64 },
+	{ "waited",		KSTAT_DATA_UINT64 },
+	{ "npools_sum",		KSTAT_DATA_UINT64 },
+	{ "limit_sum",		KSTAT_DATA_UINT64 },
+};
+
+static kstat_t *spa_wgate_ksp;
+
+static int
+spa_wgate_kstat_update(kstat_t *ksp, int rw)
+{
+	spa_wgate_stats_t *ws = ksp->ks_data;
+
+	if (rw == KSTAT_WRITE)
+		return (EACCES);
+
+	ws->wgs_npools.value.ui64 = atomic_load_32(&spa_wgate_npools);
+	ws->wgs_gated.value.ui64 = wmsum_value(&spa_wgate_sums.wgs_gated);
+	ws->wgs_waited.value.ui64 = wmsum_value(&spa_wgate_sums.wgs_waited);
+	ws->wgs_npools_sum.value.ui64 =
+	    wmsum_value(&spa_wgate_sums.wgs_npools_sum);
+	ws->wgs_limit_sum.value.ui64 =
+	    wmsum_value(&spa_wgate_sums.wgs_limit_sum);
+	return (0);
+}
+
+void
+spa_wgate_stat_init(void)
+{
+	wmsum_init(&spa_wgate_sums.wgs_gated, 0);
+	wmsum_init(&spa_wgate_sums.wgs_waited, 0);
+	wmsum_init(&spa_wgate_sums.wgs_npools_sum, 0);
+	wmsum_init(&spa_wgate_sums.wgs_limit_sum, 0);
+
+	spa_wgate_ksp = kstat_create("zfs", 0, "zio_write_budget", "misc",
+	    KSTAT_TYPE_NAMED, sizeof (spa_wgate_stats) /
+	    sizeof (kstat_named_t), KSTAT_FLAG_VIRTUAL);
+	if (spa_wgate_ksp != NULL) {
+		spa_wgate_ksp->ks_data = &spa_wgate_stats;
+		spa_wgate_ksp->ks_update = spa_wgate_kstat_update;
+		kstat_install(spa_wgate_ksp);
+	}
+}
+
+void
+spa_wgate_stat_fini(void)
+{
+	if (spa_wgate_ksp != NULL) {
+		kstat_delete(spa_wgate_ksp);
+		spa_wgate_ksp = NULL;
+	}
+
+	wmsum_fini(&spa_wgate_sums.wgs_gated);
+	wmsum_fini(&spa_wgate_sums.wgs_waited);
+	wmsum_fini(&spa_wgate_sums.wgs_npools_sum);
+	wmsum_fini(&spa_wgate_sums.wgs_limit_sum);
+}
+
+/*
+ * A pool counts as issuing from its first gated dispatch to the end of the
+ * spa_sync() that made it: every gated zio belongs to the syncing txg and is
+ * done by then.  Lock-free, the count may lag a flag change for an instant,
+ * but only upwards: the increment precedes setting the flag, and clearing
+ * the flag precedes the decrement.
+ */
+static void
+spa_wgate_count(spa_t *spa)
+{
+	if (atomic_load_32(&spa->spa_wgate_counted) != 0)
+		return;
+	atomic_inc_32(&spa_wgate_npools);
+	if (atomic_cas_32(&spa->spa_wgate_counted, 0, 1) != 0)
+		atomic_dec_32(&spa_wgate_npools);
+}
+
+static void
+spa_wgate_uncount(spa_t *spa)
+{
+	if (atomic_load_32(&spa->spa_wgate_counted) != 0 &&
+	    atomic_cas_32(&spa->spa_wgate_counted, 1, 0) == 1)
+		atomic_dec_32(&spa_wgate_npools);
+}
+
+static uint_t
+spa_wgate_limit(const spa_wgate_t *wg, uint_t n)
+{
+	switch (zio_taskq_write_budget) {
+	case 0:
+		return (UINT_MAX);	/* turned off: let every waiter go */
+	case 1:
+		n = MAX(n, 1);
+		return (MAX((wg->wg_threads + n - 1) / n, 1));
+	default:
+		return (1);
+	}
+}
+
+/*
+ * With wg_lock held, move to 'go' the zios that may run now, giving each a
+ * slot.  The caller dispatches them once it has dropped the lock.
+ */
+static void
+spa_wgate_release(spa_wgate_t *wg, list_t *go)
+{
+	uint_t limit = spa_wgate_limit(wg, atomic_load_32(&spa_wgate_npools));
+	zio_t *zio;
+
+	ASSERT(MUTEX_HELD(&wg->wg_lock));
+	while (wg->wg_active < limit &&
+	    (zio = list_remove_head(&wg->wg_list)) != NULL) {
+		wg->wg_active++;
+		list_insert_tail(go, zio);
+	}
+}
+
+static void spa_wgate_execute(void *arg);
+
+static void
+spa_wgate_dispatch(spa_wgate_t *wg, list_t *go)
+{
+	zio_t *zio;
+
+	while ((zio = list_remove_head(go)) != NULL) {
+		taskq_dispatch_ent(wg->wg_tq, spa_wgate_execute, zio,
+		    zio->io_wgate_front ? TQ_FRONT : 0, &zio->io_tqent);
+	}
+	list_destroy(go);
+}
+
+/*
+ * Every gated task runs here, so that the slot it holds is given back when
+ * it ends, however the zio's pipeline ended or stalled.
+ */
+static void
+spa_wgate_execute(void *arg)
+{
+	zio_t *zio = arg;
+	spa_wgate_t *wg = zio->io_wgate;
+	list_t go;
+
+	/* The zio may be dispatched again, or freed, once it has run. */
+	zio->io_wgate = NULL;
+	zio_execute(zio);
+
+	list_create(&go, sizeof (zio_t), offsetof(zio_t, io_wgate_node));
+	mutex_enter(&wg->wg_lock);
+	ASSERT3U(wg->wg_active, >, 0);
+	wg->wg_active--;
+	spa_wgate_release(wg, &go);
+	mutex_exit(&wg->wg_lock);
+	spa_wgate_dispatch(wg, &go);
+}
+
+/*
+ * Dispatch a gated zio to wg's taskq if the pool runs fewer gated tasks there
+ * than its limit, or else queue it in wg_list, in front of the others if it
+ * cuts in line, as TQ_FRONT would put it in the taskq.  wg_active counts the
+ * tasks dispatched and not ended, whether they run or wait for a thread.
+ * wg_list is non-empty only while wg_active >= 1: a zio is queued only at
+ * the limit (at least 1), and every task end runs spa_wgate_release().  So a
+ * queued zio always has a task ahead of it whose end will release it.
+ */
+static void
+spa_wgate_enter(spa_t *spa, spa_wgate_t *wg, zio_t *zio, boolean_t cutinline)
+{
+	uint_t n, limit;
+	list_t go;
+
+	ASSERT0P(zio->io_wgate);
+	zio->io_wgate = wg;
+	zio->io_wgate_front = cutinline;
+
+	spa_wgate_count(spa);
+	n = atomic_load_32(&spa_wgate_npools);
+	wmsum_add(&spa_wgate_sums.wgs_gated, 1);
+	wmsum_add(&spa_wgate_sums.wgs_npools_sum, n);
+
+	mutex_enter(&wg->wg_lock);
+	limit = spa_wgate_limit(wg, n);
+	wmsum_add(&spa_wgate_sums.wgs_limit_sum, MIN(limit, wg->wg_threads));
+	if (wg->wg_active < limit && list_is_empty(&wg->wg_list)) {
+		wg->wg_active++;
+		mutex_exit(&wg->wg_lock);
+		taskq_dispatch_ent(wg->wg_tq, spa_wgate_execute, zio,
+		    cutinline ? TQ_FRONT : 0, &zio->io_tqent);
+		return;
+	}
+
+	wmsum_add(&spa_wgate_sums.wgs_waited, 1);
+	if (cutinline)
+		list_insert_head(&wg->wg_list, zio);
+	else
+		list_insert_tail(&wg->wg_list, zio);
+
+	/* The limit may have risen since the last task ended. */
+	list_create(&go, sizeof (zio_t), offsetof(zio_t, io_wgate_node));
+	spa_wgate_release(wg, &go);
+	mutex_exit(&wg->wg_lock);
+	spa_wgate_dispatch(wg, &go);
+}
+
+/*
  * Dispatch a task to the appropriate taskq for the ZFS I/O type and priority.
  * Note that a type may have multiple discrete taskqs to avoid lock contention
  * on the taskq itself.
@@ -1752,7 +2037,7 @@ spa_taskq_dispatch(spa_t *spa, zio_type_t t, zio_taskq_type_t q,
     task_func_t *func, zio_t *zio, boolean_t cutinline)
 {
 	spa_taskqs_t *tqs = &spa->spa_zio_taskq[t][q];
-	taskq_t *tq;
+	uint_t i;
 
 	ASSERT3P(tqs->stqs_taskq, !=, NULL);
 	ASSERT3U(tqs->stqs_count, !=, 0);
@@ -1766,16 +2051,24 @@ spa_taskq_dispatch(spa_t *spa, zio_type_t t, zio_taskq_type_t q,
 	ASSERT(taskq_empty_ent(&zio->io_tqent));
 
 	if (tqs->stqs_count == 1) {
-		tq = tqs->stqs_taskq[0];
+		i = 0;
 	} else if ((t == ZIO_TYPE_WRITE) && (q == ZIO_TASKQ_ISSUE) &&
 	    ZIO_HAS_ALLOCATOR(zio)) {
-		tq = tqs->stqs_taskq[zio->io_allocator % tqs->stqs_count];
+		i = zio->io_allocator % tqs->stqs_count;
 	} else {
-		tq = tqs->stqs_taskq[((uint64_t)gethrtime()) % tqs->stqs_count];
+		i = ((uint64_t)gethrtime()) % tqs->stqs_count;
 	}
 
-	taskq_dispatch_ent(tq, func, zio, cutinline ? TQ_FRONT : 0,
-	    &zio->io_tqent);
+	/* Only the write issue taskqs have gates. */
+	if (tqs->stqs_wgate != NULL && zio_taskq_write_budget != 0 &&
+	    func == zio_execute && zio->io_vd == NULL && zio->io_txg != 0 &&
+	    zio->io_priority != ZIO_PRIORITY_SYNC_WRITE) {
+		spa_wgate_enter(spa, &tqs->stqs_wgate[i], zio, cutinline);
+		return;
+	}
+
+	taskq_dispatch_ent(tqs->stqs_taskq[i], func, zio,
+	    cutinline ? TQ_FRONT : 0, &zio->io_tqent);
 }
 
 static void
@@ -2040,6 +2333,7 @@ spa_deactivate(spa_t *spa)
 
 	taskq_cancel_id(system_delay_taskq, spa->spa_deadman_tqid, B_TRUE);
 
+	spa_wgate_uncount(spa);
 	for (int t = 0; t < ZIO_TYPES; t++) {
 		for (int q = 0; q < ZIO_TASKQ_TYPES; q++) {
 			spa_taskqs_fini(spa, t, q);
@@ -11570,6 +11864,9 @@ spa_sync(spa_t *spa, uint64_t txg)
 
 	spa_sync_iterate_to_convergence(spa, tx);
 
+	/* This txg's writes are issued: stop counting against the others. */
+	spa_wgate_uncount(spa);
+
 #ifdef ZFS_DEBUG
 	if (!list_is_empty(&spa->spa_config_dirty_list)) {
 	/*
@@ -12640,6 +12937,9 @@ ZFS_MODULE_PARAM(zfs_spa, spa_, sync_light_pri, INT, ZMOD_RW,
 
 ZFS_MODULE_PARAM(zfs_zio, zio_, taskq_bulk_yield, INT, ZMOD_RW,
 	"Bulk I/O taskq threads yield to waiting threads between tasks");
+
+ZFS_MODULE_PARAM(zfs_zio, zio_, taskq_write_budget, UINT, ZMOD_RW,
+	"Share the write issue threads among the pools issuing writes");
 
 ZFS_MODULE_PARAM(zfs, zfs_, ccw_retry_interval, INT, ZMOD_RW,
 	"Configuration cache file write, retry after failure, interval "
