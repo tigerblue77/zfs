@@ -602,7 +602,13 @@ and less than or equal to
 If the
 .Sy large_blocks
 feature is enabled on the pool, the size may be up to
-.Ar 16 MiB .
+.Ar 16 MiB ,
+or
+.Ar 8 MiB
+with an
+.Sy aes-*-ccm
+.Sy encryption
+suite, which cannot encrypt a larger block.
 The default size is
 .Ar 16 KiB .
 .Pp
@@ -1664,6 +1670,16 @@ feature is enabled on the pool, the size may be up to
 See
 .Xr zpool-features 7
 for details on ZFS feature flags.
+.Pp
+An
+.Sy aes-*-ccm
+.Sy encryption
+suite cannot encrypt a block larger than
+.Ar 8 MiB :
+such a file system refuses a larger
+.Sy recordsize ,
+and if it inherits one, its files grow blocks only up to
+.Ar 8 MiB .
 .Pp
 Note that maximum size is still limited by default to
 .Ar 1 MiB

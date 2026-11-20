@@ -4525,6 +4525,17 @@ receive_read_record(dmu_recv_cookie_t *drc)
 			return (err);
 		}
 
+		/* a non-raw receive encrypts the blocks with our own suite */
+		if (!drc->drc_raw && drro->drr_blksz > SPA_OLD_MAXBLOCKSIZE &&
+		    drro->drr_blksz > dsl_crypto_max_blksz(drc->drc_os)) {
+			err = recv_check_fail(ERANGE, errbuf, sizeof (errbuf),
+			    "DRR_OBJECT block size %u is more than the "
+			    "destination's encryption allows; send without -L",
+			    drro->drr_blksz);
+			recv_report_stream_error(drc->drc_errors, errbuf);
+			return (err);
+		}
+
 		size = DRR_OBJECT_PAYLOAD_SIZE(drro);
 
 		if (size != 0)

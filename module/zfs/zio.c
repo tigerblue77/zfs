@@ -5680,10 +5680,31 @@ zio_encrypt(zio_t *zio)
 		BP_SET_CRYPT(bp, B_TRUE);
 	}
 
-	/* Perform the encryption. This should not fail */
-	VERIFY0(spa_do_crypt_abd(B_TRUE, spa, &zio->io_bookmark,
+	/*
+	 * Perform the encryption.  It should fail only for a block the
+	 * suite cannot take, such as a CCM block of 2^24 bytes in an object
+	 * made before such blocks were refused.  Fail the write, not the
+	 * host: a write that must succeed suspends the pool, as an I/O
+	 * error would.
+	 */
+	int err = spa_do_crypt_abd(B_TRUE, spa, &zio->io_bookmark,
 	    BP_GET_TYPE(bp), BP_GET_DEDUP(bp), BP_SHOULD_BYTESWAP(bp),
-	    salt, iv, mac, psize, zio->io_abd, eabd, &no_crypt));
+	    salt, iv, mac, psize, zio->io_abd, eabd, &no_crypt);
+	if (err != 0) {
+		zfs_dbgmsg("%s: cannot encrypt objset %llu object %llu "
+		    "level %lld blkid %llu psize %llu: error %d",
+		    spa_name(spa), (u_longlong_t)zio->io_bookmark.zb_objset,
+		    (u_longlong_t)zio->io_bookmark.zb_object,
+		    (longlong_t)zio->io_bookmark.zb_level,
+		    (u_longlong_t)zio->io_bookmark.zb_blkid,
+		    (u_longlong_t)psize, err);
+		abd_free(eabd);
+		zio->io_error = SET_ERROR(EIO);
+		if (!(zio->io_flags & ZIO_FLAG_CANFAIL))
+			zio->io_post |= ZIO_POST_SUSPEND;
+		zio->io_pipeline = ZIO_INTERLOCK_PIPELINE;
+		return (zio);
+	}
 
 	/* encode encryption metadata into the bp */
 	if (ot == DMU_OT_INTENT_LOG) {

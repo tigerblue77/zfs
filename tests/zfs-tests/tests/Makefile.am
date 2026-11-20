@@ -824,6 +824,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/cli_root/zfs_create/zfs_create_013_pos.ksh \
 	functional/cli_root/zfs_create/zfs_create_014_pos.ksh \
 	functional/cli_root/zfs_create/zfs_create_015_pos.ksh \
+	functional/cli_root/zfs_create/zfs_create_crypt_ccm_blksz.ksh \
 	functional/cli_root/zfs_create/zfs_create_crypt_combos.ksh \
 	functional/cli_root/zfs_create/zfs_create_dryrun.ksh \
 	functional/cli_root/zfs_create/zfs_create_encrypted.ksh \

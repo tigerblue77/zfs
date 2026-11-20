@@ -2492,6 +2492,12 @@ dmu_object_set_blocksize(objset_t *os, uint64_t object, uint64_t size, int ibs,
 	err = dnode_hold(os, object, FTAG, &dn);
 	if (err)
 		return (err);
+	/*
+	 * A dataset can inherit a recordsize that its encryption suite
+	 * cannot encrypt; stop at the largest block size it can.
+	 */
+	if (size > SPA_OLD_MAXBLOCKSIZE)
+		size = MIN(size, dsl_crypto_max_blksz(os));
 	err = dnode_set_blksz(dn, size, ibs, tx);
 	dnode_rele(dn, FTAG);
 	return (err);

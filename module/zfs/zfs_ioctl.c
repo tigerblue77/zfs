@@ -5460,6 +5460,9 @@ zfs_check_settable(const char *dsname, nvpair_t *pair, cred_t *cr)
 				return (SET_ERROR(ENOTSUP));
 			}
 			spa_close(spa, FTAG);
+
+			if ((err = dsl_crypto_check_blksz(dsname, intval)) != 0)
+				return (err);
 		}
 		break;
 
