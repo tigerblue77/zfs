@@ -25,6 +25,7 @@
 #include <libnvpair.h>
 #include <stdarg.h>
 #include <sys/kmem.h>
+#include <sys/list.h>
 
 #ifdef	__cplusplus
 extern "C" {
@@ -42,6 +43,8 @@ typedef struct fmd_timer {
 	timer_t		ft_tid;
 	void		*ft_arg;
 	fmd_hdl_t	*ft_hdl;
+	uintptr_t	ft_id;		/* never reused, unlike the address */
+	list_node_t	ft_node;	/* on the module's mod_timers */
 } fmd_timer_t;
 
 #define	id_t	fmd_timer_t *
@@ -214,9 +217,13 @@ extern nvlist_t *fmd_nvl_dup(fmd_hdl_t *, nvlist_t *, int);
  * ZED Specific Interfaces
  */
 
+/* Class of the agent event that carries a timer expiration */
+#define	FMD_TIMER_CLASS		"zed.fmd.timer"
+
 extern fmd_hdl_t *fmd_module_hdl(const char *);
 extern boolean_t fmd_module_initialized(fmd_hdl_t *);
 extern void fmd_module_recv(fmd_hdl_t *, nvlist_t *, const char *);
+extern void fmd_module_timeout(nvlist_t *);
 
 /* ZFS FMA Retire Agent */
 extern void _zfs_retire_init(fmd_hdl_t *);

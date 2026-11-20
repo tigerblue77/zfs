@@ -27,6 +27,7 @@
  */
 
 #include <sys/types.h>
+#include <sys/sysmacros.h>
 #include <sys/fm/protocol.h>
 #include <uuid/uuid.h>
 #include <signal.h>
@@ -54,6 +55,7 @@ typedef struct fmd_module {
 	uint_t		mod_ustat_cnt;	/* count of ustat stats */
 	fmd_modstat_t	mod_stats;	/* fmd built-in per-module statistics */
 	fmd_serd_hash_t	mod_serds;	/* hash of serd engs owned by module */
+	list_t		mod_timers;	/* timers installed by module */
 	char		*mod_vers;	/* a copy of module version string */
 } fmd_module_t;
 
@@ -85,6 +87,8 @@ fmd_hdl_register(fmd_hdl_t *hdl, int version, const fmd_hdl_info_t *mip)
 	(void) strcpy(mp->mod_stats.ms_caseclosed.fmds_name, "fmd.caseclosed");
 
 	fmd_serd_hash_create(&mp->mod_serds);
+	list_create(&mp->mod_timers, sizeof (fmd_timer_t),
+	    offsetof(fmd_timer_t, ft_node));
 
 	fmd_hdl_debug(hdl, "register module");
 
@@ -97,6 +101,7 @@ fmd_hdl_unregister(fmd_hdl_t *hdl)
 	fmd_module_t *mp = (fmd_module_t *)hdl;
 	fmd_modstat_t *msp = &mp->mod_stats;
 	const fmd_hdl_ops_t *ops = mp->mod_info->fmdi_ops;
+	fmd_timer_t *ftp;
 
 	/* dump generic module stats */
 	fmd_hdl_debug(hdl, "%s: %llu", msp->ms_accepted.fmds_name,
@@ -122,6 +127,10 @@ fmd_hdl_unregister(fmd_hdl_t *hdl)
 	}
 
 	fmd_serd_hash_destroy(&mp->mod_serds);
+
+	while ((ftp = list_head(&mp->mod_timers)) != NULL)
+		fmd_timer_remove(hdl, ftp);
+	list_destroy(&mp->mod_timers);
 
 	fmd_hdl_debug(hdl, "unregister module");
 }
@@ -538,24 +547,27 @@ fmd_serd_gc(fmd_hdl_t *hdl)
 
 /* FMD Timers */
 
+#define	FMD_TIMER_ID	"timer_id"
+
+static uintptr_t fmd_timer_next_id = 1;
+
+/*
+ * Runs on a thread of its own, created for this expiration, while the
+ * modules may only run on the agents thread.  The timer may also have been
+ * removed and freed by now, since timer_delete() does not wait for this
+ * thread.  So only pass its id on: fmd_module_timeout() looks it up there.
+ */
 static void
 _timer_notify(union sigval sv)
 {
-	fmd_timer_t *ftp = sv.sival_ptr;
-	fmd_hdl_t *hdl = ftp->ft_hdl;
-	fmd_module_t *mp = (fmd_module_t *)hdl;
-	const fmd_hdl_ops_t *ops = mp->mod_info->fmdi_ops;
-	struct itimerspec its;
+	nvlist_t *nvl;
 
-	fmd_hdl_debug(hdl, "%s timer fired (%p)", mp->mod_name, ftp->ft_tid);
-
-	/* disarm the timer */
-	memset(&its, 0, sizeof (struct itimerspec));
-	timer_settime(ftp->ft_tid, 0, &its, NULL);
-
-	/* Note that the fmdo_timeout can remove this timer */
-	if (ops->fmdo_timeout != NULL)
-		ops->fmdo_timeout(hdl, ftp, ftp->ft_arg);
+	if (nvlist_alloc(&nvl, NV_UNIQUE_NAME, 0) != 0)
+		return;
+	if (nvlist_add_uint64(nvl, FMD_TIMER_ID,
+	    (uint64_t)(uintptr_t)sv.sival_ptr) == 0)
+		zfs_agent_post_event(FMD_TIMER_CLASS, NULL, nvl);
+	nvlist_free(nvl);
 }
 
 /*
@@ -567,6 +579,7 @@ fmd_timer_t *
 fmd_timer_install(fmd_hdl_t *hdl, void *arg, fmd_event_t *ep, hrtime_t delta)
 {
 	(void) ep;
+	fmd_module_t *mp = (fmd_module_t *)hdl;
 	struct sigevent sev;
 	struct itimerspec its;
 	fmd_timer_t *ftp;
@@ -574,16 +587,19 @@ fmd_timer_install(fmd_hdl_t *hdl, void *arg, fmd_event_t *ep, hrtime_t delta)
 	ftp = fmd_hdl_alloc(hdl, sizeof (fmd_timer_t), FMD_SLEEP);
 	ftp->ft_arg = arg;
 	ftp->ft_hdl = hdl;
+	ftp->ft_id = fmd_timer_next_id++;
+	list_insert_tail(&mp->mod_timers, ftp);
 
+	/* One-shot: an expiration waiting for the agents thread is enough */
 	its.it_value.tv_sec = delta / 1000000000;
 	its.it_value.tv_nsec = delta % 1000000000;
-	its.it_interval.tv_sec = its.it_value.tv_sec;
-	its.it_interval.tv_nsec = its.it_value.tv_nsec;
+	its.it_interval.tv_sec = 0;
+	its.it_interval.tv_nsec = 0;
 
 	sev.sigev_notify = SIGEV_THREAD;
 	sev.sigev_notify_function = _timer_notify;
 	sev.sigev_notify_attributes = NULL;
-	sev.sigev_value.sival_ptr = ftp;
+	sev.sigev_value.sival_ptr = (void *)ftp->ft_id;
 	sev.sigev_signo = 0;
 
 	timer_create(CLOCK_REALTIME, &sev, &ftp->ft_tid);
@@ -595,12 +611,19 @@ fmd_timer_install(fmd_hdl_t *hdl, void *arg, fmd_event_t *ep, hrtime_t delta)
 	return (ftp);
 }
 
+/*
+ * An expiration of this timer that is already on its way to the agents
+ * thread finds no timer with its id there, and is dropped.
+ */
 void
 fmd_timer_remove(fmd_hdl_t *hdl, fmd_timer_t *ftp)
 {
+	fmd_module_t *mp = (fmd_module_t *)hdl;
+
 	fmd_hdl_debug(hdl, "removing timer (%p)", ftp->ft_tid);
 
 	timer_delete(ftp->ft_tid);
+	list_remove(&mp->mod_timers, ftp);
 
 	fmd_hdl_free(hdl, ftp, sizeof (fmd_timer_t));
 }
@@ -746,4 +769,46 @@ fmd_module_recv(fmd_hdl_t *hdl, nvlist_t *nvl, const char *class)
 	mp->mod_stats.ms_accepted.fmds_value.ui64++;
 
 	/* TBD - should we initiate fm_module_gc() periodically? */
+}
+
+/*
+ * fmd_module_timeout is called on the agents thread for each timer
+ * expiration that _timer_notify() passed on, and calls the fmdo_timeout
+ * entry point of the module, unless the timer has been removed since.
+ */
+void
+fmd_module_timeout(nvlist_t *nvl)
+{
+	fmd_module_t *mods[] = { &zfs_retire_module, &zfs_diagnosis_module };
+	uint64_t id;
+
+	if (nvlist_lookup_uint64(nvl, FMD_TIMER_ID, &id) != 0)
+		return;
+
+	for (int i = 0; i < ARRAY_SIZE(mods); i++) {
+		fmd_module_t *mp = mods[i];
+		fmd_hdl_t *hdl = (fmd_hdl_t *)mp;
+		const fmd_hdl_ops_t *ops;
+		fmd_timer_t *ftp;
+
+		if (!fmd_module_initialized(hdl))
+			continue;
+
+		for (ftp = list_head(&mp->mod_timers); ftp != NULL;
+		    ftp = list_next(&mp->mod_timers, ftp)) {
+			if (ftp->ft_id == (uintptr_t)id)
+				break;
+		}
+		if (ftp == NULL)
+			continue;
+
+		fmd_hdl_debug(hdl, "%s timer fired (%p)", mp->mod_name,
+		    ftp->ft_tid);
+
+		/* Note that the fmdo_timeout can remove this timer */
+		ops = mp->mod_info->fmdi_ops;
+		if (ops->fmdo_timeout != NULL)
+			ops->fmdo_timeout(hdl, ftp, ftp->ft_arg);
+		return;
+	}
 }
