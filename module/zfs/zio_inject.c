@@ -117,6 +117,7 @@ static const char *const zio_inject_point_names[ZIO_INJECT_POINTS] = {
 	[ZIO_INJECT_POINT_FREESP_CHANGED] = "zfs_freesp:changed",
 	[ZIO_INJECT_POINT_AUTOTRIM_EXIT] = "vdev_autotrim_thread:exit",
 	[ZIO_INJECT_POINT_REBUILD_EXIT] = "vdev_rebuild_thread:exit",
+	[ZIO_INJECT_POINT_SYNC_CONFIG] = "spa_sync:config",
 };
 
 /*

@@ -137,7 +137,7 @@ function test_point_fault
 {
 	typeset -a points=("dmu_objset_upgrade_task_cb:done" \
 	    "zfs_freesp:changed" "vdev_autotrim_thread:exit" \
-	    "vdev_rebuild_thread:exit")
+	    "vdev_rebuild_thread:exit" "spa_sync:config")
 	for p in ${points[@]}; do
 		log_must eval "zinject -w $p -s 10 $TESTPOOL"
 		zinject | grep -q "$p" || \
