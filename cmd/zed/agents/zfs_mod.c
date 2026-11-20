@@ -1351,9 +1351,8 @@ zfs_enum_pools(void *arg)
 	(void) pthread_mutex_lock(&g_zfshdl_lock);
 	(void) zpool_iter(g_zfshdl, zfs_unavail_pool, (void *)&g_pool_list);
 	/*
-	 * Linux - instead of using a thread pool, each list entry
-	 * will spawn a thread when an unavailable pool transitions
-	 * to available. zfs_slm_fini will wait for these threads.
+	 * When a pool of this list becomes available, zfs_iter_pool()
+	 * enables its datasets on g_taskq. zfs_slm_fini() waits for them.
 	 */
 	g_enumeration_done = B_TRUE;
 	(void) pthread_mutex_unlock(&g_zfshdl_lock);
@@ -1380,7 +1379,12 @@ zfs_slm_init(void)
 	list_create(&g_pool_list, sizeof (struct unavailpool),
 	    offsetof(struct unavailpool, uap_node));
 
+	/* exists before any thread that can dispatch to it starts */
+	g_taskq = taskq_create("zfs_enable_ds", 1, defclsyspri, 1, INT_MAX, 0);
+
 	if (pthread_create(&g_zfs_tid, NULL, zfs_enum_pools, NULL) != 0) {
+		taskq_destroy(g_taskq);
+		g_taskq = NULL;
 		list_destroy(&g_pool_list);
 		libzfs_fini(g_zfshdl);
 		return (-1);
