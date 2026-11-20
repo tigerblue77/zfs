@@ -72,6 +72,12 @@ typedef enum {
 
 	/* If the pool suspends while waiting, abort and return ESHUTDOWN. */
 	TXG_WAIT_SUSPEND = (1 << 1),
+
+	/*
+	 * Not a condition: the caller is a writer that dmu_tx_wait() holds
+	 * back, counted apart from other waiters (see txg_waited()).
+	 */
+	TXG_WAIT_RESTART = (1 << 2),
 } txg_wait_flag_t;
 
 struct dsl_pool;
@@ -127,6 +133,12 @@ extern boolean_t txg_stalled(struct dsl_pool *dp);
 
 /* returns TRUE if someone is waiting for the next txg to sync */
 extern boolean_t txg_sync_waiting(struct dsl_pool *dp);
+
+/*
+ * Whether a thread waits for this pool's txgs: with mode 1 a thread other
+ * than a writer held back by dmu_tx_wait(), with mode 2 any of them.
+ */
+extern boolean_t txg_waited(struct dsl_pool *dp, uint_t mode);
 
 extern void txg_verify(spa_t *spa, uint64_t txg);
 

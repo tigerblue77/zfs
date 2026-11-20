@@ -1009,6 +1009,7 @@ dmu_tx_delay(dmu_tx_t *tx, uint64_t dirty)
 	dp->dp_last_wakeup = wakeup;
 	mutex_exit(&dp->dp_lock);
 
+	spa_iostats_tx_dirty_wait(dp->dp_spa);
 	zfs_sleep_until(wakeup);
 }
 
@@ -1358,6 +1359,9 @@ dmu_tx_wait(dmu_tx_t *tx)
 	txg_wait_flag_t flags =
 	    (tx->tx_break_on_suspend ? TXG_WAIT_SUSPEND : TXG_WAIT_NONE);
 
+	/* Also mark this thread as a writer held back, see txg_waited(). */
+	flags = (txg_wait_flag_t)(flags | TXG_WAIT_RESTART);
+
 	before = gethrtime();
 
 	if (tx->tx_wait_dirty) {
@@ -1380,6 +1384,7 @@ dmu_tx_wait(dmu_tx_t *tx)
 			 */
 			dp->dp_dirty_waiters++;
 			membar_sync();
+			spa_iostats_tx_dirty_wait(spa);
 			while (dp->dp_dirty_total >= zfs_dirty_data_max)
 				cv_wait(&dp->dp_spaceavail_cv, &dp->dp_lock);
 			dp->dp_dirty_waiters--;

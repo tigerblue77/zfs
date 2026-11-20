@@ -69,6 +69,15 @@ int zio_dva_throttle_enabled = B_TRUE;
  * pool does not wait behind the bulk writes of others.
  */
 static int zio_taskq_write_light = 1;
+
+/*
+ * Issue the asynchronous writes of a pool whose txgs a thread waits for in
+ * the high-priority write issue taskq, so that a pool's txg sync on somebody's
+ * critical path is not issued as bulk work: 1 for a thread other than a
+ * writer held back by dmu_tx_wait(), 2 for any thread, 0 never.  See
+ * txg_waited().
+ */
+static uint_t zio_taskq_write_waited = 0;
 static int zio_deadman_log_all = B_FALSE;
 
 /*
@@ -2269,6 +2278,17 @@ zio_taskq_dispatch_func(zio_t *zio, zio_taskq_type_t q, boolean_t cutinline,
 		 * loading the CPUs with bulk writes: issue its asynchronous
 		 * writes, its own txg sync, at high priority.
 		 */
+		q++;
+	} else if (t == ZIO_TYPE_WRITE && q == ZIO_TASKQ_ISSUE &&
+	    zio_taskq_write_waited != 0 &&
+	    spa->spa_zio_taskq[t][q + 1].stqs_count != 0 &&
+	    spa->spa_dsl_pool != NULL &&
+	    txg_waited(spa->spa_dsl_pool, zio_taskq_write_waited)) {
+		/*
+		 * Somebody waits for this pool's txg sync: do not issue it
+		 * as bulk work.
+		 */
+		spa_iostats_waited_async_write(spa);
 		q++;
 	}
 
@@ -6758,6 +6778,10 @@ ZFS_MODULE_PARAM(zfs, zfs_, sync_pass_rewrite, UINT, ZMOD_RW,
 
 ZFS_MODULE_PARAM(zfs_zio, zio_, taskq_write_light, INT, ZMOD_RW,
 	"Issue the async writes of lightly dirty pools at high priority");
+
+ZFS_MODULE_PARAM(zfs_zio, zio_, taskq_write_waited, UINT, ZMOD_RW,
+	"Issue the async writes of pools whose txgs a thread waits for at high "
+	"priority: 0 never, 1 not for held-back writers, 2 for any thread");
 
 ZFS_MODULE_PARAM(zfs_zio, zio_, dva_throttle_enabled, INT, ZMOD_RW,
 	"Throttle block allocations in the ZIO pipeline");

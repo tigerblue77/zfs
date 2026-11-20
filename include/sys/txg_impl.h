@@ -92,6 +92,13 @@ typedef struct tx_state {
 	uint64_t	tx_sync_txg_waiting; /* txg we're waiting to sync */
 	uint64_t	tx_quiesce_txg_waiting; /* txg we're waiting to open */
 
+	/*
+	 * Threads blocked waiting for this pool's txgs, see txg_waited().
+	 * Changed atomically under tx_sync_lock, read without it.
+	 */
+	uint64_t	tx_explicit_waiters; /* other than restarted writers */
+	uint64_t	tx_restart_waiters; /* writers held back by dmu_tx */
+
 	kcondvar_t	tx_sync_more_cv;
 	kcondvar_t	tx_sync_done_cv;
 	kcondvar_t	tx_quiesce_more_cv;

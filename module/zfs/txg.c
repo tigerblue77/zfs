@@ -153,6 +153,8 @@ txg_fini(dsl_pool_t *dp)
 	int c;
 
 	ASSERT0(tx->tx_threads);
+	ASSERT0(tx->tx_explicit_waiters);
+	ASSERT0(tx->tx_restart_waiters);
 
 	mutex_destroy(&tx->tx_sync_lock);
 
@@ -700,13 +702,41 @@ txg_delay(dsl_pool_t *dp, uint64_t txg, hrtime_t delay, hrtime_t resolution)
 	mutex_exit(&tx->tx_sync_lock);
 }
 
+/*
+ * Count a thread that is about to block for this pool's txgs, see
+ * txg_waited().  Called and undone under tx_sync_lock.
+ */
+static void
+txg_waiter_enter(dsl_pool_t *dp, boolean_t restart)
+{
+	tx_state_t *tx = &dp->dp_tx;
+
+	ASSERT(MUTEX_HELD(&tx->tx_sync_lock));
+	atomic_inc_64(restart ? &tx->tx_restart_waiters :
+	    &tx->tx_explicit_waiters);
+	spa_iostats_txg_wait(dp->dp_spa, restart);
+}
+
+static void
+txg_waiter_exit(dsl_pool_t *dp, boolean_t restart)
+{
+	tx_state_t *tx = &dp->dp_tx;
+
+	ASSERT(MUTEX_HELD(&tx->tx_sync_lock));
+	atomic_dec_64(restart ? &tx->tx_restart_waiters :
+	    &tx->tx_explicit_waiters);
+}
+
 int
 txg_wait_synced_flags(dsl_pool_t *dp, uint64_t txg, txg_wait_flag_t flags)
 {
 	int error = 0;
 	tx_state_t *tx = &dp->dp_tx;
+	boolean_t restart = !!(flags & TXG_WAIT_RESTART);
+	boolean_t counted = B_FALSE;
 
-	ASSERT0(flags & ~(TXG_WAIT_SIGNAL | TXG_WAIT_SUSPEND));
+	ASSERT0(flags &
+	    ~(TXG_WAIT_SIGNAL | TXG_WAIT_SUSPEND | TXG_WAIT_RESTART));
 	ASSERT(!dsl_pool_config_held(dp));
 
 	mutex_enter(&tx->tx_sync_lock);
@@ -739,6 +769,11 @@ txg_wait_synced_flags(dsl_pool_t *dp, uint64_t txg, txg_wait_flag_t flags)
 		    (u_longlong_t)tx->tx_sync_txg_waiting, dp);
 		cv_broadcast(&tx->tx_sync_more_cv);
 
+		if (!counted) {
+			txg_waiter_enter(dp, restart);
+			counted = B_TRUE;
+		}
+
 		if (flags & TXG_WAIT_SIGNAL) {
 			/*
 			 * Condition wait here but stop if the thread receives a
@@ -756,6 +791,8 @@ txg_wait_synced_flags(dsl_pool_t *dp, uint64_t txg, txg_wait_flag_t flags)
 		}
 	}
 
+	if (counted)
+		txg_waiter_exit(dp, restart);
 	mutex_exit(&tx->tx_sync_lock);
 	return (error);
 }
@@ -783,6 +820,7 @@ void
 txg_wait_open(dsl_pool_t *dp, uint64_t txg, boolean_t should_quiesce)
 {
 	tx_state_t *tx = &dp->dp_tx;
+	boolean_t counted = B_FALSE;
 
 	ASSERT(!dsl_pool_config_held(dp));
 
@@ -798,6 +836,14 @@ txg_wait_open(dsl_pool_t *dp, uint64_t txg, boolean_t should_quiesce)
 	while (tx->tx_open_txg < txg) {
 		cv_broadcast(&tx->tx_quiesce_more_cv);
 		/*
+		 * Its callers hold back writers (of frees, in
+		 * dmu_free_long_range()), as dmu_tx_wait() does.
+		 */
+		if (!counted) {
+			txg_waiter_enter(dp, B_TRUE);
+			counted = B_TRUE;
+		}
+		/*
 		 * Callers setting should_quiesce will use cv_wait_io() and
 		 * be accounted for as iowait time.  Otherwise, the caller is
 		 * understood to be idle and cv_wait_sig() is used to prevent
@@ -810,6 +856,8 @@ txg_wait_open(dsl_pool_t *dp, uint64_t txg, boolean_t should_quiesce)
 			    &tx->tx_sync_lock);
 		}
 	}
+	if (counted)
+		txg_waiter_exit(dp, B_TRUE);
 	mutex_exit(&tx->tx_sync_lock);
 }
 
@@ -848,6 +896,23 @@ txg_sync_waiting(dsl_pool_t *dp)
 
 	return (tx->tx_syncing_txg <= tx->tx_sync_txg_waiting ||
 	    tx->tx_quiesced_txg != 0);
+}
+
+/*
+ * Whether a thread waits for this pool's txgs to sync, which puts the pool's
+ * sync on that thread's critical path: with mode 1, a thread other than a
+ * writer that dmu_tx_wait() holds back for want of space or dirty data room
+ * (a ZIL stall, a sync task, an fsync falling back to a txg); with mode 2,
+ * any of them.  Read without the lock, as a hint.
+ */
+boolean_t
+txg_waited(dsl_pool_t *dp, uint_t mode)
+{
+	tx_state_t *tx = &dp->dp_tx;
+
+	if (atomic_load_64(&tx->tx_explicit_waiters) != 0)
+		return (B_TRUE);
+	return (mode >= 2 && atomic_load_64(&tx->tx_restart_waiters) != 0);
 }
 
 /*

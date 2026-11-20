@@ -898,6 +898,10 @@ static const spa_iostats_t spa_iostats_template = {
 	{ "direct_read_bytes",			KSTAT_DATA_UINT64 },
 	{ "direct_write_count",			KSTAT_DATA_UINT64 },
 	{ "direct_write_bytes",			KSTAT_DATA_UINT64 },
+	{ "txg_wait_explicit_count",		KSTAT_DATA_UINT64 },
+	{ "txg_wait_restart_count",		KSTAT_DATA_UINT64 },
+	{ "tx_dirty_wait_count",		KSTAT_DATA_UINT64 },
+	{ "waited_async_write_count",		KSTAT_DATA_UINT64 },
 };
 
 #define	SPA_IOSTATS_ADD(stat, val) \
@@ -979,6 +983,60 @@ spa_iostats_write_add(spa_t *spa, uint64_t size, uint64_t iops,
 		SPA_IOSTATS_ADD(arc_write_count, iops);
 		SPA_IOSTATS_ADD(arc_write_bytes, size);
 	}
+}
+
+/*
+ * A thread blocking for this pool's txgs, a writer held back by dmu_tx_wait()
+ * (restart) or another one, see txg_waited().
+ */
+void
+spa_iostats_txg_wait(spa_t *spa, boolean_t restart)
+{
+	spa_history_kstat_t *shk = &spa->spa_stats.iostats;
+	kstat_t *ksp = shk->kstat;
+
+	if (ksp == NULL)
+		return;
+
+	spa_iostats_t *iostats = ksp->ks_data;
+	if (restart) {
+		SPA_IOSTATS_ADD(txg_wait_restart_count, 1);
+	} else {
+		SPA_IOSTATS_ADD(txg_wait_explicit_count, 1);
+	}
+}
+
+/*
+ * A writer held at the dirty data limit or delayed by the write throttle.
+ */
+void
+spa_iostats_tx_dirty_wait(spa_t *spa)
+{
+	spa_history_kstat_t *shk = &spa->spa_stats.iostats;
+	kstat_t *ksp = shk->kstat;
+
+	if (ksp == NULL)
+		return;
+
+	spa_iostats_t *iostats = ksp->ks_data;
+	SPA_IOSTATS_ADD(tx_dirty_wait_count, 1);
+}
+
+/*
+ * An asynchronous write issued at high priority because a thread waited for
+ * the pool's txgs, see zio_taskq_write_waited.
+ */
+void
+spa_iostats_waited_async_write(spa_t *spa)
+{
+	spa_history_kstat_t *shk = &spa->spa_stats.iostats;
+	kstat_t *ksp = shk->kstat;
+
+	if (ksp == NULL)
+		return;
+
+	spa_iostats_t *iostats = ksp->ks_data;
+	SPA_IOSTATS_ADD(waited_async_write_count, 1);
 }
 
 static int

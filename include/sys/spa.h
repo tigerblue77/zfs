@@ -1010,6 +1010,10 @@ typedef struct spa_iostats {
 	kstat_named_t	direct_read_bytes;
 	kstat_named_t	direct_write_count;
 	kstat_named_t	direct_write_bytes;
+	kstat_named_t	txg_wait_explicit_count;
+	kstat_named_t	txg_wait_restart_count;
+	kstat_named_t	tx_dirty_wait_count;
+	kstat_named_t	waited_async_write_count;
 } spa_iostats_t;
 
 extern void spa_stats_init(spa_t *spa);
@@ -1037,6 +1041,9 @@ extern void spa_iostats_read_add(spa_t *spa, uint64_t size, uint64_t iops,
     dmu_flags_t flags);
 extern void spa_iostats_write_add(spa_t *spa, uint64_t size, uint64_t iops,
     dmu_flags_t flags);
+extern void spa_iostats_txg_wait(spa_t *spa, boolean_t restart);
+extern void spa_iostats_tx_dirty_wait(spa_t *spa);
+extern void spa_iostats_waited_async_write(spa_t *spa);
 extern void spa_import_progress_add(spa_t *spa);
 extern void spa_import_progress_remove(uint64_t spa_guid);
 extern int spa_import_progress_set_mmp_check(uint64_t pool_guid,

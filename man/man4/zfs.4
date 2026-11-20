@@ -3028,6 +3028,24 @@ described under
 The txg sync of a lightly loaded pool, which its synchronous writers may wait
 for, then does not wait behind the bulk writes of other pools.
 .
+.It Sy zio_taskq_write_waited Ns = Ns Sy 0 Ns | Ns 1 Ns | Ns 2 Pq uint
+Issue the asynchronous writes of a pool in the high-priority write issue queue,
+instead of the bulk queue described under
+.Sy zio_taskq_bulk_lowpri ,
+while a thread waits for one of its txgs to sync.
+With
+.Sy 1 ,
+only a thread other than a writer held back for want of space or dirty data
+room counts, such as a ZIL writer that cannot allocate a log block or an
+administrative command; with
+.Sy 2 ,
+any thread does.
+.Sy 0
+turns this off.
+The per-pool
+.Sy iostats
+kstat counts these waits and writes.
+.
 .It Sy zio_taskq_write_pct Ns = Ns Sy 25 Ns % Pq uint
 Percentage of online CPUs which will run a write issue thread, for each pool,
 but no fewer threads than
