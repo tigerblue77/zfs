@@ -113,6 +113,7 @@ typedef struct lwb {
 	zio_t		*lwb_write_zio;	/* zio for the lwb buffer */
 	zio_t		*lwb_root_zio;	/* root zio for lwb write and flushes */
 	hrtime_t	lwb_issued_timestamp; /* when was the lwb issued? */
+	hrtime_t	lwb_close_timestamp; /* when was the lwb closed? */
 	uint64_t	lwb_issued_txg;	/* the txg when the write is issued */
 	uint64_t	lwb_alloc_txg;	/* the txg when lwb_blk is allocated */
 	uint64_t	lwb_max_txg;	/* highest txg in this lwb */
@@ -193,6 +194,7 @@ struct zilog {
 	zil_get_data_t	*zl_get_data;	/* callback to get object content */
 	lwb_t		*zl_last_lwb_opened; /* most recent lwb opened */
 	hrtime_t	zl_last_lwb_latency; /* zio latency of last lwb done */
+	hrtime_t	zl_last_lwb_close_latency; /* same, from lwb close */
 	uint64_t	zl_lr_seq;	/* on-disk log record sequence number */
 	uint64_t	zl_commit_lr_seq; /* last committed on-disk lr seq */
 	uint64_t	zl_lwb_error_txg; /* issue txg of last failed lwb */
@@ -226,6 +228,9 @@ struct zilog {
 	uint64_t	zl_replay_blks;	/* number of log blocks replayed */
 	zil_header_t	zl_old_header;	/* debugging aid */
 	uint_t		zl_parallel;	/* workload is multi-threaded */
+	uint_t		zl_window_commits; /* commits in this window */
+	uint_t		zl_window_carried; /* of them, already written out */
+	boolean_t	zl_behind;	/* log is behind its committers */
 	uint_t		zl_prev_rotor;	/* rotor for zl_prev[] */
 	uint_t		zl_prev_opt[ZIL_BURSTS]; /* optimal block size */
 	uint_t		zl_prev_min[ZIL_BURSTS]; /* minimal first block size */
