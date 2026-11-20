@@ -259,6 +259,7 @@ struct spa {
 	boolean_t	spa_is_exporting;	/* true while exporting pool */
 	kthread_t	*spa_export_thread;	/* valid during pool export */
 	uint_t		spa_stats_holds;	/* export waits for these */
+	uint_t		spa_vdev_change_holds;	/* spa_vdev_change_hold() */
 	kthread_t	*spa_load_thread;	/* loading, no namespace lock */
 	metaslab_class_t *spa_normal_class;	/* normal data class */
 	metaslab_class_t *spa_log_class;	/* intent log data class */

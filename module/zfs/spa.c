@@ -2320,6 +2320,23 @@ spa_unload(spa_t *spa)
 	    spa->spa_export_thread == curthread);
 	ASSERT(spa_state(spa) != POOL_STATE_UNINITIALIZED);
 
+	/*
+	 * A vdev change may still be waiting without the namespace lock
+	 * (spa_vdev_change_hold()): the removal thread, restarted by the load
+	 * of a pool whose import then fails, or that spa_evict_all() unloads.
+	 * Let it finish, keeping lookups of the pool out as a load does.
+	 * Export fails with EBUSY instead, so does not get here with one.
+	 */
+	if (spa->spa_vdev_change_holds != 0) {
+		ASSERT(spa_namespace_held());
+		ASSERT0P(spa->spa_load_thread);
+		spa->spa_load_thread = curthread;
+		while (spa->spa_vdev_change_holds != 0)
+			spa_namespace_wait();
+		spa->spa_load_thread = NULL;
+		spa_namespace_broadcast();
+	}
+
 	spa_import_progress_remove(spa_guid(spa));
 	spa_load_note(spa, "UNLOADING");
 
@@ -6464,6 +6481,7 @@ spa_load_impl(spa_t *spa, spa_import_type_t type, const char **ereport)
 		spa_config_exit(spa, SCL_CONFIG, FTAG);
 		spa_import_progress_set_notes(spa, "Finished importing");
 	}
+	zio_inject_point(spa, ZIO_INJECT_POINT_LOAD_END);
 	zio_handle_import_delay(spa, gethrtime() - load_start);
 
 	spa_import_progress_remove(spa_guid(spa));
@@ -8026,10 +8044,12 @@ spa_export_common(const char *pool, int new_state, nvlist_t **oldconfig,
 
 	/*
 	 * A pool cannot be exported or destroyed if there are active
-	 * references.  If we are resetting a pool, allow references by
-	 * fault injection handlers.
+	 * references, or vdev changes waiting without the namespace lock.
+	 * If we are resetting a pool, allow references by fault injection
+	 * handlers.
 	 */
-	if (!spa_refcount_zero(spa) || (spa->spa_inject_ref != 0)) {
+	if (!spa_refcount_zero(spa) || spa->spa_vdev_change_holds != 0 ||
+	    (spa->spa_inject_ref != 0)) {
 		error = SET_ERROR(EBUSY);
 		goto fail;
 	}
@@ -11468,6 +11488,8 @@ spa_sync(spa_t *spa, uint64_t txg)
 		spa_config_enter(spa, SCL_CONFIG | SCL_STATE, FTAG, RW_READER);
 	}
 	spa_config_exit(spa, SCL_STATE, FTAG);
+
+	zio_inject_point(spa, ZIO_INJECT_POINT_SYNC_CONFIG);
 
 	dsl_pool_t *dp = spa->spa_dsl_pool;
 	dmu_tx_t *tx = dmu_tx_create_assigned(dp, txg);
