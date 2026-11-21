@@ -9596,10 +9596,26 @@ spa_vdev_split_mirror(spa_t *spa, const char *newname, nvlist_t *config,
 			}
 		}
 
-		/* deal with indirect vdevs */
-		if (spa->spa_root_vdev->vdev_child[c]->vdev_ops ==
-		    &vdev_indirect_ops)
+		/*
+		 * The new pool takes an indirect vdev's entry as it is, so
+		 * it must be that vdev's own config, not that of the mirror
+		 * it was before its removal completed.
+		 */
+		vdev_t *tvd = spa->spa_root_vdev->vdev_child[c];
+		if (tvd->vdev_ops == &vdev_indirect_ops) {
+			const char *type;
+			uint64_t guid;
+
+			if (nvlist_lookup_string(child[c], ZPOOL_CONFIG_TYPE,
+			    &type) != 0 ||
+			    strcmp(type, VDEV_TYPE_INDIRECT) != 0 ||
+			    nvlist_lookup_uint64(child[c], ZPOOL_CONFIG_GUID,
+			    &guid) != 0 || guid != tvd->vdev_guid) {
+				error = SET_ERROR(EINVAL);
+				break;
+			}
 			continue;
+		}
 
 		/* which disk is going to be split? */
 		if (nvlist_lookup_uint64(child[c], ZPOOL_CONFIG_GUID,
