@@ -752,11 +752,13 @@ extern hrtime_t zio_handle_ready_delay(zio_t *zio);
  * test can act inside a race window that waits on no I/O.  Each one is named
  * in zio_inject_point_names[] and in zinject(8).  A point is added only with
  * a test that needs it, and never where the thread holds spa_namespace_lock,
- * which listing and cancelling handlers take.
+ * which listing and cancelling handlers take.  A point with no pool at hand
+ * passes a NULL spa, and a handler on any pool holds the thread.
  */
 typedef enum zio_inject_point {
 	ZIO_INJECT_POINT_UPGRADE_DONE,
 	ZIO_INJECT_POINT_FREESP_CHANGED,
+	ZIO_INJECT_POINT_ZVOL_OPEN_FOUND,
 	ZIO_INJECT_POINTS
 } zio_inject_point_t;
 

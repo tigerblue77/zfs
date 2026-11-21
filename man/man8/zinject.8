@@ -14,7 +14,7 @@
 .\"
 .\" lint-ok: WARNING: sections out of conventional order: Sh SYNOPSIS
 .\"
-.Dd November 17, 2026
+.Dd November 21, 2026
 .Dt ZINJECT 8
 .Os
 .
@@ -183,6 +183,11 @@ mounted, after the task has released the dataset and before it returns.
 .It Sy zfs_freesp:changed
 On Linux, in a truncation or a hole punch, after the file is changed and
 before the change is logged in the ZIL.
+.It Sy zvol_open:found
+On Linux, in an open of the block device of a volume, after the open has
+found the volume and before it locks it.
+The volume has no pool at hand there, so a handler on any pool holds the
+opens of the volumes of every pool.
 .El
 .
 .It Xo
