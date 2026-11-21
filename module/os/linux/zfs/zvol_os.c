@@ -732,6 +732,16 @@ retry:
 		return (-SET_ERROR(ENXIO));
 	}
 
+	/*
+	 * Nothing holds zv until zv_state_lock is taken: its removal must wait
+	 * for this open to return.  zv has no pool at hand before it is open.
+	 */
+	if (zio_injection_enabled) {
+		int ignored = 0;
+		(void) zio_handle_func_injection(NULL, "zvol_open:found",
+		    &ignored);
+	}
+
 	mutex_enter(&zv->zv_state_lock);
 	if (unlikely(zv->zv_flags & ZVOL_REMOVING)) {
 		mutex_exit(&zv->zv_state_lock);
