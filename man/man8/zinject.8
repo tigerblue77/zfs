@@ -183,6 +183,12 @@ mounted, after the task has released the dataset and before it returns.
 .It Sy zfs_freesp:changed
 On Linux, in a truncation or a hole punch, after the file is changed and
 before the change is logged in the ZIL.
+.It Sy spa_vdev_split_mirror:committed
+In
+.Xr zpool-split 8 ,
+on the original pool, after the split is committed to it and the pool
+namespace lock is dropped, and before the split is logged in the history of
+the new pool.
 .El
 .
 .It Xo
