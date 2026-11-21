@@ -233,6 +233,11 @@ Use
 to wait until a thread has reached it.
 Choose the point with care: a thread may be paused with locks held, and
 other operations on the pool may wait for it.
+At points in threads that can be told to stop, the pause also ends when the
+thread is told to stop, and the handler stays in place: at
+.Sy raidz_expand:reflow ,
+the pause ends when the pool is exported, and the reflow is paused at the
+same place again once the pool is imported.
 .El
 .Pp
 Listing the handlers shows how many times each point was reached

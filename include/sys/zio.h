@@ -735,6 +735,25 @@ extern int zio_inject_wait(uint64_t *state, hrtime_t timeout);
 extern int zio_clear_fault(int id);
 extern int zio_handle_func_injection(spa_t *spa, const char *tag,
     int *error);
+
+/*
+ * An injection point that passes more than its name to the handlers
+ * ("zinject -n"), for zio_handle_point_injection().
+ */
+typedef struct zio_inject_point {
+	const char	*zp_name;	/* the point's name */
+	/*
+	 * If not NULL, a pause at the point ends as soon as zp_stop()
+	 * returns B_TRUE, for instance when the thread is cancelled, and
+	 * zp_stopped is then set.
+	 */
+	boolean_t	(*zp_stop)(void *);
+	void		*zp_stop_arg;
+	boolean_t	zp_stopped;
+} zio_inject_point_t;
+
+extern int zio_handle_point_injection(spa_t *spa, zio_inject_point_t *zp,
+    int *error);
 extern void zio_handle_panic_injection(spa_t *spa, const char *tag,
     uint64_t type);
 extern int zio_handle_decrypt_injection(spa_t *spa, const zbookmark_phys_t *zb,

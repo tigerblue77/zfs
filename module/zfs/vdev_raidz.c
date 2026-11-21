@@ -5131,6 +5131,12 @@ io_error_exit:
 }
 
 static boolean_t
+raidz_reflow_cancelled(void *arg)
+{
+	return (zthr_iscancelled(arg));
+}
+
+static boolean_t
 spa_raidz_expand_thread_check(void *arg, zthr_t *zthr)
 {
 	(void) zthr;
@@ -5269,12 +5275,24 @@ spa_raidz_expand_thread(void *arg, zthr_t *zthr)
 			/*
 			 * Injection point for tests, before each copy:
 			 * "zinject -n raidz_expand:reflow" can delay or pause
-			 * the reflow here.  An error has no effect.
+			 * the reflow here.  An error has no effect.  A pause
+			 * ends if we are cancelled (by an export), and we then
+			 * copy nothing more.
 			 */
 			if (zio_injection_enabled) {
+				zio_inject_point_t zp = {
+					.zp_name = "raidz_expand:reflow",
+					.zp_stop = raidz_reflow_cancelled,
+					.zp_stop_arg = zthr,
+				};
 				int error = 0;
-				(void) zio_handle_func_injection(spa,
-				    "raidz_expand:reflow", &error);
+				(void) zio_handle_point_injection(spa, &zp,
+				    &error);
+				if (zp.zp_stopped) {
+					spa_config_enter(spa, SCL_CONFIG, FTAG,
+					    RW_READER);
+					continue;
+				}
 			}
 
 			/*
