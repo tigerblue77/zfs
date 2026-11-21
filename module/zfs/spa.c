@@ -9794,6 +9794,12 @@ spa_vdev_split_mirror(spa_t *spa, const char *newname, nvlist_t *config,
 
 	spa_async_resume(newspa);
 
+	/*
+	 * Once spa_vdev_exit() drops spa_namespace_lock, the new pool can be
+	 * exported or destroyed by another thread.  Hold it until we are done.
+	 */
+	spa_open_ref(newspa, FTAG);
+
 	/* finally, update the original pool's config */
 	txg = spa_vdev_config_enter(spa);
 	tx = dmu_tx_create_dd(spa_get_dsl(spa)->dp_mos_dir);
@@ -9871,6 +9877,7 @@ spa_vdev_split_mirror(spa_t *spa, const char *newname, nvlist_t *config,
 	    "from pool %s", spa_name(spa));
 
 	newspa->spa_is_splitting = B_FALSE;
+	spa_close(newspa, FTAG);
 	kmem_free(vml, children * sizeof (vdev_t *));
 	if (dtl_objs != NULL)
 		kmem_free(dtl_objs, nleaves * sizeof (uint64_t));
