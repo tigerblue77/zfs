@@ -131,6 +131,7 @@ typedef struct taskq {
 	struct list_head	tq_delay_list;	/* delayed taskq_ent_t's */
 	struct list_head	tq_taskqs;	/* all taskq_t's */
 	wait_queue_head_t	tq_work_waitq;	/* new work waitq */
+	atomic_t		tq_nwaking;	/* wake-ups outside tq_lock */
 	wait_queue_head_t	tq_wait_waitq;	/* wait waitq */
 	tq_lock_role_t		tq_lock_class;	/* class when taking tq_lock */
 	/* list node for the cpu hotplug callback */

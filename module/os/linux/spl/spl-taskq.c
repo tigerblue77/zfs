@@ -305,6 +305,32 @@ task_done(taskq_t *tq, taskq_ent_t *t)
 }
 
 /*
+ * Drop tq_lock after queueing a task, then wake a sleeping worker if there
+ * is one: try_to_wake_up() may send an IPI, which no other dispatcher or
+ * worker of the taskq should wait for.  Workers join tq_work_waitq only
+ * under tq_lock, so if it is empty here none sleeps, and one that goes to
+ * sleep later sees the task first.  Once tq_lock is dropped the task can
+ * run and the taskq be destroyed before the wake-up: taskq_destroy()
+ * waits for tq_nwaking to drop to zero before freeing the taskq.
+ */
+static void
+taskq_unlock_wake(taskq_t *tq, unsigned long irqflags)
+{
+	if (!waitqueue_active(&tq->tq_work_waitq)) {
+		spin_unlock_irqrestore(&tq->tq_lock, irqflags);
+		return;
+	}
+
+	atomic_inc(&tq->tq_nwaking);
+	spin_unlock_irqrestore(&tq->tq_lock, irqflags);
+
+	wake_up(&tq->tq_work_waitq);
+
+	smp_mb__before_atomic();
+	atomic_dec(&tq->tq_nwaking);
+}
+
+/*
  * When a delayed task timer expires remove it from the delay list and
  * add it to the priority list in order for immediate processing.
  */
@@ -341,11 +367,9 @@ task_expire_impl(taskq_ent_t *t)
 	if (l == &tq->tq_prio_list)
 		list_add(&t->tqent_list, &tq->tq_prio_list);
 
-	spin_unlock_irqrestore(&tq->tq_lock, flags);
-
-	wake_up(&tq->tq_work_waitq);
-
 	TQSTAT_INC(tq, tasks_delayed_requeued);
+
+	taskq_unlock_wake(tq, flags);
 }
 
 static void
@@ -748,13 +772,14 @@ taskq_dispatch(taskq_t *tq, task_func_t func, void *arg, uint_t flags)
 
 	spin_unlock(&t->tqent_lock);
 
-	wake_up(&tq->tq_work_waitq);
-
 	TQSTAT_INC(tq, tasks_dispatched);
 
 	/* Spawn additional taskq threads if required. */
 	if (!(flags & TQ_NOQUEUE) && tq->tq_nactive == tq->tq_nthreads)
 		(void) taskq_thread_spawn(tq);
+
+	taskq_unlock_wake(tq, irqflags);
+	return (rc);
 out:
 	spin_unlock_irqrestore(&tq->tq_lock, irqflags);
 	return (rc);
@@ -871,13 +896,14 @@ taskq_dispatch_ent(taskq_t *tq, task_func_t func, void *arg, uint_t flags,
 
 	spin_unlock(&t->tqent_lock);
 
-	wake_up(&tq->tq_work_waitq);
-
 	TQSTAT_INC(tq, tasks_dispatched);
 
 	/* Spawn additional taskq threads if required. */
 	if (tq->tq_nactive == tq->tq_nthreads)
 		(void) taskq_thread_spawn(tq);
+
+	taskq_unlock_wake(tq, irqflags);
+	return;
 out:
 	spin_unlock_irqrestore(&tq->tq_lock, irqflags);
 }
@@ -1063,9 +1089,14 @@ taskq_thread(void *args)
 			TQSTAT_DEC(tq, threads_idle);
 			TQSTAT_INC(tq, thread_wakeups);
 
+			/*
+			 * A dispatcher holds the wait queue's lock, not
+			 * tq_lock, while it wakes a worker: leave the queue
+			 * before taking tq_lock, not while holding it.
+			 */
+			remove_wait_queue(&tq->tq_work_waitq, &wait);
 			spin_lock_irqsave_nested(&tq->tq_lock, flags,
 			    tq->tq_lock_class);
-			remove_wait_queue(&tq->tq_work_waitq, &wait);
 		} else {
 			__set_current_state(TASK_RUNNING);
 		}
@@ -1395,6 +1426,7 @@ taskq_create(const char *name, int threads_arg, pri_t pri,
 	INIT_LIST_HEAD(&tq->tq_prio_list);
 	INIT_LIST_HEAD(&tq->tq_delay_list);
 	init_waitqueue_head(&tq->tq_work_waitq);
+	atomic_set(&tq->tq_nwaking, 0);
 	init_waitqueue_head(&tq->tq_wait_waitq);
 	tq->tq_lock_class = TQ_LOCK_GENERAL;
 	INIT_LIST_HEAD(&tq->tq_taskqs);
@@ -1529,6 +1561,10 @@ taskq_destroy(taskq_t *tq)
 	ASSERT(list_empty(&tq->tq_delay_list));
 
 	spin_unlock_irqrestore(&tq->tq_lock, flags);
+
+	/* Wait for any dispatcher still in taskq_unlock_wake(). */
+	while (atomic_read_acquire(&tq->tq_nwaking) != 0)
+		schedule_timeout_interruptible(1);
 
 	taskq_stats_fini(tq);
 	kmem_strfree(tq->tq_name);
