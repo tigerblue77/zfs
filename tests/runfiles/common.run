@@ -180,7 +180,7 @@ tags = ['functional', 'cli_root', 'json']
 [tests/functional/cli_root/zinject]
 tests = ['zinject_args', 'zinject_counts', 'zinject_panic_args',
     'zinject_point_delay', 'zinject_point_export', 'zinject_point_pause',
-    'zinject_pool_delay', 'zinject_probe']
+    'zinject_point_reflow', 'zinject_pool_delay', 'zinject_probe']
 pre =
 post =
 tags = ['functional', 'cli_root', 'zinject']

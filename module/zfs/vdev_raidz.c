@@ -5267,6 +5267,17 @@ spa_raidz_expand_thread(void *arg, zthr_t *zthr)
 			spa_config_exit(spa, SCL_CONFIG, FTAG);
 
 			/*
+			 * Injection point for tests, before each copy:
+			 * "zinject -n raidz_expand:reflow" can delay or pause
+			 * the reflow here.  An error has no effect.
+			 */
+			if (zio_injection_enabled) {
+				int error = 0;
+				(void) zio_handle_func_injection(spa,
+				    "raidz_expand:reflow", &error);
+			}
+
+			/*
 			 * If requested, pause the reflow when the amount
 			 * specified by raidz_expand_max_reflow_bytes is reached
 			 *
