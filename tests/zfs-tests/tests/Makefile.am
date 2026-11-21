@@ -2499,6 +2499,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/trim/trim_config.ksh \
 	functional/trim/trim_integrity.ksh \
 	functional/trim/trim_l2arc.ksh \
+	functional/trim/trim_l2arc_export.ksh \
 	functional/truncate/cleanup.ksh \
 	functional/truncate/setup.ksh \
 	functional/truncate/truncate_001_pos.ksh \
