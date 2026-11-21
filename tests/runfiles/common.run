@@ -1168,7 +1168,8 @@ tests = ['autotrim_integrity', 'autotrim_config', 'autotrim_trim_integrity',
 tags = ['functional', 'trim']
 
 [tests/functional/truncate]
-tests = ['truncate_001_pos', 'truncate_002_pos', 'truncate_timestamps']
+tests = ['truncate_001_pos', 'truncate_002_pos', 'truncate_sparse_chunks',
+    'truncate_timestamps']
 tags = ['functional', 'truncate']
 
 [tests/functional/uncached]

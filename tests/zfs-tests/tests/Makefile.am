@@ -2503,6 +2503,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/truncate/setup.ksh \
 	functional/truncate/truncate_001_pos.ksh \
 	functional/truncate/truncate_002_pos.ksh \
+	functional/truncate/truncate_sparse_chunks.ksh \
 	functional/truncate/truncate_timestamps.ksh \
 	functional/uncached/cleanup.ksh \
 	functional/uncached/setup.ksh \
