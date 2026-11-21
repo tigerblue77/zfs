@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: CDDL-1.0
+# The points of TASK-1122-HRIG3: a name, the disks' grid file (grid/X.conf),
+# then the guest's settings that differ from hr-load.py's defaults ("-":
+# none, the load TASK-1121-HRIG2 ran).  Only the media writes change: the
+# reads, small writes, transactions and journal commits keep their rates.
+# G5: write cache off; G7: 2 MiB of write cache; G8: 4 MiB; whole stroke.
+#
+# NAME          DISKS GUEST
+g5-50mbs        G5    -
+g5-32mbs        G5    media_mbps=32
+g5-22mbs        G5    media_mbps=22
+g7-50mbs        G7    -
+g8-50mbs        G8    -
+g8-32mbs        G8    media_mbps=32
