@@ -100,7 +100,8 @@
  * that would otherwise be difficult to test, or delay or pause the thread
  * that reaches it, to open a race window deterministically.
  *
- *      zinject -n <point> [-e errno | -D msecs | -A pause] [-f freq] <pool>
+ *      zinject -n <point> [-e errno | -D msecs | -A pause] [-o value]
+ *          [-f freq] <pool>
  *
  * -e	Fail once with errno (default 'io'), then clear the handler, so a
  *	test sees a failure followed by a success.
@@ -108,6 +109,8 @@
  * -A pause
  *	Block each thread that reaches the point until the handler is
  *	cleared with -c.  Use -w to wait until a thread has reached it.
+ * -o	Act only once the point's value (how far its work has got) has
+ *	reached value.
  *
  * Point handlers are matched by pool name and hold no reference on the
  * pool, so they stay in place while it is exported, imported or destroyed.
@@ -124,7 +127,8 @@
  * 	zinject -P <import|export> -s <seconds> <pool>
  * 	zinject -I [-s <seconds> | -g <txgs>] <pool>
  * 	zinject -w <state|0> [-W <delay>]
- * 	zinject -n <point> [-e errno | -D msecs | -A pause] [-f freq] <pool>
+ * 	zinject -n <point> [-e errno | -D msecs | -A pause] [-o value]
+ *	    [-f freq] <pool>
  * 	zinject -E <delay> [-a] [-m] [-f freq] [-l level] [-r range]
  *	    [-T iotype] [-t type object | -b bookmark pool]
  * 	zinject -b <objset:object:level:blkid> <pool>
@@ -456,7 +460,7 @@ usage(void)
 	    "\t\thexadecimal, and only one block can be specified.\n"
 	    "\n"
 	    "\tzinject -n <point> [-e errno | -D msecs | -A pause]\n"
-	    "\t\t[-f freq] pool\n"
+	    "\t\t[-o value] [-f freq] pool\n"
 	    "\n"
 	    "\t\tAct at a named injection point in the code.\n"
 	    "\t\t-e\tReturn an error once (default 'io'), then clear\n"
@@ -465,6 +469,8 @@ usage(void)
 	    "\t\t-A pause\tBlock each thread that reaches the point\n"
 	    "\t\t\tuntil the handler is cleared (-c).  Use -w to wait\n"
 	    "\t\t\tuntil a thread has reached it.\n"
+	    "\t\t-o\tAct only once the point's value has reached\n"
+	    "\t\t\t'value' (numeric suffixes K, M, G... accepted).\n"
 	    "\n"
 	    "\tzinject [-q] <-t type> [-C dvas] [-e errno] [-l level]\n"
 	    "\t\t[-r range] [-a] [-m] [-u] [-f freq] <object>\n"
@@ -677,18 +683,29 @@ print_point_handler(int id, const char *pool, zinject_record_t *record,
 		return (0);
 
 	if (*count == 0) {
-		(void) printf("%3s  %-15s  %-24s  %-12s  %6s  %s\n",
-		    "ID", "POOL", "POINT", "ACTION", "MATCH", "INJECT");
+		(void) printf("%3s  %-15s  %-24s  %-12s  %6s  %6s  %-14s  %s\n",
+		    "ID", "POOL", "POINT", "ACTION", "MATCH", "INJECT", "FROM",
+		    "AT");
 		(void) printf("---  ---------------  ------------------------"
-		    "  ------------  ------  ------\n");
+		    "  ------------  ------  ------  --------------"
+		    "  --------------\n");
 	}
 
 	*count += 1;
 
-	(void) printf("%3d  %-15s  %-24s  %-12s  %6llu  %llu\n", id, pool,
-	    record->zi_func, point_action_str(record, B_FALSE),
+	char from[24] = "-", at[24] = "-";
+	if (record->zi_start != 0) {
+		(void) snprintf(from, sizeof (from), "%llu",
+		    (u_longlong_t)record->zi_start);
+	}
+	if (record->zi_end != UINT64_MAX && record->zi_start != 0) {
+		(void) snprintf(at, sizeof (at), "%llu",
+		    (u_longlong_t)record->zi_end);
+	}
+	(void) printf("%3d  %-15s  %-24s  %-12s  %6llu  %6llu  %-14s  %s\n",
+	    id, pool, record->zi_func, point_action_str(record, B_FALSE),
 	    (u_longlong_t)record->zi_match_count,
-	    (u_longlong_t)record->zi_inject_count);
+	    (u_longlong_t)record->zi_inject_count, from, at);
 
 	return (0);
 }
@@ -902,6 +919,10 @@ register_handler(const char *pool, int flags, zinject_record_t *record,
 			    record->zi_func);
 			(void) printf("  action: %s\n",
 			    point_action_str(record, B_TRUE));
+			if (record->zi_start != 0) {
+				(void) printf("  from value: %llu\n",
+				    (u_longlong_t)record->zi_start);
+			}
 		} else if (record->zi_func[0] != '\0') {
 			(void) printf("  panic function: %s\n",
 			    record->zi_func);
@@ -1097,6 +1118,7 @@ main(int argc, char **argv)
 	char *wait = NULL;
 	hrtime_t wait_timeout = -1;
 	char *delay_arg = NULL;
+	char *value_arg = NULL;
 	int point_pause = 0;
 	int error_given = 0;
 
@@ -1129,7 +1151,7 @@ main(int argc, char **argv)
 	}
 
 	while ((c = getopt(argc, argv,
-	    ":aA:b:C:d:D:E:f:Fg:qhIc:t:T:l:mn:r:s:e:uL:p:P:w:W:")) != -1) {
+	    ":aA:b:C:d:D:E:f:Fg:qhIc:t:T:l:mn:o:r:s:e:uL:p:P:w:W:")) != -1) {
 		switch (c) {
 		case 'a':
 			flags |= ZINJECT_FLUSH_ARC;
@@ -1237,6 +1259,9 @@ main(int argc, char **argv)
 			break;
 		case 'm':
 			domount = 1;
+			break;
+		case 'o':
+			value_arg = optarg;
 			break;
 		case 'n':
 			(void) strlcpy(record.zi_func, optarg,
@@ -1380,6 +1405,14 @@ main(int argc, char **argv)
 			libzfs_fini(g_zfs);
 			return (1);
 		}
+	}
+
+	if (value_arg != NULL && record.zi_cmd != ZINJECT_FUNC_FAULT) {
+		(void) fprintf(stderr, "value (-o) requires an injection "
+		    "point (-n)\n");
+		usage();
+		libzfs_fini(g_zfs);
+		return (2);
 	}
 
 	if (point_pause && record.zi_cmd != ZINJECT_FUNC_FAULT) {
@@ -1679,6 +1712,13 @@ main(int argc, char **argv)
 			usage();
 			libzfs_fini(g_zfs);
 			return (2);
+		}
+		if (value_arg != NULL && zfs_nicestrtonum(g_zfs, value_arg,
+		    &record.zi_start) != 0) {
+			(void) fprintf(stderr, "invalid value '%s'\n",
+			    value_arg);
+			libzfs_fini(g_zfs);
+			return (1);
 		}
 		if (point_pause) {
 			record.zi_type = ZINJECT_POINT_PAUSE;

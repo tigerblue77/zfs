@@ -204,6 +204,7 @@ Force an error into the pool at a raw bookmark
 .Nm zinject
 .Fl n Ar point
 .Oo Fl e Ar errno Ns | Ns Fl D Ar msecs Ns | Ns Fl A Sy pause Oc
+.Op Fl o Ar value
 .Op Fl f Ar frequency
 .Ar pool
 .Xc
@@ -238,6 +239,38 @@ thread is told to stop, and the handler stays in place: at
 .Sy raidz_expand:reflow ,
 the pause ends when the pool is exported, and the reflow is paused at the
 same place again once the pool is imported.
+.It Fl o Ar value
+Act only once the point's value, which says how far its work has got, has
+reached
+.Ar value ,
+rounded down to the point's granularity.
+Numeric suffixes
+.Pq Sy K , M , G , T , P , E
+are accepted.
+At a point that passes no value,
+.Fl o
+other than 0 keeps the handler from acting.
+Listing the handlers shows the value from which each acts
+.Pq Sy FROM
+and the value at which it last acted
+.Pq Sy AT .
+.El
+.Pp
+Points that pass a value:
+.Bl -tag -width "raidz_expand:reflow"
+.It Sy raidz_expand:reflow
+The reflow of a raidz expansion, before each copy.
+The value is the reflow offset in the raidz vdev, which
+.Xr zdb 8
+shows with
+.Fl u ,
+and the granularity a sector.
+With
+.Fl A Sy pause ,
+the reflow copies up to
+.Ar value
+and is paused exactly there, or where it is if it is already past it:
+.Dl # Nm zinject Fl n Sy raidz_expand:reflow Fl o Ar 400M Fl A Sy pause Ar pool
 .El
 .Pp
 Listing the handlers shows how many times each point was reached

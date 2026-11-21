@@ -4620,9 +4620,27 @@ raidz_reflow_impl(vdev_t *vd, vdev_raidz_expand_t *vre, zfs_range_tree_t *rt,
 	uint64_t next_overwrite_blkid = ubsync_blkid +
 	    ubsync_blkid / old_children - old_children;
 	VERIFY3U(next_overwrite_blkid, >, ubsync_blkid);
-	if (blkid >= next_overwrite_blkid) {
-		raidz_reflow_record_progress(vre,
-		    next_overwrite_blkid << ashift, tx);
+
+	/*
+	 * For tests, "zinject -n raidz_expand:reflow -o OFFSET -A pause"
+	 * pauses the reflow once it reaches OFFSET, rounded down to a sector.
+	 * Copy nothing at or past it, but move the progress across free
+	 * space up to it, as for next_overwrite_blkid, so that the reflow is
+	 * paused exactly there.  A reflow already past it is paused where it
+	 * is.
+	 */
+	uint64_t stop_blkid = next_overwrite_blkid;
+	if (zio_injection_enabled) {
+		uint64_t pause_blkid = zio_inject_point_limit(spa,
+		    "raidz_expand:reflow", 1ULL << ashift) >> ashift;
+		if (pause_blkid < stop_blkid) {
+			stop_blkid = MAX(pause_blkid,
+			    vre->vre_offset >> ashift);
+		}
+	}
+
+	if (blkid >= stop_blkid) {
+		raidz_reflow_record_progress(vre, stop_blkid << ashift, tx);
 		return (B_TRUE);
 	}
 
@@ -4630,7 +4648,7 @@ raidz_reflow_impl(vdev_t *vd, vdev_raidz_expand_t *vre, zfs_range_tree_t *rt,
 	size = MIN(size, (uint64_t)old_children *
 	    MIN(zfs_max_recordsize, SPA_MAXBLOCKSIZE));
 	size = MAX(size, 1 << ashift);
-	uint_t blocks = MIN(size >> ashift, next_overwrite_blkid - blkid);
+	uint_t blocks = MIN(size >> ashift, stop_blkid - blkid);
 	size = (uint64_t)blocks << ashift;
 
 	zfs_range_tree_remove(rt, offset, size);
@@ -5277,11 +5295,15 @@ spa_raidz_expand_thread(void *arg, zthr_t *zthr)
 			 * "zinject -n raidz_expand:reflow" can delay or pause
 			 * the reflow here.  An error has no effect.  A pause
 			 * ends if we are cancelled (by an export), and we then
-			 * copy nothing more.
+			 * copy nothing more.  The value is the reflow offset,
+			 * and raidz_reflow_impl() copies no further than the
+			 * offset a handler pauses at.
 			 */
 			if (zio_injection_enabled) {
 				zio_inject_point_t zp = {
 					.zp_name = "raidz_expand:reflow",
+					.zp_value = vre->vre_offset,
+					.zp_align = sectorsz,
 					.zp_stop = raidz_reflow_cancelled,
 					.zp_stop_arg = zthr,
 				};

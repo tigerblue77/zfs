@@ -237,6 +237,49 @@ zio_inject_pause(int id, const zio_inject_point_t *zp)
 }
 
 /*
+ * The value from which a point handler acts, rounded down to align.
+ */
+static uint64_t
+zio_inject_point_from(const zinject_record_t *record, uint64_t align)
+{
+	if (align == 0)
+		return (record->zi_start);
+	return (P2ALIGN_TYPED(record->zi_start, align, uint64_t));
+}
+
+/*
+ * For a point whose work can stop exactly at a given value: the lowest
+ * value, rounded down to align, from which a handler pauses the point
+ * named name in pool spa, or UINT64_MAX if none does.  The point's work
+ * should go no further than this before it reaches the point again, so
+ * that it is paused exactly there.
+ */
+uint64_t
+zio_inject_point_limit(spa_t *spa, const char *name, uint64_t align)
+{
+	uint64_t limit = UINT64_MAX;
+
+	if (zio_injection_enabled == 0)
+		return (limit);
+
+	rw_enter(&inject_lock, RW_READER);
+	for (inject_handler_t *handler = list_head(&inject_handlers);
+	    handler != NULL; handler = list_next(&inject_handlers, handler)) {
+		if (handler->zi_record.zi_cmd != ZINJECT_FUNC_FAULT ||
+		    handler->zi_record.zi_type != ZINJECT_POINT_PAUSE ||
+		    handler->zi_spa_name == NULL ||
+		    strcmp(spa_name(spa), handler->zi_spa_name) != 0 ||
+		    strcmp(name, handler->zi_record.zi_func) != 0)
+			continue;
+		limit = MIN(limit,
+		    zio_inject_point_from(&handler->zi_record, align));
+	}
+	rw_exit(&inject_lock);
+
+	return (limit);
+}
+
+/*
  * The injection point zp has been reached in pool spa.  If a
  * ZINJECT_FUNC_FAULT ("zinject -n") handler for the point matches, perform
  * its action:
@@ -251,6 +294,10 @@ zio_inject_pause(int id, const zio_inject_point_t *zp)
  *			zp->zp_stopped), and return 0.
  *
  * Otherwise return 0.  Callers test zio_injection_enabled first.
+ *
+ * A handler with a value condition (zi_start, from "zinject -o") matches
+ * only once zp->zp_value has reached it, rounded down to zp->zp_align.  It
+ * records the value at which it last acted in zi_end.
  *
  * Each action taken is an injection event, so "zinject -w" returns once a
  * thread has reached the point; for a pause, the thread is then blocked.
@@ -276,10 +323,13 @@ zio_handle_point_injection(spa_t *spa, zio_inject_point_t *zp, int *error)
 			continue;
 
 		handler->zi_record.zi_match_count++;
-		if (!freq_triggered(handler->zi_record.zi_freq))
+		if (zp->zp_value < zio_inject_point_from(&handler->zi_record,
+		    zp->zp_align) ||
+		    !freq_triggered(handler->zi_record.zi_freq))
 			continue;
 
 		handler->zi_record.zi_inject_count++;
+		handler->zi_record.zi_end = zp->zp_value;
 		action = handler->zi_record.zi_type;
 		delay = handler->zi_record.zi_timer;
 		id = handler->zi_id;
@@ -1211,6 +1261,8 @@ zio_inject_fault(char *name, int flags, int *id, zinject_record_t *record)
 			if (record->zi_type == ZINJECT_POINT_DELAY &&
 			    record->zi_timer == 0)
 				return (SET_ERROR(EINVAL));
+			/* where it last acted: not yet */
+			record->zi_end = UINT64_MAX;
 			spa = NULL;
 		} else {
 			/*

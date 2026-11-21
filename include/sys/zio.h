@@ -743,6 +743,13 @@ extern int zio_handle_func_injection(spa_t *spa, const char *tag,
 typedef struct zio_inject_point {
 	const char	*zp_name;	/* the point's name */
 	/*
+	 * How far the point's work has got.  A handler with a value
+	 * condition ("zinject -n -o VALUE") acts only once zp_value reaches
+	 * VALUE, rounded down to zp_align if that is not 0.
+	 */
+	uint64_t	zp_value;
+	uint64_t	zp_align;
+	/*
 	 * If not NULL, a pause at the point ends as soon as zp_stop()
 	 * returns B_TRUE, for instance when the thread is cancelled, and
 	 * zp_stopped is then set.
@@ -754,6 +761,8 @@ typedef struct zio_inject_point {
 
 extern int zio_handle_point_injection(spa_t *spa, zio_inject_point_t *zp,
     int *error);
+extern uint64_t zio_inject_point_limit(spa_t *spa, const char *name,
+    uint64_t align);
 extern void zio_handle_panic_injection(spa_t *spa, const char *tag,
     uint64_t type);
 extern int zio_handle_decrypt_injection(spa_t *spa, const zbookmark_phys_t *zb,
