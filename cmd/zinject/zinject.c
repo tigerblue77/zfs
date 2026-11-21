@@ -108,6 +108,9 @@
  * -A pause
  *	Block each thread that reaches the point until the handler is
  *	cleared with -c.  Use -w to wait until a thread has reached it.
+ *
+ * Point handlers are matched by pool name and hold no reference on the
+ * pool, so they stay in place while it is exported, imported or destroyed.
  */
 
 /*

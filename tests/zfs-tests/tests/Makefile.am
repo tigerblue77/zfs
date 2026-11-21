@@ -738,6 +738,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/cli_root/zinject/zinject_counts.ksh \
 	functional/cli_root/zinject/zinject_panic_args.ksh \
 	functional/cli_root/zinject/zinject_point_delay.ksh \
+	functional/cli_root/zinject/zinject_point_export.ksh \
 	functional/cli_root/zinject/zinject_point_pause.ksh \
 	functional/cli_root/zinject/zinject_pool_delay.ksh \
 	functional/cli_root/zinject/zinject_probe.ksh \

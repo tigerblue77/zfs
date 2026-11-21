@@ -239,6 +239,14 @@ Listing the handlers shows how many times each point was reached
 .Pq Sy MATCH
 and how many times the action was taken
 .Pq Sy INJECT .
+.Pp
+Injection point handlers are matched by pool name, and hold no reference on
+the pool.
+They can be added before the pool is imported or created, and they stay in
+place while it is exported, imported or destroyed, acting on any pool of
+that name until they are cleared with
+.Fl c .
+Tests should clear them in their cleanup.
 .
 .It Xo
 .Nm zinject
