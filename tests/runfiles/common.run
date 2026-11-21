@@ -440,7 +440,7 @@ tags = ['functional', 'cli_root', 'zpool_attach']
 
 [tests/functional/cli_root/zpool_clear]
 tests = ['zpool_clear_001_pos', 'zpool_clear_002_neg', 'zpool_clear_003_neg',
-    'zpool_clear_readonly']
+    'zpool_clear_cache_device', 'zpool_clear_readonly']
 tags = ['functional', 'cli_root', 'zpool_clear']
 
 [tests/functional/cli_root/zpool_condense]

@@ -1184,6 +1184,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/cli_root/zpool_clear/zpool_clear_001_pos.ksh \
 	functional/cli_root/zpool_clear/zpool_clear_002_neg.ksh \
 	functional/cli_root/zpool_clear/zpool_clear_003_neg.ksh \
+	functional/cli_root/zpool_clear/zpool_clear_cache_device.ksh \
 	functional/cli_root/zpool_clear/zpool_clear_readonly.ksh \
 	functional/cli_root/zpool_condense/cleanup.ksh \
 	functional/cli_root/zpool_condense/setup.ksh \
