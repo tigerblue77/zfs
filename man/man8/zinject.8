@@ -14,7 +14,7 @@
 .\"
 .\" lint-ok: WARNING: sections out of conventional order: Sh SYNOPSIS
 .\"
-.Dd November 17, 2026
+.Dd November 21, 2026
 .Dt ZINJECT 8
 .Os
 .
@@ -183,6 +183,9 @@ mounted, after the task has released the dataset and before it returns.
 .It Sy zfs_freesp:changed
 On Linux, in a truncation or a hole punch, after the file is changed and
 before the change is logged in the ZIL.
+.It Sy zfs_setattr:size_changed
+On Linux, in a change of attributes that includes the size, after the size
+is changed and before the other attributes are.
 .El
 .
 .It Xo

@@ -246,7 +246,7 @@ tests = ['simd_supported']
 tags = ['functional', 'simd']
 
 [tests/functional/slog:Linux]
-tests = ['slog_replay_fs_freesp_order']
+tests = ['slog_replay_fs_freesp_order', 'slog_replay_fs_setattr_size']
 tags = ['functional', 'slog']
 
 [tests/functional/snapdir:Linux]
