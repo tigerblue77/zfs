@@ -6703,6 +6703,13 @@ zfs_ioc_pool_reopen(const char *pool, nvlist_t *innvl, nvlist_t *outnvl)
 	spa->spa_scrub_reopen = (!scrub_restart &&
 	    dsl_scan_scrubbing(spa->spa_dsl_pool));
 	vdev_reopen(spa->spa_root_vdev);
+
+	/*
+	 * Cache devices are not children of the root vdev.  Available hot
+	 * spares are left out: they do no I/O.
+	 */
+	for (int i = 0; i < spa->spa_l2cache.sav_count; i++)
+		vdev_reopen(spa->spa_l2cache.sav_vdevs[i]);
 	spa->spa_scrub_reopen = B_FALSE;
 
 	(void) spa_vdev_state_exit(spa, NULL, 0);
