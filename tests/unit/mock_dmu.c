@@ -345,7 +345,13 @@ spa_maxblocksize(spa_t *spa)
 	return (SPA_OLD_MAXBLOCKSIZE);
 }
 
-const dmu_object_type_info_t dmu_ot[DMU_OT_NUMTYPES];
+/* Only the entries that tests consult, as in dmu.c. */
+const dmu_object_type_info_t dmu_ot[DMU_OT_NUMTYPES] = {
+	[DMU_OT_INTENT_LOG] =
+	    { DMU_BSWAP_UINT64, B_TRUE, B_FALSE, B_TRUE, "ZIL intent log" },
+	[DMU_OT_DNODE] =
+	    { DMU_BSWAP_DNODE, B_TRUE, B_FALSE, B_TRUE, "DMU dnode" },
+};
 
 void
 byteswap_uint64_array(void *buf, size_t size)
