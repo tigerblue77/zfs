@@ -763,6 +763,16 @@ typedef struct zio_inject_point {
 	boolean_t	(*zp_stop)(void *);
 	void		*zp_stop_arg;
 	boolean_t	zp_stopped;
+	/*
+	 * Set if the point must not block (in syncing context, say): delay
+	 * and pause handlers don't act there.
+	 */
+	boolean_t	zp_noblock;
+	/*
+	 * Set by a skip handler ("zinject -n -A skip"): the point's work
+	 * should skip its next step, if it can.
+	 */
+	boolean_t	zp_skip;
 } zio_inject_point_t;
 
 extern int zio_handle_point_injection(spa_t *spa, zio_inject_point_t *zp,

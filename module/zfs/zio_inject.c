@@ -319,6 +319,11 @@ zio_inject_point_limit(spa_t *spa, const char *name, uint64_t align)
  * ZINJECT_POINT_PAUSE	block until the handler is removed, or until
  *			zp->zp_stop() returns B_TRUE (then set
  *			zp->zp_stopped), and return 0.
+ * ZINJECT_POINT_SKIP	set zp->zp_skip and return 0, so that a point
+ *			that can skip its work does so, until the handler
+ *			is removed.
+ *
+ * Delay and pause handlers don't act at points marked zp_noblock.
  *
  * Otherwise return 0.  Callers test zio_injection_enabled first.
  *
@@ -352,6 +357,9 @@ zio_handle_point_injection(spa_t *spa, zio_inject_point_t *zp, int *error)
 		handler->zi_record.zi_match_count++;
 		if (zp->zp_value < zio_inject_point_from(&handler->zi_record,
 		    zp->zp_align) ||
+		    (zp->zp_noblock &&
+		    (handler->zi_record.zi_type == ZINJECT_POINT_DELAY ||
+		    handler->zi_record.zi_type == ZINJECT_POINT_PAUSE)) ||
 		    !freq_triggered(handler->zi_record.zi_freq))
 			continue;
 
@@ -399,6 +407,9 @@ zio_handle_point_injection(spa_t *spa, zio_inject_point_t *zp, int *error)
 		    zp->zp_stopped ? "stopped" : "resumed", tag,
 		    zp->zp_caller != NULL ? "@" : "",
 		    zp->zp_caller != NULL ? zp->zp_caller : "");
+		break;
+	case ZINJECT_POINT_SKIP:
+		zp->zp_skip = B_TRUE;
 		break;
 	}
 
@@ -1289,7 +1300,7 @@ zio_inject_fault(char *name, int flags, int *id, zinject_record_t *record)
 			spa = NULL;
 		} else if (record->zi_cmd == ZINJECT_FUNC_FAULT) {
 			if (record->zi_func[0] == '\0' ||
-			    record->zi_type > ZINJECT_POINT_PAUSE)
+			    record->zi_type > ZINJECT_POINT_SKIP)
 				return (SET_ERROR(EINVAL));
 			if (record->zi_type == ZINJECT_POINT_DELAY &&
 			    record->zi_timer == 0)

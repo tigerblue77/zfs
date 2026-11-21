@@ -203,7 +203,7 @@ Force an error into the pool at a raw bookmark
 .It Xo
 .Nm zinject
 .Fl n Ar point Ns Oo @ Ns Ar caller Oc
-.Oo Fl e Ar errno Ns | Ns Fl D Ar msecs Ns | Ns Fl A Sy pause Oc
+.Oo Fl e Ar errno Ns | Ns Fl D Ar msecs Ns | Ns Fl A Sy pause Ns | Ns Sy skip Oc
 .Op Fl o Ar value
 .Op Fl f Ar frequency
 .Ar pool
@@ -246,6 +246,12 @@ thread is told to stop, and the handler stays in place: at
 .Sy raidz_expand:reflow ,
 the pause ends when the pool is exported, and the reflow is paused at the
 same place again once the pool is imported.
+.It Fl A Sy skip
+Make each pass through the point skip the step that follows it, until the
+handler is cleared with
+.Fl c ,
+at points that can skip their step.
+Elsewhere it has no effect.
 .It Fl o Ar value
 Act only once the point's value, which says how far its work has got, has
 reached
@@ -263,8 +269,15 @@ and the value at which it last acted
 .Pq Sy AT .
 .El
 .Pp
-Points that pass a caller or a value:
+Points that pass a caller or a value, or can skip their step:
 .Bl -tag -width "raidz_expand:reflow"
+.It Sy dsl_scan_sync:progress
+Each txg's work of a scrub or resilver.
+With
+.Fl A Sy skip ,
+the scan makes no progress until the handler is cleared, also across an
+export and import.
+This runs in syncing context, so delay and pause handlers do not act here.
 .It Sy zfs_enter
 Every file system operation, just before it enters the file system.
 The caller is the operation's function, such as
@@ -431,11 +444,12 @@ Act at the injection point named
 .Ar point :
 return an error once
 .Pq Fl e , default Sy io ,
-or delay
+delay
 .Pq Fl D
 or pause
 .Pq Fl A Sy pause
-each thread that reaches it.
+each thread that reaches it, or make it skip its step
+.Pq Fl A Sy skip .
 .It Fl P Sy import Ns | Ns Sy export
 Delay a future import or export
 .Pq requires Fl s .

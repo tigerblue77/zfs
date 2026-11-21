@@ -4647,6 +4647,37 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 	}
 
 	/*
+	 * Injection point for tests: "zinject -n dsl_scan_sync:progress -A
+	 * skip" keeps the scan from making progress, as
+	 * zfs_scan_suspend_progress does, until the handler is cleared.  We
+	 * are in syncing context, so the point does not delay or pause.
+	 */
+	if (zio_injection_enabled) {
+		zio_inject_point_t zp = {
+			.zp_name = "dsl_scan_sync:progress",
+			.zp_noblock = B_TRUE,
+		};
+		int error = 0;
+		(void) zio_handle_point_injection(spa, &zp, &error);
+		if (zp.zp_skip) {
+			uint64_t scan_time_ns =
+			    getlrtime() - scn->scn_sync_start_time;
+			uint_t mintime = (scn->scn_phys.scn_func ==
+			    POOL_SCAN_RESILVER) ? zfs_resilver_min_time_ms :
+			    zfs_scrub_min_time_ms;
+
+			while (!txg_sync_waiting(scn->scn_dp) &&
+			    !spa_shutting_down(spa) &&
+			    NSEC2MSEC(scan_time_ns) < mintime) {
+				delay(hz);
+				scan_time_ns =
+				    getlrtime() - scn->scn_sync_start_time;
+			}
+			return;
+		}
+	}
+
+	/*
 	 * Disabled by default, set zfs_scan_report_txgs to report
 	 * average performance over the last zfs_scan_report_txgs TXGs.
 	 */
