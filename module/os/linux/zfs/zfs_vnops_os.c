@@ -2151,6 +2151,11 @@ top:
 		err = zfs_freesp(zp, vap->va_size, 0, 0, !zfsvfs->z_replay);
 		if (err)
 			goto out3;
+		if (zio_injection_enabled) {
+			int ignored = 0;
+			(void) zio_handle_func_injection(dmu_objset_spa(os),
+			    "zfs_setattr:size_changed", &ignored);
+		}
 	}
 
 	if (mask & (ATTR_ATIME|ATTR_MTIME) ||
