@@ -14,7 +14,7 @@
 .\"
 .\" lint-ok: WARNING: sections out of conventional order: Sh SYNOPSIS
 .\"
-.Dd October 31, 2026
+.Dd November 21, 2026
 .Dt ZINJECT 8
 .Os
 .
@@ -24,8 +24,7 @@
 .Sh DESCRIPTION
 .Nm
 creates artificial problems in a ZFS pool by simulating data corruption
-or device failures, or by forcing a one-shot error return from a tagged
-code path
+or device failures, or by acting at a named injection point in the code
 .Pq Fl n .
 This program is dangerous.
 .
@@ -203,14 +202,35 @@ Force an error into the pool at a raw bookmark
 .
 .It Xo
 .Nm zinject
-.Fl n Ar error-point
-.Op Fl e Ar errno
+.Fl n Ar point
+.Oo Fl e Ar errno Ns | Ns Fl D Ar msecs Oc
+.Op Fl f Ar frequency
 .Ar pool
 .Xc
-Force a one-shot error return at a function injection tag.
-Default errno is
-.Sy io .
-The handler is cleared when it fires.
+Act at the injection point named
+.Ar point
+in
+.Ar pool .
+An injection point is a call to
+.Fn zio_handle_func_injection
+in the module.
+.Bl -tag -width "-D msecs"
+.It Fl e Ar errno
+Return
+.Ar errno
+.Pq default Sy io
+once, then clear the handler, so that the next attempt succeeds.
+.It Fl D Ar msecs
+Delay each thread that reaches the point by
+.Ar msecs
+milliseconds, until the handler is cleared with
+.Fl c .
+.El
+.Pp
+Listing the handlers shows how many times each point was reached
+.Pq Sy MATCH
+and how many times the action was taken
+.Pq Sy INJECT .
 .
 .It Xo
 .Nm zinject
@@ -333,17 +353,13 @@ or
 .Sy uber .
 .It Fl m
 Automatically remount the underlying filesystem.
-.It Fl n Ar error-point
-Register a one-shot function fault at
-.Ar error-point .
-Requires a matching
-.Fn zio_handle_func_injection
-call in the module.
-Use
-.Fl e
-to choose the errno
-.Pq default Sy io .
-The handler is cleared when it fires.
+.It Fl n Ar point
+Act at the injection point named
+.Ar point :
+return an error once
+.Pq Fl e , default Sy io ,
+or delay each thread that reaches it
+.Pq Fl D .
 .It Fl P Sy import Ns | Ns Sy export
 Delay a future import or export
 .Pq requires Fl s .

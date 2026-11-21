@@ -191,12 +191,24 @@ done:
 }
 
 /*
- * Inject a one-time error into the middle of a function.
+ * The injection point named tag has been reached in pool spa.  If a
+ * ZINJECT_FUNC_FAULT ("zinject -n") handler for the point matches, perform
+ * its action:
+ *
+ * ZINJECT_POINT_ERROR	set *error to the handler's error and return 1.
+ *			The handler is then removed, so the next hit
+ *			succeeds and a test sees a failure followed by a
+ *			success.
+ * ZINJECT_POINT_DELAY	sleep for the handler's delay, then return 0.
+ *
+ * Otherwise return 0.  Callers test zio_injection_enabled first.
  */
 int
 zio_handle_func_injection(spa_t *spa, const char *tag, int *error)
 {
 	inject_handler_t *handler;
+	uint64_t action = ZINJECT_POINT_ERROR;
+	hrtime_t delay = 0;
 	int ret = 0;
 
 	rw_enter(&inject_lock, RW_WRITER);
@@ -209,15 +221,27 @@ zio_handle_func_injection(spa_t *spa, const char *tag, int *error)
 		    strcmp(tag, handler->zi_record.zi_func) != 0)
 			continue;
 
-		*error = handler->zi_record.zi_error;
-		ret = 1;
+		handler->zi_record.zi_match_count++;
+		if (!freq_triggered(handler->zi_record.zi_freq))
+			continue;
+
+		handler->zi_record.zi_inject_count++;
+		action = handler->zi_record.zi_type;
+		delay = handler->zi_record.zi_timer;
 		break;
 	}
-	if (handler != NULL)
+	if (handler != NULL && action == ZINJECT_POINT_ERROR) {
+		*error = handler->zi_record.zi_error;
+		ret = 1;
 		list_remove(&inject_handlers, handler);
+	}
 	rw_exit(&inject_lock);
 
-	if (handler != NULL) {
+	if (handler == NULL)
+		return (0);
+
+	switch (action) {
+	case ZINJECT_POINT_ERROR:
 		ASSERT3U(zio_injection_enabled, >, 0);
 		atomic_dec_32(&zio_injection_enabled);
 
@@ -226,6 +250,10 @@ zio_handle_func_injection(spa_t *spa, const char *tag, int *error)
 			spa_strfree(handler->zi_spa_name);
 
 		kmem_free(handler, sizeof (inject_handler_t));
+		break;
+	case ZINJECT_POINT_DELAY:
+		zfs_sleep_until(gethrtime() + delay);
+		break;
 	}
 
 	return (ret);
@@ -1102,7 +1130,11 @@ zio_inject_fault(char *name, int flags, int *id, zinject_record_t *record)
 				return (SET_ERROR(ENOENT));
 			spa = NULL;
 		} else if (record->zi_cmd == ZINJECT_FUNC_FAULT) {
-			if (record->zi_func[0] == '\0')
+			if (record->zi_func[0] == '\0' ||
+			    record->zi_type > ZINJECT_POINT_DELAY)
+				return (SET_ERROR(EINVAL));
+			if (record->zi_type == ZINJECT_POINT_DELAY &&
+			    record->zi_timer == 0)
 				return (SET_ERROR(EINVAL));
 			spa = NULL;
 		} else {

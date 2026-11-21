@@ -449,6 +449,15 @@ typedef enum zinject_type {
 	ZINJECT_FUNC_FAULT,
 } zinject_type_t;
 
+/*
+ * What a ZINJECT_FUNC_FAULT ("zinject -n") handler does at its injection
+ * point, kept in zi_type.
+ */
+typedef enum zinject_point_action {
+	ZINJECT_POINT_ERROR = 0,	/* fail once with zi_error */
+	ZINJECT_POINT_DELAY,		/* sleep zi_timer ns at each hit */
+} zinject_point_action_t;
+
 typedef enum zinject_iotype {
 	/*
 	 * Compatibility: zi_iotype used to be set to ZIO_TYPE_, so make sure

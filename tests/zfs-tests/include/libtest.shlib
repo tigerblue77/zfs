@@ -3175,6 +3175,24 @@ function write_compressible
 	fi
 }
 
+#
+# Print field $2 (POINT, ACTION, MATCH or INJECT) of injection point handler
+# $1 (the ID printed by 'zinject -q -n'), from the listing 'zinject' prints,
+# or nothing if there is no such handler.
+#
+function inject_point_field # id field
+{
+	zinject | awk -v id="$1" -v f="$2" '
+	    $1 == "ID" && $3 == "POINT" {
+		for (i = 1; i <= NF; i++)
+			col[$i] = i
+		t = 1
+		next
+	    }
+	    /^$/ { t = 0 }
+	    t && $1 == id { print $col[f] }'
+}
+
 function get_objnum
 {
 	typeset pathname=$1
