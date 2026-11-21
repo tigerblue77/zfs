@@ -1,0 +1,209 @@
+From 2809c3d07f7b1769f3edd2caca4ba1e203e033c3 Mon Sep 17 00:00:00 2001
+From: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 15:03:05 +0000
+Subject: [PATCH 1/2] vdev_disk: add zfs_vdev_disk_rt_mask
+
+A drive with NCQ priority enabled serves the commands marked high
+priority ahead of the others it holds.  libata and mpt3sas mark a
+command that way when its request carries the real-time I/O priority
+class and the drive's ncq_prio_enable (sas_ncq_prio_enable behind
+mpt3sas) is set.  mq-deadline also serves that class first; BFQ takes
+the class from the submitting thread instead.
+
+vdev_disk_io_rw() leaves every bio at IOPRIO_CLASS_NONE, and from
+Linux 6.0 submit_bio() then gives it the I/O priority of the thread
+that submits it.  ZFS's own threads submit most pool I/O, so nearly
+every request ends up best-effort whether a thread waits for it or
+not, and nothing below ZFS can serve a synchronous read or a ZIL
+write before the transaction group writes queued with it.
+
+When bit 1 of zfs_vdev_disk_rt_mask is set, give the bios of
+synchronous reads the real-time class at the normal level; with
+bit 2, those of synchronous writes: ZIL blocks, the blocks dmu_sync()
+writes for them, Direct I/O writes and labels.  A child I/O inherits
+its parent's priority and an aggregate that of the I/O it was built
+around.  The parameter is off by default: mq-deadline serves the
+real-time class ahead of every other, up to its aging limit, so a
+steady stream of synchronous reads would hold back the rest of the
+pool's I/O there.
+
+A thread that chose its own priority keeps it: one whose I/O
+priority was set with ioprio_set(2), or that runs under SCHED_IDLE,
+SCHED_FIFO, SCHED_RR or SCHED_DEADLINE.  Giving every bio a fixed
+priority instead undid "ionice -c3" on a test rig with Linux 6.12 and
+mq-deadline: a process's own reads, issued inline from its threads,
+left the idle class, and the p99 latency of a paced reader beside it
+rose ninefold.  A cgroup's io.prio.class still applies on top, and
+the bio's blkcg is not touched, so io.max and iocost see the same
+I/O as before.
+
+IOPRIO_PRIO_VALUE(), IOPRIO_CLASS_RT, IOPRIO_NORM, io_context.ioprio
+and task_struct.policy exist on every supported kernel, so no
+configure check is needed.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>
+---
+ man/man4/zfs.4                  | 48 ++++++++++++++++++++++++++++++++-
+ module/os/linux/zfs/vdev_disk.c | 46 +++++++++++++++++++++++++++++++
+ 2 files changed, 93 insertions(+), 1 deletion(-)
+
+diff --git a/man/man4/zfs.4 b/man/man4/zfs.4
+index 4e7b0465cbd..c38b186d817 100644
+--- a/man/man4/zfs.4
++++ b/man/man4/zfs.4
+@@ -18,7 +18,7 @@
+ .\" own identifying information:
+ .\" Portions Copyright [yyyy] [name of copyright owner]
+ .\"
+-.Dd September 15, 2025
++.Dd November 21, 2026
+ .Dt ZFS 4
+ .Os
+ .
+@@ -1637,6 +1637,52 @@ itself, it will be clamped.
+ Setting it to zero will cause the kernel's ideal size to be used.
+ This parameter only applies on Linux.
+ .
++.It Sy zfs_vdev_disk_rt_mask Ns = Ns Sy 0 Pq uint
++Synchronous I/O to submit to disk vdevs in the real-time I/O priority class,
++as a bitmask:
++.Sy 1
++for synchronous reads, the reads a thread waits for, and
++.Sy 2
++for synchronous writes: ZIL blocks, blocks written for the ZIL
++.Pq see Sy zfs_immediate_write_sz ,
++Direct I/O writes and vdev labels.
++.Pp
++By default ZFS leaves the priority of its I/O to the kernel, which from
++Linux 6.0 gives a request the priority of the thread that submits it,
++derived from its
++.Xr nice 1
++value unless it set one.
++ZFS's own threads submit most of a pool's I/O, whichever thread waits for it,
++so that priority does not tell the I/O a thread waits for from the rest.
++A disk serves the real-time class first when its NCQ priority is enabled
++.Po
++.Pa /sys/block/ Ns Ar disk Ns Pa /device/ncq_prio_enable ,
++or
++.Pa sas_ncq_prio_enable
++behind an mpt3sas host adapter
++.Pc ,
++and so does the mq-deadline scheduler; BFQ takes the class from the
++submitting thread instead.
++.Pp
++A thread whose priority was set with
++.Xr ioprio_set 2
++or
++.Xr ionice 1 ,
++or that runs under the
++.Sy SCHED_IDLE ,
++.Sy SCHED_FIFO ,
++.Sy SCHED_RR
++or
++.Sy SCHED_DEADLINE
++policy, keeps its own priority for the I/O it submits.
++The
++.Sy io.prio.class
++of the submitting thread's cgroup still applies on top.
++With mq-deadline, a steady stream of synchronous reads can hold back every
++other request to the disk, transaction group writes included, up to its
++aging limit.
++This parameter only applies on Linux.
++.
+ .It Sy zfs_expire_snapshot Ns = Ns Sy 300 Ns s Pq int
+ Time before expiring
+ .Pa .zfs/snapshot .
+diff --git a/module/os/linux/zfs/vdev_disk.c b/module/os/linux/zfs/vdev_disk.c
+index b00e74bfc02..c7afb6d7a6f 100644
+--- a/module/os/linux/zfs/vdev_disk.c
++++ b/module/os/linux/zfs/vdev_disk.c
+@@ -41,6 +41,7 @@
+ #include <linux/msdos_fs.h>
+ #include <linux/vfs_compat.h>
+ #include <linux/blk-cgroup.h>
++#include <linux/ioprio.h>
+ 
+ /*
+  * Linux 6.8.x uses a bdev_handle as an instance/refcount for an underlying
+@@ -107,6 +108,13 @@ static uint_t zfs_vdev_open_timeout_ms = 1000;
+ 
+ static unsigned int zfs_vdev_failfast_mask = 1;
+ 
++/*
++ * Synchronous I/O to submit in the real-time I/O priority class: 1 reads,
++ * 2 writes.  A disk with NCQ priority enabled serves that class first, and
++ * so does mq-deadline.
++ */
++static unsigned int zfs_vdev_disk_rt_mask = 0;
++
+ /*
+  * Convert SPA mode flags into bdev open mode flags.
+  */
+@@ -727,8 +735,41 @@ typedef struct {
+ 
+ 	struct bio	*vbio_bio;	/* pointer to the current bio */
+ 	int		vbio_flags;	/* bio flags */
++	unsigned short	vbio_ioprio;	/* bio I/O priority */
+ } vbio_t;
+ 
++/*
++ * The I/O priority of the bios of a zio.  IOPRIO_CLASS_NONE lets submit_bio()
++ * give them the priority of the submitting thread, which for ZFS's own
++ * threads says nothing about the I/O.
++ */
++static unsigned short
++vdev_disk_bio_ioprio(const zio_t *zio)
++{
++	const unsigned short none = IOPRIO_PRIO_VALUE(IOPRIO_CLASS_NONE, 0);
++	const unsigned int mask = zfs_vdev_disk_rt_mask;
++	const struct io_context *ioc;
++
++	if (!((zio->io_priority == ZIO_PRIORITY_SYNC_READ && (mask & 1)) ||
++	    (zio->io_priority == ZIO_PRIORITY_SYNC_WRITE && (mask & 2))))
++		return (none);
++
++	/*
++	 * A thread that chose its own priority, with ioprio_set(2) or a
++	 * real-time or idle scheduling policy, keeps it, so that "ionice -c3"
++	 * still keeps a process's own reads behind the others'.
++	 */
++	if (current->policy == SCHED_IDLE || current->policy == SCHED_FIFO ||
++	    current->policy == SCHED_RR || current->policy == SCHED_DEADLINE)
++		return (none);
++	ioc = READ_ONCE(current->io_context);
++	if (ioc != NULL &&
++	    IOPRIO_PRIO_CLASS(READ_ONCE(ioc->ioprio)) != IOPRIO_CLASS_NONE)
++		return (none);
++
++	return (IOPRIO_PRIO_VALUE(IOPRIO_CLASS_RT, IOPRIO_NORM));
++}
++
+ static vbio_t *
+ vbio_alloc(zio_t *zio, struct block_device *bdev, int flags)
+ {
+@@ -743,6 +784,7 @@ vbio_alloc(zio_t *zio, struct block_device *bdev, int flags)
+ 	vbio->vbio_offset = zio->io_offset;
+ 	vbio->vbio_bio = NULL;
+ 	vbio->vbio_flags = flags;
++	vbio->vbio_ioprio = vdev_disk_bio_ioprio(zio);
+ 
+ 	return (vbio);
+ }
+@@ -766,6 +808,7 @@ vbio_add_page(vbio_t *vbio, struct page *page, uint_t size, uint_t offset)
+ 			bio_set_op_attrs(bio,
+ 			    vbio->vbio_zio->io_type == ZIO_TYPE_WRITE ?
+ 			    WRITE : READ, vbio->vbio_flags);
++			bio->bi_ioprio = vbio->vbio_ioprio;
+ 
+ 			if (vbio->vbio_bio) {
+ 				bio_chain(vbio->vbio_bio, bio);
+@@ -1413,3 +1456,6 @@ ZFS_MODULE_PARAM(zfs_vdev, zfs_vdev_, failfast_mask, UINT, ZMOD_RW,
+ 
+ ZFS_MODULE_PARAM(zfs_vdev_disk, zfs_vdev_disk_, max_segs, UINT, ZMOD_RW,
+ 	"Maximum number of data segments to add to an IO request (min 4)");
++
++ZFS_MODULE_PARAM(zfs_vdev_disk, zfs_vdev_disk_, rt_mask, UINT, ZMOD_RW,
++	"Synchronous I/O to submit as real-time: 1 reads, 2 writes");
+-- 
+2.43.0
+
