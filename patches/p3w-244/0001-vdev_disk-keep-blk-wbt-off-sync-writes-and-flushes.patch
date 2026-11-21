@@ -1,0 +1,119 @@
+From c379204c4e66c3d593125baa1d462ea0ba46c018 Mon Sep 17 00:00:00 2001
+From: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 15:31:47 +0000
+Subject: [PATCH 1/6] vdev_disk: keep blk-wbt off sync writes and flushes
+
+vdev_disk_io_rw() submits every write as a plain WRITE, and
+vdev_disk_io_flush() its flushes as WRITE|PREFLUSH.  The block layer's
+writeback throttle (blk-wbt), on by default on blk-mq disks unless BFQ
+or iocost turns it off, handles such writes as page cache writeback:
+wbt_wait() puts the submitting thread to sleep in submit_bio() while
+its in-flight limit is reached and, on a disk with a volatile write
+cache, wakes the sleepers only once every write it tracks has
+completed.  The limit is a quarter of min(16, queue depth) when a
+read was issued or completed in the last 100 ms, and about halves
+after each window in which every read took longer than wbt_lat_usec
+(75 ms on rotational disks).  It leaves alone only writes
+with both REQ_SYNC and REQ_IDLE, which is what direct I/O uses, and
+since Linux 5.7, 6.7 and 6.8 the XFS log, jbd2 and the md superblock.
+
+ZFS submits from its zio taskq threads, including the completion
+threads, which issue the next queued I/O from vdev_queue_io_done().
+A thread asleep in wbt_wait() processes no completion meanwhile, and
+ZIL blocks, dmu_sync() writes and the flushes zil_commit() waits for
+queue in blk-wbt behind transaction group writes.  ZFS counts that
+sleep as disk time; the disk statistics do not, as no request exists
+yet.
+
+Seen on Linux 7.0 with OpenZFS 2.4.4, a raidz2 of five SATA HDDs
+without a log device, and a guest writing 51 MB/s to a zvol with a
+1M volblocksize and flushing often (148 WR_INDIRECT itx/s), over ten
+minutes: sync write queue wait p50 0 ms and p99 4295 ms, total write
+p99 2147 ms, disk write p99 268 ms and disk read p99 1074 ms, while
+each disk was 22% busy with a 9 ms w_await.  7.2% of the blocked-task
+stack samples were z_wr_int threads in
+
+  rq_qos_wait < wbt_wait < __rq_qos_throttle < blk_mq_submit_bio <
+  __submit_bio < submit_bio < vdev_disk_io_start < zio_vdev_io_start
+  < zio_nowait < vdev_queue_io_done < zio_vdev_io_done < zio_execute
+  < taskq_thread
+
+and 13.4% zvol writes in zil_commit_impl().
+
+Mark REQ_SYNC|REQ_IDLE the flushes and the writes something waits
+on: those at ZIO_PRIORITY_SYNC_WRITE (ZIL blocks, dmu_sync(), Direct
+I/O, labels and uberblocks), and the ZIL blocks that
+zil_lwb_write_issue() sends to a log device at ZIO_PRIORITY_ASYNC_WRITE
+once the log exceeds zil_slog_bulk, found by their bookmark.  An
+aggregate takes the priority of the I/O it was built around, so a sync
+write aggregated with async ones can still go unmarked.
+
+Among blk-mq users, REQ_IDLE is read only by blk-wbt, and dm passes it
+on to flushes since Linux 6.15; the legacy CFQ scheduler of older
+kernels read it to decide whether to idle after a sync write.
+mq-deadline handles a REQ_SYNC write as any other write; kyber
+up to Linux 6.19 exempts it from its asynchronous depth limit, BFQ
+queues it as synchronous, and md and dm pass the flag down.  Both
+flags and blk-wbt date from Linux 4.10.  Discards stay throttled.
+This does not touch FreeBSD.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>
+---
+ module/os/linux/zfs/vdev_disk.c | 27 +++++++++++++++++++++++++++
+ 1 file changed, 27 insertions(+)
+
+diff --git a/module/os/linux/zfs/vdev_disk.c b/module/os/linux/zfs/vdev_disk.c
+index b00e74bfc02..821bff5846d 100644
+--- a/module/os/linux/zfs/vdev_disk.c
++++ b/module/os/linux/zfs/vdev_disk.c
+@@ -960,6 +960,19 @@ vdev_disk_check_alignment(abd_t *abd, uint64_t size, struct block_device *bdev)
+ 	return (B_TRUE);
+ }
+ 
++/*
++ * Whether something waits for this write: a write of the synchronous write
++ * class, or a ZIL block, which zil_lwb_write_issue() sends to a log device in
++ * the asynchronous class once the log is large.
++ */
++static boolean_t
++vdev_disk_write_waited(const zio_t *zio)
++{
++	return (zio->io_priority == ZIO_PRIORITY_SYNC_WRITE ||
++	    (zio->io_bookmark.zb_object == ZB_ZIL_OBJECT &&
++	    zio->io_bookmark.zb_level == ZB_ZIL_LEVEL));
++}
++
+ static int
+ vdev_disk_io_rw(zio_t *zio)
+ {
+@@ -986,6 +999,18 @@ vdev_disk_io_rw(zio_t *zio)
+ 		    zfs_vdev_failfast_mask & 2, zfs_vdev_failfast_mask & 4);
+ 	}
+ 
++	/*
++	 * The block layer's writeback throttle (blk-wbt) puts the submitting
++	 * thread to sleep for any write that is not both REQ_SYNC and
++	 * REQ_IDLE.  Mark the writes something waits on, as the kernel does
++	 * for direct I/O and journal writes, so that they are not held
++	 * behind other writes, nor is the taskq thread issuing them.  An
++	 * aggregate takes the priority of the I/O it was built around, so a
++	 * sync write aggregated with async ones can still go unmarked.
++	 */
++	if (zio->io_type == ZIO_TYPE_WRITE && vdev_disk_write_waited(zio))
++		flags |= REQ_SYNC | REQ_IDLE;
++
+ 	/*
+ 	 * Check alignment of the incoming ABD. If any part of it would require
+ 	 * submitting a page that is not aligned to both the logical block size
+@@ -1058,6 +1083,8 @@ vdev_disk_io_flush(struct block_device *bdev, zio_t *zio)
+ 	bio->bi_end_io = vdev_disk_io_flush_completion;
+ 	bio->bi_private = zio;
+ 	bio_set_flush(bio);
++	/* Waited on like a sync write; see vdev_disk_io_rw(). */
++	bio->bi_opf |= REQ_SYNC | REQ_IDLE;
+ 	vdev_submit_bio(bio);
+ 	invalidate_bdev(bdev);
+ 
+-- 
+2.43.0
+

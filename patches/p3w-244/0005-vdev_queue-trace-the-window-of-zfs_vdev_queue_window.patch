@@ -1,0 +1,97 @@
+From 6ec392fbddba999f7fb3e8a084780a5540259e4c Mon Sep 17 00:00:00 2001
+From: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 15:31:47 +0000
+Subject: [PATCH 5/6] vdev_queue: trace the window of zfs_vdev_queue_window
+
+What the window did is visible only through its effects: nothing
+reports how deep it let a leaf vdev's queue go, or why it shrank.  On
+Linux, add a zfs_vdev__queue__window tracepoint, hit at the end of
+each period with the vdev's guid, the window it set, the limit above
+it, and the samples it was set from: the reads and sync writes
+completed, those slower than the target, and whether the window held
+an I/O back.  That is at most 4 events per second per rotating leaf
+vdev, 50 for the others.  Elsewhere, DTRACE_PROBE2() gives the same
+probe where SDT is available.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>
+---
+ include/os/linux/zfs/sys/trace_vdev.h | 34 +++++++++++++++++++++++++++
+ module/zfs/vdev_queue.c               |  3 +++
+ 2 files changed, 37 insertions(+)
+
+diff --git a/include/os/linux/zfs/sys/trace_vdev.h b/include/os/linux/zfs/sys/trace_vdev.h
+index a64ef0478d6..2f48ae893d5 100644
+--- a/include/os/linux/zfs/sys/trace_vdev.h
++++ b/include/os/linux/zfs/sys/trace_vdev.h
+@@ -112,6 +112,39 @@ DEFINE_EVENT(zfs_removing_class_4, name, \
+     TP_ARGS(spa, offset, size, txg))
+ DEFINE_REMOVE_FREE_EVENT_TXG(zfs_remove__free__inflight);
+ 
++/*
++ * The window of zfs_vdev_queue_window at the end of one of its periods:
++ *
++ * DTRACE_PROBE2(...,
++ *     vdev_t *, ...,
++ *     uint64_t, ...);
++ */
++/* BEGIN CSTYLED */
++TRACE_EVENT(zfs_vdev__queue__window,
++	TP_PROTO(vdev_t *vd, uint64_t max),
++	TP_ARGS(vd, max),
++	TP_STRUCT__entry(
++	    __field(uint64_t,	vdev_guid)
++	    __field(uint64_t,	vdev_max)
++	    __field(uint32_t,	vdev_window)
++	    __field(uint32_t,	vdev_ios)
++	    __field(uint32_t,	vdev_slow)
++	    __field(boolean_t,	vdev_held)
++	),
++	TP_fast_assign(
++	    __entry->vdev_guid	= vd->vdev_guid;
++	    __entry->vdev_max	= max;
++	    __entry->vdev_window = vd->vdev_queue.vq_win_depth;
++	    __entry->vdev_ios	= vd->vdev_queue.vq_win_ios;
++	    __entry->vdev_slow	= vd->vdev_queue.vq_win_slow;
++	    __entry->vdev_held	= vd->vdev_queue.vq_win_held;
++	),
++	TP_printk("vdev %llu window %u max %llu ios %u slow %u held %d",
++	    __entry->vdev_guid, __entry->vdev_window, __entry->vdev_max,
++	    __entry->vdev_ios, __entry->vdev_slow, __entry->vdev_held)
++);
++/* END CSTYLED */
++
+ #endif /* _TRACE_VDEV_H */
+ 
+ #undef TRACE_INCLUDE_PATH
+@@ -132,6 +165,7 @@ DEFINE_REMOVE_FREE_EVENT_TXG(zfs_remove__free__inflight);
+ DEFINE_DTRACE_PROBE3(remove__free__synced);
+ DEFINE_DTRACE_PROBE3(remove__free__unvisited);
+ DEFINE_DTRACE_PROBE4(remove__free__inflight);
++DEFINE_DTRACE_PROBE2(vdev__queue__window);
+ 
+ #endif /* HAVE_DECLARE_EVENT_CLASS */
+ #endif /* _KERNEL */
+diff --git a/module/zfs/vdev_queue.c b/module/zfs/vdev_queue.c
+index 8648c9463ce..f9aa206a7dd 100644
+--- a/module/zfs/vdev_queue.c
++++ b/module/zfs/vdev_queue.c
+@@ -37,6 +37,7 @@
+ #include <sys/metaslab_impl.h>
+ #include <sys/spa.h>
+ #include <sys/abd.h>
++#include <sys/trace_zfs.h>
+ 
+ /*
+  * ZFS I/O Scheduler
+@@ -672,6 +673,8 @@ vdev_queue_window_update(vdev_queue_t *vq, zio_t *zio, hrtime_t now)
+ 	else if (vq->vq_win_held)
+ 		w = MIN(max, w + MAX(1, w / 8));
+ 	vq->vq_win_depth = w;
++	DTRACE_PROBE2(vdev__queue__window, vdev_t *, vq->vq_vdev,
++	    uint64_t, max);
+ 	vq->vq_win_start = now;
+ 	vq->vq_win_ios = 0;
+ 	vq->vq_win_slow = 0;
+-- 
+2.43.0
+

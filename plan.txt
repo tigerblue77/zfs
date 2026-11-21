@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: CDDL-1.0
+# Arm order of each pass of TASK-1121-M29C: rows 0, 1 and 2 of a Williams
+# design for the 3 arms of arms.txt, each followed by its reverse, as kit
+# v2's plan.txt.  Over the six passes every arm sits twice in each
+# position, and each arm follows each other arm three times, the pass's
+# warm-up (its last arm) counting as the first arm's predecessor.
+1 M29C-50 M29C-0 M29C-P1I
+2 M29C-P1I M29C-0 M29C-50
+3 M29C-0 M29C-P1I M29C-50
+4 M29C-50 M29C-P1I M29C-0
+5 M29C-P1I M29C-50 M29C-0
+6 M29C-0 M29C-50 M29C-P1I

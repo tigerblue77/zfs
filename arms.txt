@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: CDDL-1.0
+# The arms of TASK-1121-M29C, in kit v2's format (ARM TREE WBT NCQ_PRIO
+# PARAMETERS): one binary, tree M29C (OpenZFS 2.4.4 plus
+# zil_indirect_min_pct, d81d76d6f07), switched between three settings.
+# Every point reloads the tree's modules, so every other parameter is at
+# its default, plus the rig's common settings (TUNE in hr-bench.sh).
+# M29C-0 writes the default explicitly, so that arm.txt records it.
+# M29C-P1I is kit v2's P1I setting on this binary (no PR1 here): every
+# write of the guest is logged as a copy, none indirect.
+#
+# ARM      TREE WBT   NCQ_PRIO PARAMETERS
+M29C-50    M29C 75000 0        zil_indirect_min_pct=50
+M29C-0     M29C 75000 0        zil_indirect_min_pct=0
+M29C-P1I   M29C 75000 0        zil_indirect_min_pct=0 zfs_immediate_write_sz=2097152

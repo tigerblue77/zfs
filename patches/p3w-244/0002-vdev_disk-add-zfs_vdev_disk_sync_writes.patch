@@ -1,0 +1,159 @@
+From 510c2a2509bca57cb9492dddf9b4d0cc159578eb Mon Sep 17 00:00:00 2001
+From: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 15:31:47 +0000
+Subject: [PATCH 2/6] vdev_disk: add zfs_vdev_disk_sync_writes
+
+With the previous commit, transaction group writes still go through
+blk-wbt.  A z_wr_int or z_rd_int thread that issues the next queued
+async write from vdev_queue_io_done() can still sleep in wbt_wait(),
+and processes no other completion meanwhile, be it a ZIL write's or a
+read's.
+
+blk-wbt paces page cache writeback by putting the writer to sleep.
+ZFS paces its own writes: the write throttle delays transactions as
+dirty data grows, and the vdev queue keeps 2 to 10 async writes in
+flight per leaf vdev depending on the amount of dirty data.  blk-wbt
+does not see that queue: whenever a read was issued or completed in
+the last 100 ms, it lets 4 of them through to a SATA disk in its
+initial state, fewer while reads are slow, also when dirty data has
+grown and ZFS has raised the limit to drain it.  But it is also the
+only limit on writes that reacts to read latency: the vdev queue does
+not watch it.
+
+So keep the previous commit's behaviour by default, and let
+zfs_vdev_disk_sync_writes choose the writes and flushes marked
+REQ_SYNC|REQ_IDLE: 0 none, as before the previous commit; 1 the
+writes something waits on and flushes, as after it (default); 2 also
+every write the vdev queue paced, leaving blk-wbt only the writes that
+bypassed the queue, which nothing else limits.  With 2, a rotational
+disk may hold up to zfs_vdev_async_write_max_active writes with much
+dirty data, and reads issued behind them in the drive can take
+longer; BFQ, which turns blk-wbt off, queues the writes as
+synchronous, and md raid5 no longer delays the stripes holding them
+to gather more writes.
+
+On a Debian 13 VM (Linux 6.12) with five null_blk rotational disks
+(8 ms per request, mq-deadline, blk-wbt at 75 ms), six passes of a
+60 s mixed load (a writer fsyncing a zvol, a reader, a bulk writer)
+gave, against master: with 1, fsync mean 0.47-0.49x and p90
+0.31-0.32x, read p50 and p99, writer and bulk throughput unchanged;
+with 2, fsync mean 0.58x, writer throughput 1.51-1.53x and read p99
+1.35x, the same as master with blk-wbt turned off.  null_blk serves
+every request in a fixed time, so on real disks the read cost of 2
+can only be larger.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>
+---
+ man/man4/zfs.4                  | 42 +++++++++++++++++++++++++++++++++
+ module/os/linux/zfs/vdev_disk.c | 23 +++++++++++++++---
+ 2 files changed, 62 insertions(+), 3 deletions(-)
+
+diff --git a/man/man4/zfs.4 b/man/man4/zfs.4
+index 4e7b0465cbd..e4e48c5b22f 100644
+--- a/man/man4/zfs.4
++++ b/man/man4/zfs.4
+@@ -1637,6 +1637,48 @@ itself, it will be clamped.
+ Setting it to zero will cause the kernel's ideal size to be used.
+ This parameter only applies on Linux.
+ .
++.It Sy zfs_vdev_disk_sync_writes Ns = Ns Sy 1 Pq uint
++Which writes and cache flushes are submitted to disk vdevs with the
++.Sy REQ_SYNC
++and
++.Sy REQ_IDLE
++flags, as Linux submits direct I/O writes.
++The block layer's writeback throttle
++.Pq blk-wbt ,
++meant for page cache writeback, leaves such writes alone.
++Without the flags, blk-wbt may put the ZFS thread submitting a write to sleep,
++and that thread may be one that also processes I/O completions.
++Valid values are:
++.Bl -tag -compact -offset 4n -width "a"
++.It Sy 0
++None: blk-wbt may throttle every write and cache flush.
++.It Sy 1
++Cache flushes and the writes something waits on: writes of the synchronous
++write class, such as ZIL blocks, the data blocks they point to, Direct I/O
++writes, labels and uberblocks, and ZIL blocks written to a log device.
++.It Sy 2
++In addition, every write the
++.Sx ZFS I/O SCHEDULER
++queued, so that it alone decides how many writes a disk receives.
++.El
++.Pp
++With
++.Sy 1 ,
++blk-wbt keeps limiting the other writes, more tightly once reads of a disk
++take longer than its
++.Pa queue/wbt_lat_usec
++in sysfs.
++That limit is the only one that reacts to read latency, and
++.Sy 2
++gives it up: reads may then wait longer behind writes inside the disk.
++A synchronous write aggregated with asynchronous ones may still go unmarked.
++Discards
++.Pq TRIM
++are throttled by blk-wbt whatever the value.
++Where blk-wbt is off, as with the BFQ scheduler or blk-iocost, the flags only
++make BFQ queue the writes as synchronous.
++This parameter only applies on Linux.
++.
+ .It Sy zfs_expire_snapshot Ns = Ns Sy 300 Ns s Pq int
+ Time before expiring
+ .Pa .zfs/snapshot .
+diff --git a/module/os/linux/zfs/vdev_disk.c b/module/os/linux/zfs/vdev_disk.c
+index 821bff5846d..50522280e14 100644
+--- a/module/os/linux/zfs/vdev_disk.c
++++ b/module/os/linux/zfs/vdev_disk.c
+@@ -107,6 +107,13 @@ static uint_t zfs_vdev_open_timeout_ms = 1000;
+ 
+ static unsigned int zfs_vdev_failfast_mask = 1;
+ 
++/*
++ * Which writes are submitted REQ_SYNC|REQ_IDLE, so that the block layer's
++ * writeback throttle (blk-wbt) leaves them alone: 0 none, 1 the writes
++ * something waits on and flushes, 2 also every write the vdev queue paced.
++ */
++static uint_t zfs_vdev_disk_sync_writes = 1;
++
+ /*
+  * Convert SPA mode flags into bdev open mode flags.
+  */
+@@ -1006,9 +1013,14 @@ vdev_disk_io_rw(zio_t *zio)
+ 	 * for direct I/O and journal writes, so that they are not held
+ 	 * behind other writes, nor is the taskq thread issuing them.  An
+ 	 * aggregate takes the priority of the I/O it was built around, so a
+-	 * sync write aggregated with async ones can still go unmarked.
++	 * sync write aggregated with async ones can still go unmarked.  With
++	 * zfs_vdev_disk_sync_writes=2, also mark the writes the vdev queue
++	 * paced, leaving blk-wbt only those that bypassed it.
+ 	 */
+-	if (zio->io_type == ZIO_TYPE_WRITE && vdev_disk_write_waited(zio))
++	const uint_t sync_writes = zfs_vdev_disk_sync_writes;
++	if (zio->io_type == ZIO_TYPE_WRITE && sync_writes != 0 &&
++	    (vdev_disk_write_waited(zio) || (sync_writes >= 2 &&
++	    !(zio->io_flags & ZIO_FLAG_BYPASSED_QUEUE))))
+ 		flags |= REQ_SYNC | REQ_IDLE;
+ 
+ 	/*
+@@ -1084,7 +1096,8 @@ vdev_disk_io_flush(struct block_device *bdev, zio_t *zio)
+ 	bio->bi_private = zio;
+ 	bio_set_flush(bio);
+ 	/* Waited on like a sync write; see vdev_disk_io_rw(). */
+-	bio->bi_opf |= REQ_SYNC | REQ_IDLE;
++	if (zfs_vdev_disk_sync_writes != 0)
++		bio->bi_opf |= REQ_SYNC | REQ_IDLE;
+ 	vdev_submit_bio(bio);
+ 	invalidate_bdev(bdev);
+ 
+@@ -1440,3 +1453,7 @@ ZFS_MODULE_PARAM(zfs_vdev, zfs_vdev_, failfast_mask, UINT, ZMOD_RW,
+ 
+ ZFS_MODULE_PARAM(zfs_vdev_disk, zfs_vdev_disk_, max_segs, UINT, ZMOD_RW,
+ 	"Maximum number of data segments to add to an IO request (min 4)");
++
++ZFS_MODULE_PARAM(zfs_vdev_disk, zfs_vdev_disk_, sync_writes, UINT, ZMOD_RW,
++	"Writes submitted REQ_SYNC|REQ_IDLE, out of blk-wbt: "
++	"0 none, 1 waited-on writes and flushes, 2 also queued writes");
+-- 
+2.43.0
+
