@@ -115,6 +115,8 @@ static kcondvar_t inject_point_cv;
 static const char *const zio_inject_point_names[ZIO_INJECT_POINTS] = {
 	[ZIO_INJECT_POINT_UPGRADE_DONE] = "dmu_objset_upgrade_task_cb:done",
 	[ZIO_INJECT_POINT_FREESP_CHANGED] = "zfs_freesp:changed",
+	[ZIO_INJECT_POINT_REFLOW_COMMITTED] = "raidz_reflow_sync:committed",
+	[ZIO_INJECT_POINT_RAIDZ_IO_COPIED] = "vdev_raidz_io_start:copied",
 };
 
 /*

@@ -757,6 +757,8 @@ extern hrtime_t zio_handle_ready_delay(zio_t *zio);
 typedef enum zio_inject_point {
 	ZIO_INJECT_POINT_UPGRADE_DONE,
 	ZIO_INJECT_POINT_FREESP_CHANGED,
+	ZIO_INJECT_POINT_REFLOW_COMMITTED,
+	ZIO_INJECT_POINT_RAIDZ_IO_COPIED,
 	ZIO_INJECT_POINTS
 } zio_inject_point_t;
 
