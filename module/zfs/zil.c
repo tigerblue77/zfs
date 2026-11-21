@@ -2198,6 +2198,14 @@ uint_t zfs_immediate_write_sz = 32768;
  */
 int zil_special_is_slog = 1;
 
+/*
+ * Without log or special vdevs, dmu_sync() of a WR_INDIRECT record writes
+ * its whole block to the normal vdevs at commit, however little of the
+ * block the record covers.  When non-zero, a record covering less than
+ * this percentage of its block carries its data in the log instead.
+ */
+static uint_t zil_indirect_min_pct = 0;
+
 uint64_t
 zil_max_copied_data(zilog_t *zilog)
 {
@@ -2238,6 +2246,25 @@ zil_write_state(zilog_t *zilog, uint64_t size, uint32_t blocksize,
 	}
 
 	if (indirect)
+		return (WR_INDIRECT);
+	else if (commit)
+		return (WR_COPIED);
+	else
+		return (WR_NEED_COPY);
+}
+
+/*
+ * Write state of one record of a write for which zil_write_state()
+ * returned WR_INDIRECT, the record covering len bytes of its block.
+ */
+itx_wr_state_t
+zil_write_state_record(zilog_t *zilog, uint64_t len, uint32_t blocksize,
+    boolean_t o_direct, boolean_t commit)
+{
+	if (zil_indirect_min_pct == 0 || o_direct ||
+	    zilog->zl_logbias == ZFS_LOGBIAS_THROUGHPUT ||
+	    spa_has_slogs(zilog->zl_spa) || spa_has_special(zilog->zl_spa) ||
+	    len * 100 >= (uint64_t)blocksize * zil_indirect_min_pct)
 		return (WR_INDIRECT);
 	else if (commit)
 		return (WR_COPIED);
@@ -4905,3 +4932,6 @@ ZFS_MODULE_PARAM(zfs, zfs_, immediate_write_sz, UINT, ZMOD_RW,
 
 ZFS_MODULE_PARAM(zfs_zil, zil_, special_is_slog, INT, ZMOD_RW,
 	"Treat special vdevs as SLOG");
+
+ZFS_MODULE_PARAM(zfs_zil, zil_, indirect_min_pct, UINT, ZMOD_RW,
+	"Copy ZIL indirect records covering under this % of their block");

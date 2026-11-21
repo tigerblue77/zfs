@@ -1772,6 +1772,22 @@ Blocks that go to the special vdevs are still written indirectly, as with
 .Sy logbias Ns = Ns Sy throughput .
 This parameter is ignored if an SLOG is present.
 .
+.It Sy zil_indirect_min_pct Ns = Ns Sy 0 Ns % Pq uint
+In pools with neither SLOG nor special vdevs, the ZIL commit of a write
+written indirectly
+.Pq see Sy zfs_immediate_write_sz
+writes each block the write touches in full to the normal vdevs, however
+little of the block the write covers.
+When non-zero, each part of such a write covering less than this percentage of
+its block is stored directly into the ZIL instead:
+.Sy 50
+keeps indirect only the parts covering at least half of their block,
+.Sy 100
+only whole blocks.
+This parameter does not apply with
+.Sy logbias Ns = Ns Sy throughput
+or to Direct I/O writes.
+.
 .It Sy zfs_import_defer_txgs Ns = Ns Sy 5 Pq uint
 Number of transaction groups to wait after pool import before starting
 background work such as asynchronous block freeing

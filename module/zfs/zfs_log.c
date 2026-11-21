@@ -636,6 +636,12 @@ zfs_log_write(zilog_t *zilog, dmu_tx_t *tx, int txtype,
 		itx_wr_state_t wr_state = write_state;
 		ssize_t len = resid;
 
+		if (wr_state == WR_INDIRECT) {
+			len = MIN(blocksize - P2PHASE(off, blocksize), resid);
+			wr_state = zil_write_state_record(zilog, len,
+			    blocksize, o_direct, commit);
+		}
+
 		/*
 		 * A WR_COPIED record must fit entirely in one log block.
 		 * Large writes can use WR_NEED_COPY, which the ZIL will
@@ -643,10 +649,8 @@ zfs_log_write(zilog_t *zilog, dmu_tx_t *tx, int txtype,
 		 * if necessary.
 		 */
 		if (wr_state == WR_COPIED &&
-		    resid > zil_max_copied_data(zilog))
+		    len > zil_max_copied_data(zilog))
 			wr_state = WR_NEED_COPY;
-		else if (wr_state == WR_INDIRECT)
-			len = MIN(blocksize - P2PHASE(off, blocksize), resid);
 
 		itx = zil_itx_create(txtype, sizeof (*lr) +
 		    (wr_state == WR_COPIED ? len : 0));
