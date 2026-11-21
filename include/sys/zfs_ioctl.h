@@ -456,6 +456,7 @@ typedef enum zinject_type {
 typedef enum zinject_point_action {
 	ZINJECT_POINT_ERROR = 0,	/* fail once with zi_error */
 	ZINJECT_POINT_DELAY,		/* sleep zi_timer ns at each hit */
+	ZINJECT_POINT_PAUSE,		/* block each hit until removed */
 } zinject_point_action_t;
 
 typedef enum zinject_iotype {

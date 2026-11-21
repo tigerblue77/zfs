@@ -190,6 +190,47 @@ done:
 	return (injected);
 }
 
+static boolean_t
+zio_inject_handler_exists(int id)
+{
+	inject_handler_t *handler;
+
+	rw_enter(&inject_lock, RW_READER);
+	for (handler = list_head(&inject_handlers); handler != NULL;
+	    handler = list_next(&inject_handlers, handler)) {
+		if (handler->zi_id == id)
+			break;
+	}
+	rw_exit(&inject_lock);
+
+	return (handler != NULL);
+}
+
+/*
+ * Block the calling thread until handler id is removed ("zinject -c").
+ * Removing a handler is an injection event, so wait on the event cv and
+ * check again after each event.  The timed wait is only a backstop.
+ */
+static void
+zio_inject_pause(int id)
+{
+	for (;;) {
+		mutex_enter(&inject_event_mtx);
+		uint64_t seen = inject_event_count;
+		mutex_exit(&inject_event_mtx);
+
+		if (!zio_inject_handler_exists(id))
+			return;
+
+		mutex_enter(&inject_event_mtx);
+		while (inject_event_count == seen) {
+			(void) cv_timedwait(&inject_event_cv,
+			    &inject_event_mtx, ddi_get_lbolt() + hz);
+		}
+		mutex_exit(&inject_event_mtx);
+	}
+}
+
 /*
  * The injection point named tag has been reached in pool spa.  If a
  * ZINJECT_FUNC_FAULT ("zinject -n") handler for the point matches, perform
@@ -200,8 +241,12 @@ done:
  *			succeeds and a test sees a failure followed by a
  *			success.
  * ZINJECT_POINT_DELAY	sleep for the handler's delay, then return 0.
+ * ZINJECT_POINT_PAUSE	block until the handler is removed, then return 0.
  *
  * Otherwise return 0.  Callers test zio_injection_enabled first.
+ *
+ * Each action taken is an injection event, so "zinject -w" returns once a
+ * thread has reached the point; for a pause, the thread is then blocked.
  */
 int
 zio_handle_func_injection(spa_t *spa, const char *tag, int *error)
@@ -209,6 +254,7 @@ zio_handle_func_injection(spa_t *spa, const char *tag, int *error)
 	inject_handler_t *handler;
 	uint64_t action = ZINJECT_POINT_ERROR;
 	hrtime_t delay = 0;
+	int id = 0;
 	int ret = 0;
 
 	rw_enter(&inject_lock, RW_WRITER);
@@ -228,6 +274,7 @@ zio_handle_func_injection(spa_t *spa, const char *tag, int *error)
 		handler->zi_record.zi_inject_count++;
 		action = handler->zi_record.zi_type;
 		delay = handler->zi_record.zi_timer;
+		id = handler->zi_id;
 		break;
 	}
 	if (handler != NULL && action == ZINJECT_POINT_ERROR) {
@@ -239,6 +286,8 @@ zio_handle_func_injection(spa_t *spa, const char *tag, int *error)
 
 	if (handler == NULL)
 		return (0);
+
+	zio_inject_notify();
 
 	switch (action) {
 	case ZINJECT_POINT_ERROR:
@@ -253,6 +302,11 @@ zio_handle_func_injection(spa_t *spa, const char *tag, int *error)
 		break;
 	case ZINJECT_POINT_DELAY:
 		zfs_sleep_until(gethrtime() + delay);
+		break;
+	case ZINJECT_POINT_PAUSE:
+		zfs_dbgmsg("zinject: handler %d paused at %s", id, tag);
+		zio_inject_pause(id);
+		zfs_dbgmsg("zinject: handler %d resumed at %s", id, tag);
 		break;
 	}
 
@@ -1131,7 +1185,7 @@ zio_inject_fault(char *name, int flags, int *id, zinject_record_t *record)
 			spa = NULL;
 		} else if (record->zi_cmd == ZINJECT_FUNC_FAULT) {
 			if (record->zi_func[0] == '\0' ||
-			    record->zi_type > ZINJECT_POINT_DELAY)
+			    record->zi_type > ZINJECT_POINT_PAUSE)
 				return (SET_ERROR(EINVAL));
 			if (record->zi_type == ZINJECT_POINT_DELAY &&
 			    record->zi_timer == 0)

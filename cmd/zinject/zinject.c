@@ -97,14 +97,17 @@
  * With the -n option, zinject acts at a named injection point in the code:
  * a call to zio_handle_func_injection(), behind a test of
  * zio_injection_enabled.  It can force an error return there, for error paths
- * that would otherwise be difficult to test, or delay the thread that
- * reaches it, to open a race window deterministically.
+ * that would otherwise be difficult to test, or delay or pause the thread
+ * that reaches it, to open a race window deterministically.
  *
- *      zinject -n <point> [-e errno | -D msecs] [-f freq] <pool>
+ *      zinject -n <point> [-e errno | -D msecs | -A pause] [-f freq] <pool>
  *
  * -e	Fail once with errno (default 'io'), then clear the handler, so a
  *	test sees a failure followed by a success.
  * -D	Sleep msecs milliseconds at each hit.
+ * -A pause
+ *	Block each thread that reaches the point until the handler is
+ *	cleared with -c.  Use -w to wait until a thread has reached it.
  */
 
 /*
@@ -118,7 +121,7 @@
  * 	zinject -P <import|export> -s <seconds> <pool>
  * 	zinject -I [-s <seconds> | -g <txgs>] <pool>
  * 	zinject -w <state|0> [-W <delay>]
- * 	zinject -n <point> [-e errno | -D msecs] [-f freq] <pool>
+ * 	zinject -n <point> [-e errno | -D msecs | -A pause] [-f freq] <pool>
  * 	zinject -E <delay> [-a] [-m] [-f freq] [-l level] [-r range]
  *	    [-T iotype] [-t type object | -b bookmark pool]
  * 	zinject -b <objset:object:level:blkid> <pool>
@@ -449,12 +452,16 @@ usage(void)
 	    "\t\tspecified by the remaining tuple.  Each number is in\n"
 	    "\t\thexadecimal, and only one block can be specified.\n"
 	    "\n"
-	    "\tzinject -n <point> [-e errno | -D msecs] [-f freq] pool\n"
+	    "\tzinject -n <point> [-e errno | -D msecs | -A pause]\n"
+	    "\t\t[-f freq] pool\n"
 	    "\n"
 	    "\t\tAct at a named injection point in the code.\n"
 	    "\t\t-e\tReturn an error once (default 'io'), then clear\n"
 	    "\t\t\tthe handler.\n"
 	    "\t\t-D\tDelay each thread that reaches the point.\n"
+	    "\t\t-A pause\tBlock each thread that reaches the point\n"
+	    "\t\t\tuntil the handler is cleared (-c).  Use -w to wait\n"
+	    "\t\t\tuntil a thread has reached it.\n"
 	    "\n"
 	    "\tzinject [-q] <-t type> [-C dvas] [-e errno] [-l level]\n"
 	    "\t\t[-r range] [-a] [-m] [-u] [-f freq] <object>\n"
@@ -647,6 +654,8 @@ point_action_str(const zinject_record_t *record, boolean_t verbose)
 		    verbose ? " " : "=",
 		    (u_longlong_t)NSEC2MSEC(record->zi_timer));
 		return (buf);
+	case ZINJECT_POINT_PAUSE:
+		return (verbose ? "pause until cleared" : "pause");
 	default:
 		(void) snprintf(buf, sizeof (buf), "error%s%s%s",
 		    verbose ? " " : "=", err_to_str(record->zi_error),
@@ -1085,6 +1094,7 @@ main(int argc, char **argv)
 	char *wait = NULL;
 	hrtime_t wait_timeout = -1;
 	char *delay_arg = NULL;
+	int point_pause = 0;
 	int error_given = 0;
 
 	if ((g_zfs = libzfs_init()) == NULL) {
@@ -1126,9 +1136,12 @@ main(int argc, char **argv)
 				action = VDEV_STATE_DEGRADED;
 			} else if (strcasecmp(optarg, "fault") == 0) {
 				action = VDEV_STATE_FAULTED;
+			} else if (strcasecmp(optarg, "pause") == 0) {
+				point_pause = 1;
 			} else {
 				(void) fprintf(stderr, "invalid action '%s': "
-				    "must be 'degrade' or 'fault'\n", optarg);
+				    "must be 'degrade', 'fault' or 'pause'\n",
+				    optarg);
 				usage();
 				libzfs_fini(g_zfs);
 				return (1);
@@ -1364,6 +1377,14 @@ main(int argc, char **argv)
 			libzfs_fini(g_zfs);
 			return (1);
 		}
+	}
+
+	if (point_pause && record.zi_cmd != ZINJECT_FUNC_FAULT) {
+		(void) fprintf(stderr, "action 'pause' (-A) requires an "
+		    "injection point (-n)\n");
+		usage();
+		libzfs_fini(g_zfs);
+		return (2);
 	}
 
 	if (record.zi_duration != 0 && record.zi_cmd == 0)
@@ -1642,9 +1663,9 @@ main(int argc, char **argv)
 	} else if (record.zi_cmd == ZINJECT_FUNC_FAULT) {
 		if (range != NULL || type != TYPE_INVAL || level != 0 ||
 		    dvas != 0 || ready_delay >= 0 || flags != 0 ||
-		    (delay_arg != NULL && error_given)) {
+		    (point_pause + (delay_arg != NULL) + error_given) > 1) {
 			(void) fprintf(stderr, "injection point (-n) takes "
-			    "one of '-e' or '-D', and '-f'\n");
+			    "one of '-e', '-D' or '-A pause', and '-f'\n");
 			usage();
 			libzfs_fini(g_zfs);
 			return (2);
@@ -1656,7 +1677,10 @@ main(int argc, char **argv)
 			libzfs_fini(g_zfs);
 			return (2);
 		}
-		if (delay_arg != NULL) {
+		if (point_pause) {
+			record.zi_type = ZINJECT_POINT_PAUSE;
+			error = 0;
+		} else if (delay_arg != NULL) {
 			record.zi_type = ZINJECT_POINT_DELAY;
 			error = 0;
 		} else {
