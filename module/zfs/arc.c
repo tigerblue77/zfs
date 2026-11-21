@@ -10264,10 +10264,12 @@ l2arc_feed_thread(void *arg)
 			break;
 
 		/*
-		 * Check if device is still valid.  If not, thread should exit.
+		 * Skip a dead (offline, faulted or removed) device, but do not
+		 * exit: nothing would restart the thread when the device comes
+		 * back through vdev_reopen().  l2arc_remove_vdev() stops it.
 		 */
 		if (dev->l2ad_vdev == NULL || vdev_is_dead(dev->l2ad_vdev))
-			break;
+			continue;
 		begin = ddi_get_lbolt();
 
 		/*
