@@ -2151,6 +2151,8 @@ top:
 		err = zfs_freesp(zp, vap->va_size, 0, 0, !zfsvfs->z_replay);
 		if (err)
 			goto out3;
+		zio_inject_point(dmu_objset_spa(os),
+		    ZIO_INJECT_POINT_SETATTR_SIZE_CHANGED);
 	}
 
 	if (mask & (ATTR_ATIME|ATTR_MTIME) ||
