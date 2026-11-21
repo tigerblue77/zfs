@@ -24,6 +24,7 @@ What is tested: fork https://github.com/tigerblue77/zfs, branch `zvol-open-pin-s
 - Before every ZTS run: `lsmod | grep -E '^zfs '` shows the module of the current step only, `timeout 30 sudo -n <tree>/zpool list -H -o name` shows no pool, `ls /sys/block | grep -E '^zd'` and `find /dev/zvol -type l 2>/dev/null` show nothing (an empty `/dev/zvol` directory is fine), `ls -d /var/tmp/file-vdev* /var/tmp/dev-* /var/tmp/tunable-* /var/tmp/zvol_misc_remove_open.* 2>&1` shows nothing, and `test ! -s /etc/zfs/zpool.cache && echo CACHE-OK` prints CACHE-OK. A pool this task did not create, a non-empty cache file or a stale `/var/tmp/tunable-*` file is a stop: report its `ls -l`, touch nothing, wait for main.
 - Every build and ZTS run runs detached (`setsid nohup ... &`) and is polled. A hang is: a build still going after 90 minutes; a single test after 15 minutes; a group after 60 minutes. Capture `ps -eLo pid,tid,stat,comm,wchan:32 | grep -E ' D|txg|zfs|zpool|zvol|dd|ksh'`, the kernel stacks of every D task (`sudo -n cat /proc/<pid>/stack`), `sudo -n tail -n 60 /proc/spl/kstat/zfs/dbgmsg` and `sudo -n dmesg | tail -n 150` into $L/hang-<tag>.txt, then stop and report.
 - No reboot in part A. A hang, an oops, a panic or a module that will not unload: capture as above, stop, report and wait for main.
+- A finding that is not this bug: on master and on this tree, `zvol_os_create_minor()` can leave the ZIL open, and a later minor creation then fails `VERIFY0P(zilog->zl_get_data)` in `zil_open()` (M-30, upstream PR #19847, open and not in this tree; fork CI hit it in `zvol_misc_volmode_race`, and TASK-1119-ZVH reproduced it on master through `snapdev`). Its signature is `VERIFY0P(zilog->zl_get_data) failed` and `PANIC at zil.c:<line>:zil_open()` in dmesg, with `zil_open` and `zvol_os_create_minor` in the stack, often followed by `zfs set` stuck in `taskq_wait_outstanding` and a test failing with `Property changes still running`. It is handled as any panic (capture, stop, report), and reported as M-30, not against the fix.
 - `sudo -n fstrim -av` after deleting trees. Modules unloaded at the end.
 
 ## STEP 0: state
@@ -31,6 +32,20 @@ What is tested: fork https://github.com/tigerblue77/zfs, branch `zvol-open-pin-s
 `hostname`, `uname -r` (a 6.12 kernel expected; a kernel of 5.10 or older means main sent this task through its 5.10 route: say so, do part A only if the route says so, and part B as the route says), `uptime -s`, `nproc`, `free -m`, `df -h / /var/tmp` (at least 10 GiB free on /var/tmp), `lsmod | grep -E '^(zfs|spl) '` (must be empty), `ls -l /dev/zfs 2>&1` (must not exist), `sysctl kernel.panic_on_oops kernel.panic kernel.hung_task_panic` (quote; if hung_task_panic is 1, set it to 0 for this task and say so), `id zts`, `ls -d $D $L 2>&1` (both absent), `ls /sys/block | grep -E '^zd'` and `find /dev/zvol -type l 2>/dev/null` (nothing), `ls -ld /var/tmp/file-vdev* /var/tmp/dev-* /var/tmp/tunable-* /var/tmp/zvol_misc_remove_open.* 2>&1` (none), `pgrep -a -x zed; pgrep -a -x lt-zed` (none; a running zed is a stop), `ls -l /etc/zfs/zpool.cache 2>&1`.
 
 The cache file: absent or empty is expected. If it is above 0: quote its `ls -l` and `sudo -n strings -n 6 /etc/zfs/zpool.cache | grep -E '^(testpool|/)' | sort -u`; if it names only ZTS pools (`testpool...`) with paths under `/var/tmp`, move it to `$L/zpool.cache.step0` in step 1 once $L exists, and say so; anything else: stop and report.
+
+The zvol udev rule. `zvol_misc_remove_open` (and every `zvol_misc` test of step 3.3) reads `/dev/zvol/<pool>/<volume>`, which only the rule `60-zvol.rules` and its helper `zvol_id` create; the uninstalled tree installs neither. The records disagree: TASK-1117-ER34 found both missing on 17/11, then TASK-1117-UDV installed them by hand (around 18/11 00:08Z) on 105, 106 and 107 as regular files, `/etc/udev/rules.d/60-zvol.rules` and `/lib/udev/zvol_id`. Record which is true on this VM now:
+
+```sh
+ls /dev/zvol 2>&1; ls -l /lib/udev/rules.d/60-zvol.rules /usr/lib/udev/rules.d/60-zvol.rules /etc/udev/rules.d/60-zvol.rules 2>&1; command -v zvol_id; ls -l /lib/udev/zvol_id /usr/lib/udev/zvol_id 2>&1; grep -h zvol_id /etc/udev/rules.d/60-zvol.rules /lib/udev/rules.d/60-zvol.rules 2>/dev/null
+```
+
+Quote all of it, and decide H:
+
+- PRESENT: a `60-zvol.rules` exists (file or link) and the `zvol_id` its `PROGRAM==` names exists: H=no. Leave them alone: step 3 runs no `zfs-helpers.sh` and step 5 no `-r`; say "udev rule present, left alone". Expected on 105 to 107 since UDV: `/etc/udev/rules.d/60-zvol.rules` (461 bytes) and `/lib/udev/zvol_id` (22176 bytes; `/lib` is a link to `/usr/lib`, so `/usr/lib/udev/zvol_id` is the same file), the rule naming `/lib/udev/zvol_id`.
+- ABSENT: no `60-zvol.rules` in any of the three directories and no `zvol_id`: H=yes. Step 3 installs the tree's helpers with `scripts/zfs-helpers.sh -i` before the first ZTS run, and step 5 removes them with `-r`, so that the VM ends as it began.
+- Anything else (a rule without the `zvol_id` it names, or the reverse): stop and report, touch nothing.
+
+`command -v zvol_id` prints nothing either way (`zvol_id` lives in `/lib/udev`, off `PATH`), and `ls /dev/zvol` shows `No such file or directory` or a directory with no volume link: both are recorded, neither decides.
 
 ## STEP 1: the tree
 
@@ -73,6 +88,15 @@ Poll `grep build-rc= $L/build-fix-dbg.log`. It must end `build-rc=0`; quote ever
 
 ## STEP 3: part A, debug build with the fix, on 6.12
 
+With H=yes only (step 0), the tree's helpers first:
+
+```sh
+D=/var/tmp/task-1121-zot; L=/var/log/task-1121-zot
+sudo -n $D/fix-dbg/scripts/zfs-helpers.sh -iv > $L/helpers-i.log 2>&1; echo "rc=$?"; cat $L/helpers-i.log; sudo -n udevadm control --reload && echo UDEV-RELOADED
+```
+
+Expected rc 0, the configuration block (`udevdir:`, `udevruledir:` and the others), an `ln -s $D/fix-dbg/...` line for each of `zvol_id`, `60-zvol.rules`, `69-vdev.rules` and `90-zfs.rules` and for the other helpers, and UDEV-RELOADED. A `Source missing` line for `zvol_id` or `60-zvol.rules`: stop and report (the runs could not see `/dev/zvol`). A `Removing old symlink`, `Symlink exists` or `File exists` line means a helper from elsewhere was already there: quote it and report it (`-r` at step 5 does not restore a link that `-i` replaced). With H=no, skip this block and say so.
+
 `sudo -n $D/fix-dbg/scripts/zfs.sh`; quote `cat /sys/module/zfs/srcversion` (must equal S1) and the "(DEBUG mode)" load line. Note N0=`sudo -n dmesg | wc -l`.
 
 1. The new test, three times, one after the other, each after the pre-run checks:
@@ -84,7 +108,7 @@ Poll `grep build-rc= $L/build-fix-dbg.log`. It must end `build-rc=0`; quote ever
 
    Expected PASS each time, in about 20 s. For each run quote: the result line and duration; from the test's own log under the results directory the runner prints, the `NOTE:` line with the `zinject` table (handler, `testpool`, `zvol_open:found`, INJECT 1), the `NOTE: zfs set volmode=none waits for the held open` line, the `NOTE: open: rc ...` line (expected `rc 1` and ENXIO: `dd: failed to open '/dev/zdN': No such device or address`), and the `SUCCESS:` lines of `test 0 = 0`, `test 1 = 0` (a `log_mustnot`), `test -e /sys/block/zdN` (a `log_mustnot`) and the last `dd`; and, from dmesg since the previous count, every line with `VERIFY`, `ASSERT`, `PANIC`, `BUG`, `Oops`, `general protection`, `list_del` or `blocked for more than` (none expected). A FAIL: quote the last 40 lines of its log and of the test's own log, then go on to the next run; two FAILs in a row: stop part A and report.
 2. `-t zinject_args` once (tag zi), after the pre-run checks: `cd $D/fix-dbg && setsid nohup timeout 900 sudo -n -u zts ./scripts/zfs-tests.sh -vKO -t zinject_args > $L/zts-zi.log 2>&1 < /dev/null &`. Expected PASS (its list of points now holds `zvol_open:found`). Quote the result line and duration.
-3. `-T zvol_misc` once (tag zm), after the pre-run checks: `cd $D/fix-dbg && setsid nohup sudo -n -u zts ./scripts/zfs-tests.sh -vKO -T zvol_misc > $L/zts-zm.log 2>&1 < /dev/null &`. Expected: the tests of `common.run` and `linux.run` tagged `zvol_misc` PASS, `zvol_misc_remove_open` among them. Quote every `Test:` line with result and duration and the Results Summary. A FAIL is quoted with the 20 lines before it and reported as is, without rerun, saying whether `tests/test-runner/bin/zts-report.py.in` lists it as known.
+3. `-T zvol_misc` once (tag zm), after the pre-run checks: `cd $D/fix-dbg && setsid nohup sudo -n -u zts ./scripts/zfs-tests.sh -vKO -T zvol_misc > $L/zts-zm.log 2>&1 < /dev/null &`. Expected: the tests of `common.run` and `linux.run` tagged `zvol_misc` PASS, `zvol_misc_remove_open` among them. Quote every `Test:` line with result and duration and the Results Summary. A FAIL is quoted with the 20 lines before it and reported as is, without rerun, saying whether `tests/test-runner/bin/zts-report.py.in` lists it as known and whether it carries M-30's signature (VM rules).
 
 After them: the pre-run checks once more; every line of `sudo -n dmesg | tail -n +$((N0+1))` matching `VERIFY|ASSERT|PANIC|BUG|Oops|general protection|blocked for more than|list_del` is quoted with 10 lines before it (none expected). Unload with `sudo -n $D/fix-dbg/scripts/zfs.sh -u` (quote rc) and save `sudo -n dmesg > $L/dmesg-fix-dbg.txt`.
 
@@ -92,7 +116,7 @@ After them: the pre-run checks once more; every line of `sudo -n dmesg | tail -n
 
 On 6.12, write "Part B: not run (kernel 6.12: `del_gendisk()` waits for the open there, so the fail-before tree would pass)" and go to step 5.
 
-Main runs this part through its 5.10 route (a separate task gives the kernel, its headers and compiler, the boot with `slub_debug=P` on that kernel's command line only, `kernel.panic_on_oops=0` for the run, the reboots and the restore); the route's rules win where they differ from this task's. On that kernel:
+Main runs this part through its 5.10 route (a separate task gives the kernel, its headers and compiler, the boot with `slub_debug=P` on that kernel's command line only, `kernel.panic_on_oops=0` for the run, the reboots and the restore); the route's rules win where they differ from this task's, the zvol udev rule included (TASK-1121-ZV510C installs it in its guest with the tree's `zfs-helpers.sh -i`). On that kernel:
 
 1. Trees: `fix-dbg` as in step 1, and the fail-before tree:
 
@@ -108,17 +132,24 @@ Main runs this part through its 5.10 route (a separate task gives the kernel, it
    ```
 
    Both built with `--enable-debug` against the running kernel's headers. In the `fix-dbg` build log, `checking whether bdget_disk() and bd_mutex are available... yes` and `grep -c 'define HAVE_BLKDEV_BD_MUTEX 1' zfs_config.h` = 1 (the fix compiled in); `nm module/zfs.ko | grep -cE ' U (bdget_disk|bdput)$'` = 2. A `no` there is a stop: the run would not test the fix.
-2. With the fix (`fix-dbg` loaded, srcversion and "(DEBUG mode)" quoted): `-t zvol_misc_remove_open` three times, as in step 3.1. Expected PASS each time, the fix's `bd_mutex` wait now holding the removal (this, not part A, is the run that exercises the fix). Then `-t zvol_misc_volmode_race` once (the test that hit the panic in CI; expected PASS, no dmesg finding). Unload.
+2. With the fix (`fix-dbg` loaded, srcversion and "(DEBUG mode)" quoted): `-t zvol_misc_remove_open` three times, as in step 3.1. Expected PASS each time, the fix's `bd_mutex` wait now holding the removal (this, not part A, is the run that exercises the fix). Then `-t zvol_misc_volmode_race` once (the test that hit the panic in CI; expected PASS, no dmesg finding; a finding with M-30's signature is reported as M-30, not against the fix). Unload.
 3. Fail-before (`fb-dbg` loaded, srcversion and "(DEBUG mode)" quoted; `cat /proc/cmdline` must show `slub_debug=P`, without which the use-after-free of the next point is most likely silent): start `dmesg --follow` into `$L/oops-follow.txt` detached, then `-t zvol_misc_remove_open` ONCE, detached, with `timeout 900`. Expected:
-   - the test FAILs in its step 3, within a few seconds: `NOTE: zfs set: rc 0,` then `ERROR: The minor of testpool/removeopen was removed while an open held at zvol_open:found had not returned` (the removal did not wait for the held open, and freed the `zvol_state_t`);
+   - the test FAILs in its step 3, within a few seconds: `NOTE: zfs set: rc 0,` then, on its own line, `The minor of testpool/removeopen was removed while an open held at zvol_open:found had not returned` (`log_fail` prints its message with no `ERROR:` prefix; the removal did not wait for the held open, and freed the `zvol_state_t`);
    - its cleanup runs `zinject -c all`, and the released `dd` open locks the freed, poisoned `zvol_state_t`: expected `general protection fault, probably for non-canonical address 0x6b6b6b6b6b6b6b..` with `RIP:` in `__mutex_lock` or a helper of it (`mutex_spin_on_owner`, `mutex_can_spin_on_owner`), `zvol_open` in the Call Trace below it (then `__blkdev_get`, `blkdev_get`, `blkdev_open`, `do_dentry_open`), Comm `dd`. A `list_del corruption`, a SLUB `Poison overwritten` or any other oops in `zvol_open()` is as much a confirmation; no finding at all is reported as such (the test's ERROR line stays the verdict);
    - `NOTE: open: rc` is not printed (the test failed before); the cleanup's `wait_file` of the open should still see the `dd` subshell end (rc 139 if `dd` died in the oops; if not, the cleanup prints the stacks of `dd` and `zfs` after 60 s, quote them); the runner is expected to return with FAIL; the dead open keeps the old disk's `bd_mutex`, which nothing else needs, so the pool cleanup is expected to complete (if it hangs instead, capture it as a hang and follow the route). Quote the oops (GPF or BUG line, RIP, Comm, the first 15 frames), the test's `ERROR:` line and the cleanup lines, `ps` of any D task with its kernel stack, `zpool list` after it, and whether the runner returned.
    - The kernel is tainted afterwards: reboot as the route says.
 
 ## STEP 5: end
 
-Unload if loaded (`sudo -n $D/fix-dbg/scripts/zfs.sh -u`, quote rc; `lsmod | grep -E '^(zfs|spl) '` empty). The pre-run checks once more (all clean expected). `/etc/zfs/zpool.cache` above 0: quote its `ls -l` and the `strings` check of step 0; if it names only `testpool...` with paths under `/var/tmp`, move it to `$L/zpool.cache.end`; otherwise report it and leave it. Then `rm -rf $D`; `sudo -n fstrim -av`; `df -h /var/tmp`.
+Unload if loaded (`sudo -n $D/fix-dbg/scripts/zfs.sh -u`, quote rc; `lsmod | grep -E '^(zfs|spl) '` empty). The pre-run checks once more (all clean expected). `/etc/zfs/zpool.cache` above 0: quote its `ls -l` and the `strings` check of step 0; if it names only `testpool...` with paths under `/var/tmp`, move it to `$L/zpool.cache.end`; otherwise report it and leave it. With H=yes, remove the helpers before the tree goes (their links point into it):
+
+```sh
+D=/var/tmp/task-1121-zot; L=/var/log/task-1121-zot
+sudo -n $D/fix-dbg/scripts/zfs-helpers.sh -rv > $L/helpers-r.log 2>&1; echo "rc=$?"; cat $L/helpers-r.log; sudo -n udevadm control --reload && echo UDEV-RELOADED
+```
+
+Expected rc 0, an `rm` line for each `ln -s` line of `helpers-i.log`, no `Expected symlink` line, and UDEV-RELOADED. Then, with H=yes or H=no, the udev command of step 0 once more: its output must be the same as at step 0 (ABSENT again with H=yes, the untouched rule and `zvol_id` with H=no). Then `rm -rf $D`; `sudo -n fstrim -av`; `df -h /var/tmp`.
 
 ## Report
 
-Write $L/report.md and give the same text as your final message. Part A: the configure line and the zfs_config.h count, S1 and the load line; a table (run, result, duration, zinject table INJECT 1 yes/no, "waits for the held open" seen yes/no, open rc and its message), then "no VERIFY/ASSERT/PANIC/BUG/Oops/GPF/list_del/hung task" or what was seen; the `zinject_args` result; the group result (Results Summary, every non-PASS with its lines). Part B: "not run (kernel 6.12)" or, through the route, the configure lines, the with-fix table, the fail-before `ERROR:` line, the oops (GPF or BUG line, RIP, Comm, first 15 frames), the cleanup lines, the D tasks, whether the runner returned. One-line verdict: "ZOT PASS 3/3 debug on 6.12, zinject_args PASS, -T zvol_misc PASS; part B not run (6.12)" or what differs.
+Write $L/report.md and give the same text as your final message. The zvol udev rule: the step 0 output, H (present and left alone, or installed with `-i` and removed with `-r`) and the step 5 comparison. Part A: the configure line and the zfs_config.h count, S1 and the load line; a table (run, result, duration, zinject table INJECT 1 yes/no, "waits for the held open" seen yes/no, open rc and its message), then "no VERIFY/ASSERT/PANIC/BUG/Oops/GPF/list_del/hung task" or what was seen (an M-30 finding named as such); the `zinject_args` result; the group result (Results Summary, every non-PASS with its lines). Part B: "not run (kernel 6.12)" or, through the route, the configure lines, the with-fix table, the fail-before failure line (no `ERROR:` prefix), the oops (GPF or BUG line, RIP, Comm, first 15 frames), the cleanup lines, the D tasks, whether the runner returned. One-line verdict: "ZOT PASS 3/3 debug on 6.12, zinject_args PASS, -T zvol_misc PASS; part B not run (6.12)" or what differs.
