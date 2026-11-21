@@ -132,6 +132,7 @@
     <elf-symbol name='lzc_unload_key' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='lzc_wait' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='lzc_wait_fs' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
+    <elf-symbol name='lzc_wait_inject' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='lzc_wait_tag' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='mkdirp' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='mutex_destroy' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
@@ -427,7 +428,6 @@
         <var-decl name='t_arg' type-id='eaa32e2f' visibility='default'/>
       </data-member>
     </class-decl>
-    <type-decl name='long long int' size-in-bits='64' id='1eb56b1e'/>
     <type-decl name='long long unsigned int' size-in-bits='64' id='3a47d82b'/>
     <array-type-def dimensions='1' type-id='f0981eeb' size-in-bits='64' id='0d532ec1'>
       <subrange length='2' type-id='7359adad' id='52efc4ef'/>
@@ -443,7 +443,6 @@
     </class-decl>
     <typedef-decl name='kmutex_t' type-id='f1cacfe1' id='b9eccc8f'/>
     <typedef-decl name='kthread_t' type-id='d7cebe06' id='9bccee1a'/>
-    <typedef-decl name='hrtime_t' type-id='1eb56b1e' id='cebdd548'/>
     <union-decl name='__atomic_wide_counter' size-in-bits='64' naming-typedef-id='f3b40860' visibility='default' id='613ce450'>
       <data-member access='public'>
         <var-decl name='__value64' type-id='3a47d82b' visibility='default'/>
@@ -2154,6 +2153,7 @@
     <class-decl name='_IO_wide_data' is-struct='yes' visibility='default' is-declaration-only='yes' id='79bd3751'/>
     <type-decl name='int' size-in-bits='32' id='95e97e5e'/>
     <type-decl name='long int' size-in-bits='64' id='bd54fe1a'/>
+    <type-decl name='long long int' size-in-bits='64' id='1eb56b1e'/>
     <type-decl name='short int' size-in-bits='16' id='a2185560'/>
     <type-decl name='signed char' size-in-bits='8' id='28577a57'/>
     <array-type-def dimensions='1' type-id='9c313c2d' size-in-bits='128' id='c1c22e6c'>
@@ -2447,6 +2447,7 @@
       <enumerator name='ZFS_IOC_POOL_PREFETCH' value='23128'/>
       <enumerator name='ZFS_IOC_DDT_PRUNE' value='23129'/>
       <enumerator name='ZFS_IOC_POOL_CONDENSE' value='23130'/>
+      <enumerator name='ZFS_IOC_WAIT_INJECT' value='23131'/>
       <enumerator name='ZFS_IOC_PLATFORM' value='23168'/>
       <enumerator name='ZFS_IOC_EVENTS_NEXT' value='23169'/>
       <enumerator name='ZFS_IOC_EVENTS_CLEAR' value='23170'/>
@@ -3161,6 +3162,7 @@
     <typedef-decl name='boolean_t' type-id='f58c8277' id='c19b74c3'/>
     <typedef-decl name='uchar_t' type-id='002ac4a6' id='d8bf0010'/>
     <typedef-decl name='uint_t' type-id='f0981eeb' id='3502e3ff'/>
+    <typedef-decl name='hrtime_t' type-id='1eb56b1e' id='cebdd548'/>
     <typedef-decl name='pthread_t' type-id='7359adad' id='4051f5e7'/>
     <union-decl name='pthread_attr_t' size-in-bits='448' visibility='default' id='b63afacd'>
       <data-member access='public'>
@@ -3464,6 +3466,12 @@
       <parameter type-id='b59d7dce'/>
       <parameter type-id='857bb57e'/>
       <parameter type-id='95e97e5e'/>
+      <return type-id='95e97e5e'/>
+    </function-decl>
+    <function-decl name='nvlist_add_hrtime' visibility='default' binding='global' size-in-bits='64'>
+      <parameter type-id='5ce45b60'/>
+      <parameter type-id='80f4b756'/>
+      <parameter type-id='cebdd548'/>
       <return type-id='95e97e5e'/>
     </function-decl>
     <function-decl name='nvlist_lookup_uint64' visibility='default' binding='global' size-in-bits='64'>
@@ -4107,6 +4115,11 @@
       <parameter type-id='80f4b756' name='pool'/>
       <parameter type-id='02e25ab0' name='unit'/>
       <parameter type-id='9c313c2d' name='amount'/>
+      <return type-id='95e97e5e'/>
+    </function-decl>
+    <function-decl name='lzc_wait_inject' mangled-name='lzc_wait_inject' visibility='default' binding='global' size-in-bits='64' elf-symbol-id='lzc_wait_inject'>
+      <parameter type-id='5d6479ae' name='state'/>
+      <parameter type-id='cebdd548' name='timeout'/>
       <return type-id='95e97e5e'/>
     </function-decl>
     <function-decl name='lzc_ioctl_fd_os' visibility='default' binding='global' size-in-bits='64'>
