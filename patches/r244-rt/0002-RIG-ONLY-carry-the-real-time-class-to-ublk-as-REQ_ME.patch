@@ -1,0 +1,53 @@
+From d14d9bebae01bc853919777c731cac4d416aefd1 Mon Sep 17 00:00:00 2001
+From: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 15:03:13 +0000
+Subject: [PATCH 2/2] RIG ONLY: carry the real-time class to ublk as REQ_META
+
+Not for upstream and never for a real disk.  The host-like I/O rig
+emulates SATA disks with hddsim, a ublk server.  ublk passes a
+request's FAILFAST, META, FUA, NOUNMAP, SWAP and INTEGRITY flags to
+its server but not its I/O priority (ublk_setup_iod(), Linux 7.0), so
+hddsim cannot see the real-time class zfs_vdev_disk_rt_mask gives
+synchronous I/O.  Mark those bios REQ_META, which ublk passes as
+UBLK_IO_F_META and hddsim reads as the NCQ high-priority bit.
+
+Only reads and the writes blk-wbt leaves alone (REQ_SYNC and REQ_IDLE,
+which zfs_vdev_disk_sync_writes sets where that parameter exists) are
+marked: blk-wbt gives a REQ_META write its highest limit, which would
+mix a blk-wbt effect into the NCQ one.  On the rig nothing else reads
+REQ_META: the scheduler is none and no blk-cgroup I/O controller is
+enabled.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>
+---
+ module/os/linux/zfs/vdev_disk.c | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/module/os/linux/zfs/vdev_disk.c b/module/os/linux/zfs/vdev_disk.c
+index c7afb6d7a6f..85661fe6269 100644
+--- a/module/os/linux/zfs/vdev_disk.c
++++ b/module/os/linux/zfs/vdev_disk.c
+@@ -810,6 +810,20 @@ vbio_add_page(vbio_t *vbio, struct page *page, uint_t size, uint_t offset)
+ 			    WRITE : READ, vbio->vbio_flags);
+ 			bio->bi_ioprio = vbio->vbio_ioprio;
+ 
++			/*
++			 * Test rig only, never for a real disk: ublk does not
++			 * pass a request's I/O priority to its server, so
++			 * carry the real-time class to the hddsim emulator as
++			 * REQ_META.  Not on a write blk-wbt throttles, whose
++			 * limit REQ_META would raise.
++			 */
++			if (IOPRIO_PRIO_CLASS(vbio->vbio_ioprio) ==
++			    IOPRIO_CLASS_RT &&
++			    (vbio->vbio_zio->io_type == ZIO_TYPE_READ ||
++			    (vbio->vbio_flags & (REQ_SYNC | REQ_IDLE)) ==
++			    (REQ_SYNC | REQ_IDLE)))
++				bio->bi_opf |= REQ_META;
++
+ 			if (vbio->vbio_bio) {
+ 				bio_chain(vbio->vbio_bio, bio);
+ 				vdev_submit_bio(vbio->vbio_bio);
+-- 
+2.43.0
+

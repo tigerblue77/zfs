@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: CDDL-1.0
+# Arm order of each pass: rows 0, 1 and 2 of a Williams design for the 15
+# arms of arms.txt (first row 0 1 14 2 13 3 12 4 11 5 10 6 9 7 8, then
+# shifted by one), each followed by its reverse, which an odd number of
+# arms needs for carry-over balance.  Every arm sits in mean position 7 of
+# 0-14 over the six passes, and has six different predecessors, the pass's
+# warm-up (its last arm) counting as the first arm's.  Pass An runs row n.
+1 R0 M0 pr3o P0 pr3 P1 PQ3 P1I PQR P1A QR2 R0W QR P1W QM
+2 QM P1W QR R0W QR2 P1A PQR P1I PQ3 P1 pr3 P0 pr3o M0 R0
+3 M0 P0 R0 P1 pr3o P1I pr3 P1A PQ3 R0W PQR P1W QR2 QM QR
+4 QR QM QR2 P1W PQR R0W PQ3 P1A pr3 P1I pr3o P1 R0 P0 M0
+5 P0 P1 M0 P1I R0 P1A pr3o R0W pr3 P1W PQ3 QM PQR QR QR2
+6 QR2 QR PQR QM PQ3 P1W pr3 R0W pr3o P1A R0 P1I M0 P1 P0

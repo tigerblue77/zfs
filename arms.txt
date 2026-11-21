@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: CDDL-1.0
+# The arms of the host rig: code tree (hr-trees.sh, built under $TREES),
+# blk-wbt target of the five disks (wbt_lat_usec; 0 = off), hddsim's NCQ
+# priority (0 off; 1 marked commands first in the NCQ; 2 also ahead of the
+# drive's forced destaging), then the module parameters the arm writes
+# after loading its tree ("-" none).
+# Every point reloads its tree's modules, so every other parameter is at
+# the tree's default, plus the rig's common settings (TUNE in hr-bench.sh).
+# zfs_vdev_disk_rt_mask (RQ, PQ): 1 synchronous reads, 2 synchronous writes
+# in the real-time class; the rig marker carries it to the disks on reads,
+# and on writes submitted REQ_SYNC|REQ_IDLE (PR1's sync_writes=1) only.
+# P3W: 2.4.4 with PR1 and PR3 (in-flight cap, read-latency window, its
+# trace) backported, and a test-only commit with which sync_writes=2 marks
+# every write REQ_SYNC|REQ_IDLE (2.4 has no queue bypass); no age guard.
+# pr3o is pr3 with the window off: only zfs_vdev_queue_window differs.
+#
+# ARM  TREE WBT   NCQ_PRIO PARAMETERS
+R0     R    75000 0        -
+M0     M    75000 0        -
+P0     P    75000 0        zfs_vdev_disk_sync_writes=0
+P1     P    75000 0        zfs_vdev_disk_sync_writes=1
+P1I    P    75000 0        zfs_vdev_disk_sync_writes=1 zfs_immediate_write_sz=2097152
+P1A    A    75000 0        zfs_vdev_disk_sync_writes=1 zfs_vdev_queue_age_ms=50
+R0W    R    0     0        -
+P1W    P    0     0        zfs_vdev_disk_sync_writes=1
+QM     RQ   75000 0        zfs_vdev_disk_rt_mask=3
+QR     RQ   75000 1        zfs_vdev_disk_rt_mask=1
+QR2    RQ   75000 2        zfs_vdev_disk_rt_mask=1
+PQR    PQ   75000 1        zfs_vdev_disk_sync_writes=1 zfs_vdev_disk_rt_mask=1
+PQ3    PQ   75000 1        zfs_vdev_disk_sync_writes=1 zfs_vdev_disk_rt_mask=3
+pr3    P3W  75000 0        zfs_vdev_queue_window=1 zfs_vdev_queue_window_max=32 zfs_vdev_queue_window_rotating_us=75000 zfs_vdev_disk_sync_writes=2
+pr3o   P3W  75000 0        zfs_vdev_queue_window=0 zfs_vdev_queue_window_max=32 zfs_vdev_queue_window_rotating_us=75000 zfs_vdev_disk_sync_writes=2

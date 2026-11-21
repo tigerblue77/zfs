@@ -1,0 +1,32 @@
+From 2738e2883136b191618647b2cf1191df745b0e04 Mon Sep 17 00:00:00 2001
+From: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 15:31:47 +0000
+Subject: [PATCH 6/6] vdev_disk: 2.4 test backport: zfs_vdev_disk_sync_writes=2
+ marks all
+
+Test backport only, not for submission.  OpenZFS 2.4 has no vdev queue
+bypass and no ZIO_FLAG_BYPASSED_QUEUE, so with
+zfs_vdev_disk_sync_writes=2 every write is marked REQ_SYNC|REQ_IDLE.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>
+---
+ module/os/linux/zfs/vdev_disk.c | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/module/os/linux/zfs/vdev_disk.c b/module/os/linux/zfs/vdev_disk.c
+index 63a049b9160..14f51a85a48 100644
+--- a/module/os/linux/zfs/vdev_disk.c
++++ b/module/os/linux/zfs/vdev_disk.c
+@@ -1022,8 +1022,7 @@ vdev_disk_io_rw(zio_t *zio)
+ 	 */
+ 	const uint_t sync_writes = zfs_vdev_disk_sync_writes;
+ 	if (zio->io_type == ZIO_TYPE_WRITE && sync_writes != 0 &&
+-	    (vdev_disk_write_waited(zio) || (sync_writes >= 2 &&
+-	    !(zio->io_flags & ZIO_FLAG_BYPASSED_QUEUE))))
++	    (vdev_disk_write_waited(zio) || sync_writes >= 2))
+ 		flags |= REQ_SYNC | REQ_IDLE;
+ 
+ 	/*
+-- 
+2.43.0
+
