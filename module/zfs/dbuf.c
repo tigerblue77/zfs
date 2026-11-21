@@ -2855,6 +2855,8 @@ dmu_buf_will_rewrite(dmu_buf_t *db_fake, dmu_tx_t *tx)
 		return;
 	}
 	mutex_exit(&db->db_mtx);
+	zio_inject_point(dmu_objset_spa(db->db_objset),
+	    ZIO_INJECT_POINT_REWRITE_CLEAN);
 
 	DB_DNODE_ENTER(db);
 	if (RW_WRITE_HELD(&DB_DNODE(db)->dn_struct_rwlock))

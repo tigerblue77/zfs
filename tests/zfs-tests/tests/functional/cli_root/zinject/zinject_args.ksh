@@ -136,7 +136,7 @@ function test_panic_fault_neg
 function test_point_fault
 {
 	typeset -a points=("dmu_objset_upgrade_task_cb:done" \
-	    "zfs_freesp:changed")
+	    "zfs_freesp:changed" "dmu_buf_will_rewrite:clean")
 	for p in ${points[@]}; do
 		log_must eval "zinject -w $p -s 10 $TESTPOOL"
 		zinject | grep -q "$p" || \
