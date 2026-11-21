@@ -16,7 +16,7 @@
 .\" Copyright (c) 2026, Mateusz Piotrowski <0mp@FreeBSD.org>
 .\" Copyright (c) 2026, TrueNAS.
 .\"
-.Dd September 9, 2026
+.Dd November 21, 2026
 .Dt ZFS 4
 .Os
 .
@@ -1814,6 +1814,52 @@ Maximum number of segments to add to a BIO (min 4).
 If this is higher than the maximum allowed by the device queue or the kernel
 itself, it will be clamped.
 Setting it to zero will cause the kernel's ideal size to be used.
+This parameter only applies on Linux.
+.
+.It Sy zfs_vdev_disk_rt_mask Ns = Ns Sy 0 Pq uint
+Synchronous I/O to submit to disk vdevs in the real-time I/O priority class,
+as a bitmask:
+.Sy 1
+for synchronous reads, the reads a thread waits for, and
+.Sy 2
+for synchronous writes: ZIL blocks, blocks written for the ZIL
+.Pq see Sy zfs_immediate_write_sz ,
+Direct I/O writes and vdev labels.
+.Pp
+By default ZFS leaves the priority of its I/O to the kernel, which from
+Linux 6.0 gives a request the priority of the thread that submits it,
+derived from its
+.Xr nice 1
+value unless it set one.
+ZFS's own threads submit most of a pool's I/O, whichever thread waits for it,
+so that priority does not tell the I/O a thread waits for from the rest.
+A disk serves the real-time class first when its NCQ priority is enabled
+.Po
+.Pa /sys/block/ Ns Ar disk Ns Pa /device/ncq_prio_enable ,
+or
+.Pa sas_ncq_prio_enable
+behind an mpt3sas host adapter
+.Pc ,
+and so does the mq-deadline scheduler; BFQ takes the class from the
+submitting thread instead.
+.Pp
+A thread whose priority was set with
+.Xr ioprio_set 2
+or
+.Xr ionice 1 ,
+or that runs under the
+.Sy SCHED_IDLE ,
+.Sy SCHED_FIFO ,
+.Sy SCHED_RR
+or
+.Sy SCHED_DEADLINE
+policy, keeps its own priority for the I/O it submits.
+The
+.Sy io.prio.class
+of the submitting thread's cgroup still applies on top.
+With mq-deadline, a steady stream of synchronous reads can hold back every
+other request to the disk, transaction group writes included, up to its
+aging limit.
 This parameter only applies on Linux.
 .
 .It Sy zfs_vdev_disk_calling_thread_io Ns = Ns Sy 0 Ns | Ns 1 Pq uint

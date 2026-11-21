@@ -31,6 +31,7 @@
 #include <linux/msdos_fs.h>
 #include <linux/vfs_compat.h>
 #include <linux/blk-cgroup.h>
+#include <linux/ioprio.h>
 
 /*
  * Linux 6.8.x uses a bdev_handle as an instance/refcount for an underlying
@@ -96,6 +97,13 @@ static uint_t zfs_vdev_open_timeout_ms = 1000;
  */
 
 static unsigned int zfs_vdev_failfast_mask = 1;
+
+/*
+ * Synchronous I/O to submit in the real-time I/O priority class: 1 reads,
+ * 2 writes.  A disk with NCQ priority enabled serves that class first, and
+ * so does mq-deadline.
+ */
+static unsigned int zfs_vdev_disk_rt_mask = 0;
 
 /*
  * Whether we wait for bio to complete. Also requires that
@@ -755,8 +763,41 @@ typedef struct {
 
 	struct bio	*vbio_bio;	/* pointer to the current bio */
 	int		vbio_flags;	/* bio flags */
+	unsigned short	vbio_ioprio;	/* bio I/O priority */
 	boolean_t	vbio_wait;	/* wait for completion */
 } vbio_t;
+
+/*
+ * The I/O priority of the bios of a zio.  IOPRIO_CLASS_NONE lets submit_bio()
+ * give them the priority of the submitting thread, which for ZFS's own
+ * threads says nothing about the I/O.
+ */
+static unsigned short
+vdev_disk_bio_ioprio(const zio_t *zio)
+{
+	const unsigned short none = IOPRIO_PRIO_VALUE(IOPRIO_CLASS_NONE, 0);
+	const unsigned int mask = zfs_vdev_disk_rt_mask;
+	const struct io_context *ioc;
+
+	if (!((zio->io_priority == ZIO_PRIORITY_SYNC_READ && (mask & 1)) ||
+	    (zio->io_priority == ZIO_PRIORITY_SYNC_WRITE && (mask & 2))))
+		return (none);
+
+	/*
+	 * A thread that chose its own priority, with ioprio_set(2) or a
+	 * real-time or idle scheduling policy, keeps it, so that "ionice -c3"
+	 * still keeps a process's own reads behind the others'.
+	 */
+	if (current->policy == SCHED_IDLE || current->policy == SCHED_FIFO ||
+	    current->policy == SCHED_RR || current->policy == SCHED_DEADLINE)
+		return (none);
+	ioc = READ_ONCE(current->io_context);
+	if (ioc != NULL &&
+	    IOPRIO_PRIO_CLASS(READ_ONCE(ioc->ioprio)) != IOPRIO_CLASS_NONE)
+		return (none);
+
+	return (IOPRIO_PRIO_VALUE(IOPRIO_CLASS_RT, IOPRIO_NORM));
+}
 
 static vbio_t *
 vbio_alloc(zio_t *zio, struct block_device *bdev, int flags)
@@ -772,6 +813,7 @@ vbio_alloc(zio_t *zio, struct block_device *bdev, int flags)
 	vbio->vbio_offset = zio->io_offset;
 	vbio->vbio_bio = NULL;
 	vbio->vbio_flags = flags;
+	vbio->vbio_ioprio = vdev_disk_bio_ioprio(zio);
 	vbio->vbio_wait = B_FALSE;
 
 	return (vbio);
@@ -796,6 +838,7 @@ vbio_add_page(vbio_t *vbio, struct page *page, uint_t size, uint_t offset)
 			bio_set_op_attrs(bio,
 			    vbio->vbio_zio->io_type == ZIO_TYPE_WRITE ?
 			    WRITE : READ, vbio->vbio_flags);
+			bio->bi_ioprio = vbio->vbio_ioprio;
 
 			if (vbio->vbio_bio) {
 				bio_chain(vbio->vbio_bio, bio);
@@ -1480,6 +1523,9 @@ ZFS_MODULE_PARAM(zfs_vdev, zfs_vdev_, failfast_mask, UINT, ZMOD_RW,
 
 ZFS_MODULE_PARAM(zfs_vdev_disk, zfs_vdev_disk_, max_segs, UINT, ZMOD_RW,
 	"Maximum number of data segments to add to an IO request (min 4)");
+
+ZFS_MODULE_PARAM(zfs_vdev_disk, zfs_vdev_disk_, rt_mask, UINT, ZMOD_RW,
+	"Synchronous I/O to submit as real-time: 1 reads, 2 writes");
 
 ZFS_MODULE_PARAM(zfs_vdev_disk, zfs_vdev_disk_, calling_thread_io, UINT,
 	ZMOD_RW, "Enable calling thread io");
