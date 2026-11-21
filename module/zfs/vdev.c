@@ -4965,7 +4965,9 @@ vdev_offline(spa_t *spa, uint64_t guid, uint64_t flags)
 /*
  * Clear the error counts associated with this vdev.  Unlike vdev_online() and
  * vdev_offline(), we assume the spa config is locked.  We also clear all
- * children.  If 'vd' is NULL, then the user wants to clear all vdevs.
+ * children.  If 'vd' is NULL, then the user wants to clear all vdevs,
+ * cache devices included.  Available hot spares are skipped: they do no
+ * I/O, and zpool(8) neither faults nor clears them.
  */
 void
 vdev_clear(spa_t *spa, vdev_t *vd)
@@ -4974,8 +4976,13 @@ vdev_clear(spa_t *spa, vdev_t *vd)
 
 	ASSERT(spa_config_held(spa, SCL_STATE_ALL, RW_WRITER) == SCL_STATE_ALL);
 
-	if (vd == NULL)
-		vd = rvd;
+	if (vd == NULL) {
+		vdev_clear(spa, rvd);
+		/* Cache devices are not children of the root vdev. */
+		for (int i = 0; i < spa->spa_l2cache.sav_count; i++)
+			vdev_clear(spa, spa->spa_l2cache.sav_vdevs[i]);
+		return;
+	}
 
 	vd->vdev_stat.vs_read_errors = 0;
 	vd->vdev_stat.vs_write_errors = 0;
