@@ -2571,6 +2571,7 @@ spa_vdev_remove(spa_t *spa, uint64_t guid, boolean_t unspare)
 		mutex_enter(&vd->vdev_trim_lock);
 		vdev_trim_stop(vd, VDEV_TRIM_CANCELED, NULL);
 		mutex_exit(&vd->vdev_trim_lock);
+		l2arc_vdev_feed_stop(vd);
 		txg = spa_vdev_config_enter(spa);
 
 		ev = spa_event_create(spa, vd, NULL, ESC_ZFS_VDEV_REMOVE_AUX);

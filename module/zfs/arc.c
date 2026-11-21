@@ -10654,6 +10654,21 @@ l2arc_device_teardown(void *arg)
 }
 
 /*
+ * Signal the feed thread of a device to exit and wait for it.  The thread
+ * only exists if the pool was imported read-write.
+ */
+static void
+l2arc_dev_feed_stop(l2arc_dev_t *dev)
+{
+	mutex_enter(&dev->l2ad_feed_thr_lock);
+	dev->l2ad_thread_exit = B_TRUE;
+	cv_signal(&dev->l2ad_feed_cv);
+	while (dev->l2ad_feed_thread != NULL)
+		cv_wait(&dev->l2ad_feed_cv, &dev->l2ad_feed_thr_lock);
+	mutex_exit(&dev->l2ad_feed_thr_lock);
+}
+
+/*
  * Remove a vdev from the L2ARC.
  */
 void
@@ -10690,18 +10705,11 @@ l2arc_remove_vdev(vdev_t *vd)
 	mutex_exit(&l2arc_rebuild_thr_lock);
 
 	/*
-	 * Signal per-device feed thread to exit and wait for it.
-	 * Thread only exists if pool was imported read-write.
+	 * Usually a no-op: export, unload and the removal of a cache device
+	 * stop the feed thread before they take the config lock, which the
+	 * thread may need to exit (see l2arc_vdev_feed_stop()).
 	 */
-	if (remdev->l2ad_feed_thread != NULL) {
-		mutex_enter(&remdev->l2ad_feed_thr_lock);
-		remdev->l2ad_thread_exit = B_TRUE;
-		cv_signal(&remdev->l2ad_feed_cv);
-		while (remdev->l2ad_feed_thread != NULL)
-			cv_wait(&remdev->l2ad_feed_cv,
-			    &remdev->l2ad_feed_thr_lock);
-		mutex_exit(&remdev->l2ad_feed_thr_lock);
-	}
+	l2arc_dev_feed_stop(remdev);
 
 	rva->rva_async = asynchronous;
 
@@ -10833,6 +10841,35 @@ l2arc_spa_rebuild_stop(spa_t *spa)
 		}
 		mutex_exit(&l2arc_rebuild_thr_lock);
 	}
+}
+
+/*
+ * Stop the feed thread of a cache device before it is removed.  When it
+ * trims ahead of its write hand, the thread takes the config lock as
+ * reader again before it can exit, so l2arc_remove_vdev() cannot wait for
+ * it under the config lock held as writer: call this before taking it.
+ */
+void
+l2arc_vdev_feed_stop(vdev_t *vd)
+{
+	l2arc_dev_t *dev = l2arc_vdev_get(vd);
+
+	if (dev != NULL)
+		l2arc_dev_feed_stop(dev);
+}
+
+/*
+ * Stop the feed threads of all cache devices of a pool before it is
+ * unloaded, for the same reason.
+ */
+void
+l2arc_spa_feed_stop(spa_t *spa)
+{
+	ASSERT(spa_namespace_held() ||
+	    spa->spa_export_thread == curthread);
+
+	for (int i = 0; i < spa->spa_l2cache.sav_count; i++)
+		l2arc_vdev_feed_stop(spa->spa_l2cache.sav_vdevs[i]);
 }
 
 /*

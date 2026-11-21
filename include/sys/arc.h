@@ -346,6 +346,8 @@ void l2arc_init(void);
 void l2arc_fini(void);
 void l2arc_spa_rebuild_start(spa_t *spa);
 void l2arc_spa_rebuild_stop(spa_t *spa);
+void l2arc_vdev_feed_stop(vdev_t *vd);
+void l2arc_spa_feed_stop(spa_t *spa);
 
 #ifndef _KERNEL
 extern boolean_t arc_watch;
