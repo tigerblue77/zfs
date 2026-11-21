@@ -341,11 +341,14 @@ task_expire_impl(taskq_ent_t *t)
 	if (l == &tq->tq_prio_list)
 		list_add(&t->tqent_list, &tq->tq_prio_list);
 
-	spin_unlock_irqrestore(&tq->tq_lock, flags);
-
+	/*
+	 * Once tq_lock is dropped, a worker can run the task and
+	 * taskq_destroy() can free tq: nothing waits for this callback.
+	 */
 	wake_up(&tq->tq_work_waitq);
-
 	TQSTAT_INC(tq, tasks_delayed_requeued);
+
+	spin_unlock_irqrestore(&tq->tq_lock, flags);
 }
 
 static void
