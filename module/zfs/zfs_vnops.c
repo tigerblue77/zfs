@@ -3056,7 +3056,36 @@ zfs_clone_range_replay(znode_t *zp, uint64_t off, uint64_t len, uint64_t blksz,
 	return (error);
 }
 
+/*
+ * The "zfs_enter" injection point.  Every file system operation reaches it
+ * just before it enters the file system, with its tag (its function name)
+ * as the caller, so that "zinject -n zfs_enter@zfs_write -A pause POOL"
+ * holds writes there, for instance.  The pool is looked up with the file
+ * system entered, since z_os can change while it isn't, but the action runs
+ * outside it: a paused operation must not hold off a suspend.  Returns the
+ * error to fail the operation with, if any.
+ */
+int
+zfs_enter_inject(zfsvfs_t *zfsvfs, const char *tag)
+{
+	zio_inject_point_t zp = { .zp_name = "zfs_enter", .zp_caller = tag };
+	spa_t *spa;
+	int error = 0;
+
+	ZFS_TEARDOWN_ENTER_READ(zfsvfs, tag);
+	if (zfsvfs->z_unmounted) {
+		ZFS_TEARDOWN_EXIT_READ(zfsvfs, tag);
+		return (0);
+	}
+	spa = dmu_objset_spa(zfsvfs->z_os);
+	ZFS_TEARDOWN_EXIT_READ(zfsvfs, tag);
+
+	(void) zio_handle_point_injection(spa, &zp, &error);
+	return (error);
+}
+
 EXPORT_SYMBOL(zfs_access);
+EXPORT_SYMBOL(zfs_enter_inject);
 EXPORT_SYMBOL(zfs_fsync);
 EXPORT_SYMBOL(zfs_holey);
 EXPORT_SYMBOL(zfs_read);

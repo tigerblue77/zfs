@@ -74,10 +74,18 @@ extern "C" {
 #define	zhold(zp)	VERIFY3P(igrab(ZTOI((zp))), !=, NULL)
 #define	zrele(zp)	iput(ZTOI((zp)))
 
+extern uint32_t zio_inject_points_enabled;
+extern int zfs_enter_inject(zfsvfs_t *zfsvfs, const char *tag);
+
 /* Called on entry to each ZFS inode and vfs operation. */
 static inline int
 zfs_enter(zfsvfs_t *zfsvfs, const char *tag)
 {
+	if (unlikely(zio_inject_points_enabled)) {
+		int error = zfs_enter_inject(zfsvfs, tag);
+		if (error != 0)
+			return (error);
+	}
 	ZFS_TEARDOWN_ENTER_READ(zfsvfs, tag);
 	if (unlikely(zfsvfs->z_unmounted)) {
 		ZFS_TEARDOWN_EXIT_READ(zfsvfs, tag);

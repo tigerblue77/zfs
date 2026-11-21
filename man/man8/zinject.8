@@ -202,7 +202,7 @@ Force an error into the pool at a raw bookmark
 .
 .It Xo
 .Nm zinject
-.Fl n Ar point
+.Fl n Ar point Ns Oo @ Ns Ar caller Oc
 .Oo Fl e Ar errno Ns | Ns Fl D Ar msecs Ns | Ns Fl A Sy pause Oc
 .Op Fl o Ar value
 .Op Fl f Ar frequency
@@ -211,9 +211,16 @@ Force an error into the pool at a raw bookmark
 Act at the injection point named
 .Ar point
 in
-.Ar pool .
+.Ar pool ,
+whenever it is reached, or with
+.No @ Ns Ar caller ,
+only when it is reached from the function
+.Ar caller ,
+at points that pass the function they were reached from.
 An injection point is a call to
 .Fn zio_handle_func_injection
+or
+.Fn zio_handle_point_injection
 in the module.
 .Bl -tag -width "-A pause"
 .It Fl e Ar errno
@@ -256,8 +263,20 @@ and the value at which it last acted
 .Pq Sy AT .
 .El
 .Pp
-Points that pass a value:
+Points that pass a caller or a value:
 .Bl -tag -width "raidz_expand:reflow"
+.It Sy zfs_enter
+Every file system operation, just before it enters the file system.
+The caller is the operation's function, such as
+.Sy zfs_read ,
+.Sy zfs_write
+or, on Linux,
+.Sy zpl_fadvise .
+For instance,
+.Dl # Nm zinject Fl n Sy zfs_enter@zfs_write Fl A Sy pause Ar pool
+holds writes to file systems in
+.Ar pool
+until the handler is cleared.
 .It Sy raidz_expand:reflow
 The reflow of a raidz expansion, before each copy.
 The value is the reflow offset in the raidz vdev, which

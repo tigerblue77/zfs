@@ -727,6 +727,7 @@ extern void zio_fini(void);
  */
 struct zinject_record;
 extern uint32_t zio_injection_enabled;
+extern uint32_t zio_inject_points_enabled;
 extern int zio_inject_fault(char *name, int flags, int *id,
     struct zinject_record *record);
 extern int zio_inject_list_next(int *id, char *name, size_t buflen,
@@ -742,6 +743,11 @@ extern int zio_handle_func_injection(spa_t *spa, const char *tag,
  */
 typedef struct zio_inject_point {
 	const char	*zp_name;	/* the point's name */
+	/*
+	 * The function the point was reached from, or NULL.  A handler for
+	 * "name@caller" acts only when it matches.
+	 */
+	const char	*zp_caller;
 	/*
 	 * How far the point's work has got.  A handler with a value
 	 * condition ("zinject -n -o VALUE") acts only once zp_value reaches

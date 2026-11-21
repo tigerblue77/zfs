@@ -100,8 +100,14 @@
  * that would otherwise be difficult to test, or delay or pause the thread
  * that reaches it, to open a race window deterministically.
  *
- *      zinject -n <point> [-e errno | -D msecs | -A pause] [-o value]
- *          [-f freq] <pool>
+ *      zinject -n <point>[@<caller>] [-e errno | -D msecs | -A pause]
+ *          [-o value] [-f freq] <pool>
+ *
+ * A point that passes the function it was reached from acts for
+ * point@caller only when reached from caller.  zfs_enter() is such a point,
+ * "zfs_enter", with the operation's function as the caller, so every file
+ * system operation can be acted on just before it enters the file system:
+ * "zfs_enter@zfs_write".
  *
  * -e	Fail once with errno (default 'io'), then clear the handler, so a
  *	test sees a failure followed by a success.
@@ -127,8 +133,8 @@
  * 	zinject -P <import|export> -s <seconds> <pool>
  * 	zinject -I [-s <seconds> | -g <txgs>] <pool>
  * 	zinject -w <state|0> [-W <delay>]
- * 	zinject -n <point> [-e errno | -D msecs | -A pause] [-o value]
- *	    [-f freq] <pool>
+ * 	zinject -n <point>[@<caller>] [-e errno | -D msecs | -A pause]
+ *	    [-o value] [-f freq] <pool>
  * 	zinject -E <delay> [-a] [-m] [-f freq] [-l level] [-r range]
  *	    [-T iotype] [-t type object | -b bookmark pool]
  * 	zinject -b <objset:object:level:blkid> <pool>
@@ -459,10 +465,13 @@ usage(void)
 	    "\t\tspecified by the remaining tuple.  Each number is in\n"
 	    "\t\thexadecimal, and only one block can be specified.\n"
 	    "\n"
-	    "\tzinject -n <point> [-e errno | -D msecs | -A pause]\n"
-	    "\t\t[-o value] [-f freq] pool\n"
+	    "\tzinject -n <point>[@<caller>] [-e errno | -D msecs |\n"
+	    "\t\t-A pause] [-o value] [-f freq] pool\n"
 	    "\n"
-	    "\t\tAct at a named injection point in the code.\n"
+	    "\t\tAct at a named injection point in the code, for every\n"
+	    "\t\tcaller or only when reached from function 'caller'.\n"
+	    "\t\tEvery file system operation reaches point 'zfs_enter',\n"
+	    "\t\twith its function as the caller.\n"
 	    "\t\t-e\tReturn an error once (default 'io'), then clear\n"
 	    "\t\t\tthe handler.\n"
 	    "\t\t-D\tDelay each thread that reaches the point.\n"
