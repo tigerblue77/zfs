@@ -727,15 +727,15 @@ extern void zio_fini(void);
  */
 struct zinject_record;
 extern uint32_t zio_injection_enabled;
+#ifdef ZFS_INJECT_POINTS
 extern uint32_t zio_inject_points_enabled;
+#endif
 extern int zio_inject_fault(char *name, int flags, int *id,
     struct zinject_record *record);
 extern int zio_inject_list_next(int *id, char *name, size_t buflen,
     struct zinject_record *record);
 extern int zio_inject_wait(uint64_t *state, hrtime_t timeout);
 extern int zio_clear_fault(int id);
-extern int zio_handle_func_injection(spa_t *spa, const char *tag,
-    int *error);
 
 /*
  * An injection point that passes more than its name to the handlers
@@ -775,10 +775,39 @@ typedef struct zio_inject_point {
 	boolean_t	zp_skip;
 } zio_inject_point_t;
 
+#ifdef ZFS_INJECT_POINTS
+extern int zio_handle_func_injection(spa_t *spa, const char *tag,
+    int *error);
 extern int zio_handle_point_injection(spa_t *spa, zio_inject_point_t *zp,
     int *error);
 extern uint64_t zio_inject_point_limit(spa_t *spa, const char *name,
     uint64_t align);
+#else
+/*
+ * Without ZFS_INJECT_POINTS (see sys/zfs_debug.h), no handler can exist for
+ * a point, so these do nothing and each point compiles away.
+ */
+static inline int
+zio_handle_func_injection(spa_t *spa, const char *tag, int *error)
+{
+	(void) spa, (void) tag, (void) error;
+	return (0);
+}
+
+static inline int
+zio_handle_point_injection(spa_t *spa, zio_inject_point_t *zp, int *error)
+{
+	(void) spa, (void) zp, (void) error;
+	return (0);
+}
+
+static inline uint64_t
+zio_inject_point_limit(spa_t *spa, const char *name, uint64_t align)
+{
+	(void) spa, (void) name, (void) align;
+	return (UINT64_MAX);
+}
+#endif
 extern void zio_handle_panic_injection(spa_t *spa, const char *tag,
     uint64_t type);
 extern int zio_handle_decrypt_injection(spa_t *spa, const zbookmark_phys_t *zb,

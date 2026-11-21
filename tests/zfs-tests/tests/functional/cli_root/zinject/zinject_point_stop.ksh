@@ -33,6 +33,7 @@
 . $STF_SUITE/include/libtest.shlib
 
 verify_runnable "global"
+verify_inject_points
 
 typeset DIR=$TEST_BASE_DIR/zinject_point_stop
 typeset POOL=zinject_point_stop

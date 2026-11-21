@@ -52,6 +52,7 @@
  */
 uint32_t zio_injection_enabled = 0;
 
+#ifdef ZFS_INJECT_POINTS
 /*
  * Number of injection point (ZINJECT_FUNC_FAULT) handlers registered.  Hot
  * paths with an injection point, such as zfs_enter(), test this rather than
@@ -59,6 +60,7 @@ uint32_t zio_injection_enabled = 0;
  * injection are active.
  */
 uint32_t zio_inject_points_enabled = 0;
+#endif
 
 /*
  * Data describing each zinject handler registered on the system, and
@@ -198,6 +200,7 @@ done:
 	return (injected);
 }
 
+#ifdef ZFS_INJECT_POINTS
 /*
  * Does the injection point named in a handler record match this point?  A
  * record names either the point alone ("zfs_enter"), which matches whatever
@@ -427,6 +430,7 @@ zio_handle_func_injection(spa_t *spa, const char *tag, int *error)
 
 	return (zio_handle_point_injection(spa, &zp, error));
 }
+#endif	/* ZFS_INJECT_POINTS */
 
 /*
  * Panic the system when a config change happens in the function
@@ -1299,6 +1303,10 @@ zio_inject_fault(char *name, int flags, int *id, zinject_record_t *record)
 				return (SET_ERROR(ENOENT));
 			spa = NULL;
 		} else if (record->zi_cmd == ZINJECT_FUNC_FAULT) {
+#ifndef ZFS_INJECT_POINTS
+			/* Injection points are not built into this module. */
+			return (SET_ERROR(ENOTSUP));
+#endif
 			if (record->zi_func[0] == '\0' ||
 			    record->zi_type > ZINJECT_POINT_SKIP)
 				return (SET_ERROR(EINVAL));
@@ -1352,8 +1360,10 @@ zio_inject_fault(char *name, int flags, int *id, zinject_record_t *record)
 		*id = handler->zi_id = inject_next_id++;
 		list_insert_tail(&inject_handlers, handler);
 		atomic_inc_32(&zio_injection_enabled);
+#ifdef ZFS_INJECT_POINTS
 		if (handler->zi_record.zi_cmd == ZINJECT_FUNC_FAULT)
 			atomic_inc_32(&zio_inject_points_enabled);
+#endif
 
 		zio_inject_notify();
 
@@ -1485,10 +1495,12 @@ zio_clear_fault(int id)
 		ASSERT3U(inject_delay_count, >, 0);
 		atomic_dec_32(&inject_delay_count);
 	}
+#ifdef ZFS_INJECT_POINTS
 	if (handler->zi_record.zi_cmd == ZINJECT_FUNC_FAULT) {
 		ASSERT3U(zio_inject_points_enabled, >, 0);
 		atomic_dec_32(&zio_inject_points_enabled);
 	}
+#endif
 
 	list_remove(&inject_handlers, handler);
 	rw_exit(&inject_lock);
@@ -1536,7 +1548,9 @@ zio_inject_fini(void)
 }
 
 EXPORT_SYMBOL(zio_injection_enabled);
+#ifdef ZFS_INJECT_POINTS
 EXPORT_SYMBOL(zio_inject_points_enabled);
+#endif
 EXPORT_SYMBOL(zio_inject_fault);
 EXPORT_SYMBOL(zio_inject_list_next);
 EXPORT_SYMBOL(zio_clear_fault);

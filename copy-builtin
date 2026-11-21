@@ -55,6 +55,16 @@ config ZFS_DEBUG
 	  development or troubleshooting.
 
 	  If unsure, say N.
+
+config ZFS_INJECT_POINTS
+	bool "ZFS injection points for zinject"
+	depends on ZFS
+	help
+	  Build the injection points that "zinject -n" acts at, for
+	  testing.  ZFS_DEBUG builds have them anyway.  Not advised for
+	  production: root can then pause or fail ZFS at these points.
+
+	  If unsure, say N.
 EOF
 
 sed -i '/source "fs\/ext2\/Kconfig\"/i\source "fs/zfs/Kconfig"' "$KERNEL_DIR/fs/Kconfig"

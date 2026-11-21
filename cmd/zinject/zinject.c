@@ -908,6 +908,12 @@ register_handler(const char *pool, int flags, zinject_record_t *record,
 			if (record->zi_cmd == ZINJECT_DELAY_IMPORT)
 				errmsg = "import delay injector not supported";
 			break;
+		case ENOTSUP:
+			if (record->zi_cmd == ZINJECT_FUNC_FAULT)
+				errmsg = "injection points are not built into "
+				    "this ZFS module (it needs --enable-debug "
+				    "or --enable-inject-points)";
+			break;
 		default:
 			break;
 		}

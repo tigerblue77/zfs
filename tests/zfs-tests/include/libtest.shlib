@@ -3176,6 +3176,22 @@ function write_compressible
 }
 
 #
+# Skip the test unless the ZFS module has injection points ('zinject -n'),
+# which only debug builds and builds configured with --enable-inject-points
+# have.  The probe handler is for a pool that doesn't exist, which a point
+# handler may name, and is removed at once.
+#
+function verify_inject_points
+{
+	typeset id
+
+	id=$(zinject -q -n zts:probe -e io zts_inject_probe 2>/dev/null)
+	[[ $id == +([0-9]) ]] || \
+	    log_unsupported "this ZFS module has no injection points"
+	log_must zinject -c $id
+}
+
+#
 # Print field $2 (POINT, ACTION, MATCH or INJECT) of injection point handler
 # $1 (the ID printed by 'zinject -q -n'), from the listing 'zinject' prints,
 # or nothing if there is no such handler.

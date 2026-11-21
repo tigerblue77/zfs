@@ -32,6 +32,15 @@ extern "C" {
 #include <sys/nvpair.h>
 #include <sys/zfs_debug_os.h>
 
+/*
+ * Injection points ("zinject -n") are built only into debug builds, and into
+ * other builds configured with --enable-inject-points.  Elsewhere the points
+ * compile to nothing, and zinject cannot add a handler for one.
+ */
+#if defined(ZFS_DEBUG) && !defined(ZFS_INJECT_POINTS)
+#define	ZFS_INJECT_POINTS	1
+#endif
+
 extern int zfs_flags;
 extern int zfs_recover;
 extern int zfs_free_leak_on_eio;

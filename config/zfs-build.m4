@@ -91,6 +91,47 @@ AC_DEFUN([ZFS_AC_DEBUG], [
 	AC_MSG_RESULT([$enable_debug])
 ])
 
+dnl #
+dnl # Injection points ("zinject -n"): built into debug builds always, and
+dnl # into other builds only with --enable-inject-points.  Debug builds define
+dnl # them from ZFS_DEBUG in sys/zfs_debug.h, so that every build system that
+dnl # sets ZFS_DEBUG gets them; this option adds them to a non-debug build.
+dnl #
+AC_DEFUN([ZFS_AC_INJECT_POINTS], [
+	AH_BOTTOM([
+#ifdef CONFIG_ZFS
+#undef ZFS_INJECT_POINTS
+#ifdef CONFIG_ZFS_INJECT_POINTS
+#define ZFS_INJECT_POINTS 1
+#endif
+#endif])
+
+	AC_MSG_CHECKING([whether zinject injection points will be built])
+	AC_ARG_ENABLE([inject-points],
+		[AS_HELP_STRING([--enable-inject-points],
+		[Build zinject injection points (zinject -n) into the kernel
+		module even without --enable-debug; not advised for
+		production @<:@default=same as --enable-debug@:>@])],
+		[],
+		[enable_inject_points=$enable_debug])
+
+	AS_CASE(["x$enable_inject_points"],
+		["xyes"],
+		[WITH_INJECT_POINTS="true"],
+		["xno"],
+		[AS_IF([test "x$enable_debug" = "xyes"],
+		    [AC_MSG_ERROR([--disable-inject-points needs --disable-debug: debug builds always have injection points])])
+		WITH_INJECT_POINTS=""],
+		[AC_MSG_ERROR([Unknown option $enable_inject_points])])
+
+	AS_IF([test "x$WITH_INJECT_POINTS" = "xtrue"],
+		[AC_DEFINE(ZFS_INJECT_POINTS, 1,
+		    [zinject injection points are built])])
+
+	AC_SUBST(WITH_INJECT_POINTS)
+	AC_MSG_RESULT([$enable_inject_points])
+])
+
 AC_DEFUN([ZFS_AC_DEBUGINFO_ENABLE], [
 	DEBUG_CFLAGS="$DEBUG_CFLAGS -g -fno-inline $NO_IPA_SRA"
 

@@ -65,6 +65,11 @@ CFLAGS+= -DZFS_DEBUG -g
 CFLAGS += -DNDEBUG
 .endif
 
+# zinject injection points; debug builds have them anyway (sys/zfs_debug.h).
+.if defined(WITH_INJECT_POINTS) && ${WITH_INJECT_POINTS} == "true"
+CFLAGS+= -DZFS_INJECT_POINTS
+.endif
+
 .for _SAN in KASAN KMSAN KUBSAN
 .if defined(WITH_${_SAN}) && ${WITH_${_SAN}} == "true"
 KERN_OPTS_EXTRA+= ${_SAN}

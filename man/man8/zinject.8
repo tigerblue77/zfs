@@ -450,6 +450,12 @@ or pause
 .Pq Fl A Sy pause
 each thread that reaches it, or make it skip its step
 .Pq Fl A Sy skip .
+Injection points are built only into debug builds, and into builds
+configured with
+.Fl -enable-inject-points ;
+elsewhere they are not in the module, and
+.Fl n
+fails.
 .It Fl P Sy import Ns | Ns Sy export
 Delay a future import or export
 .Pq requires Fl s .

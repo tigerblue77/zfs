@@ -21,6 +21,7 @@ check:
 # For FreeBSD, use debug options from ./configure if not overridden.
 WITH_DEBUG ?= @WITH_DEBUG@
 WITH_INVARIANTS ?= @WITH_INVARIANTS@
+WITH_INJECT_POINTS ?= @WITH_INJECT_POINTS@
 
 # Filter out options that FreeBSD make doesn't understand
 getflags = ( \
@@ -44,6 +45,7 @@ echo $$fmakeflags \
 )
 FMAKEFLAGS = -C @abs_srcdir@ -f Makefile.bsd $(shell $(getflags))
 FMAKEFLAGS += WITH_DEBUG=$(WITH_DEBUG) WITH_INVARIANTS=$(WITH_INVARIANTS)
+FMAKEFLAGS += WITH_INJECT_POINTS=$(WITH_INJECT_POINTS)
 
 ifneq (@abs_srcdir@,@abs_builddir@)
 FMAKEFLAGS += MAKEOBJDIR=@abs_builddir@

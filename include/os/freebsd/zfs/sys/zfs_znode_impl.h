@@ -115,18 +115,22 @@ typedef struct zfs_soft_state {
 #define	zn_rlimit_fsize_uio(zp, uio) \
     vn_rlimit_fsize(ZTOV(zp), GET_UIO_STRUCT(uio), zfs_uio_td(uio))
 
+#ifdef ZFS_INJECT_POINTS
 extern uint32_t zio_inject_points_enabled;
 extern int zfs_enter_inject(zfsvfs_t *zfsvfs, const char *tag);
+#endif
 
 /* Called on entry to each ZFS vnode and vfs operation  */
 static inline int
 zfs_enter(zfsvfs_t *zfsvfs, const char *tag)
 {
+#ifdef ZFS_INJECT_POINTS
 	if (__predict_false(zio_inject_points_enabled)) {
 		int error = zfs_enter_inject(zfsvfs, tag);
 		if (error != 0)
 			return (error);
 	}
+#endif
 	ZFS_TEARDOWN_ENTER_READ(zfsvfs, tag);
 	if (__predict_false((zfsvfs)->z_unmounted)) {
 		ZFS_TEARDOWN_EXIT_READ(zfsvfs, tag);
