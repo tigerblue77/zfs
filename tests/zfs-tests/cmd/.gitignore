@@ -51,6 +51,7 @@
 /rename_dir
 /rm_lnkcnt_zero_file
 /send_doall
+/split_on_signal
 /statx
 /statfs_nomount
 /stride_dd

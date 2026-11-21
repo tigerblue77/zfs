@@ -115,6 +115,11 @@ scripts_zfs_tests_bin_PROGRAMS += %D%/send_doall
 	libzfs.la \
 	libnvpair.la
 
+scripts_zfs_tests_bin_PROGRAMS += %D%/split_on_signal
+%C%_split_on_signal_LDADD = \
+	libzfs.la \
+	libnvpair.la
+
 scripts_zfs_tests_bin_PROGRAMS += %D%/stride_dd
 %C%_stride_dd_LDADD = -lrt
 
