@@ -183,6 +183,16 @@ mounted, after the task has released the dataset and before it returns.
 .It Sy zfs_freesp:changed
 On Linux, in a truncation or a hole punch, after the file is changed and
 before the change is logged in the ZIL.
+.It Sy raidz_reflow_sync:committed
+In a RAID-Z expansion
+.Pq Xr zpool-attach 8 ,
+in the sync of a transaction group, after the progress of the reflow is
+recorded in its uberblock, and before i/o is mapped with that progress, which
+happens once the transaction group is synced.
+.It Sy vdev_raidz_io_start:copied
+In a RAID-Z expansion, in an i/o to data that the reflow has copied but whose
+progress is not synced yet, which the i/o maps to its old location, after the
+i/o has taken the expansion range lock and before it is issued.
 .El
 .
 .It Xo

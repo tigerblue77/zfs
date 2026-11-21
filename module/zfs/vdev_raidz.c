@@ -2890,6 +2890,16 @@ vdev_raidz_io_start(zio_t *zio)
 			if (next_offset == UINT64_MAX) {
 				next_offset = synced_offset;
 			}
+			/*
+			 * Only for an i/o to rows that the reflow has copied
+			 * but not yet synced as copied, which still map to
+			 * their old location.
+			 */
+			if (zio->io_offset < next_offset &&
+			    zio->io_offset + zio->io_size > synced_offset) {
+				zio_inject_point(vd->vdev_spa,
+				    ZIO_INJECT_POINT_RAIDZ_IO_COPIED);
+			}
 		}
 
 		rm = vdev_raidz_map_alloc_expanded(zio,
@@ -4376,6 +4386,8 @@ raidz_reflow_sync(void *arg, dmu_tx_t *tx)
 	VERIFY0(zap_update(spa->spa_meta_objset,
 	    vd->vdev_top_zap, VDEV_TOP_ZAP_RAIDZ_EXPAND_BYTES_COPIED,
 	    sizeof (vre->vre_bytes_copied), 1, &vre->vre_bytes_copied, tx));
+
+	zio_inject_point(spa, ZIO_INJECT_POINT_REFLOW_COMMITTED);
 }
 
 static void
