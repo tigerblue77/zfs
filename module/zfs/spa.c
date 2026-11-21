@@ -9498,6 +9498,51 @@ spa_split_dtl_free_sync(void *arg, dmu_tx_t *tx)
 		space_map_free_obj(mos, ssda->ssda_objs[i], tx);
 }
 
+typedef struct spa_split_log_arg {
+	spa_t		*ssla_spa;	/* the new pool */
+	uint64_t	*ssla_arrays;	/* metaslab arrays of the logs */
+	uint64_t	*ssla_counts;	/* entries in each of them */
+	uint_t		ssla_count;	/* nitems in ssla_arrays */
+} spa_split_log_arg_t;
+
+/*
+ * Record the metaslab array of every log top-level vdev that has one into
+ * arrays[], and its number of entries into counts[], advancing *idxp.
+ * The new pool leaves the logs out: a hole takes the place of a log
+ * among its other top-level vdevs, and it ends at the last of those.
+ */
+static void
+spa_split_collect_logs(vdev_t *rvd, uint64_t *arrays, uint64_t *counts,
+    uint_t *idxp)
+{
+	for (uint64_t c = 0; c < rvd->vdev_children; c++) {
+		vdev_t *tvd = rvd->vdev_child[c];
+
+		if (!tvd->vdev_islog || tvd->vdev_ms_array == 0)
+			continue;
+		arrays[*idxp] = tvd->vdev_ms_array;
+		counts[(*idxp)++] = tvd->vdev_asize >> tvd->vdev_ms_shift;
+	}
+}
+
+/*
+ * Callback that frees the metaslab arrays of the logs, and the space maps
+ * that they name, from the new pool MOS, which nothing in the new pool
+ * refers to.  The object that the ZAP of a log names is freed with the
+ * ZAP, by spa_sync_config_object().
+ */
+static void
+spa_split_log_free_sync(void *arg, dmu_tx_t *tx)
+{
+	spa_split_log_arg_t *ssla = arg;
+	objset_t *mos = ssla->ssla_spa->spa_meta_objset;
+
+	for (uint_t i = 0; i < ssla->ssla_count; i++) {
+		vdev_destroy_ms_array(mos, ssla->ssla_arrays[i],
+		    ssla->ssla_counts[i], tx);
+	}
+}
+
 /*
  * Split a set of devices from their mirrors, and create a new pool from them.
  */
@@ -9515,6 +9560,9 @@ spa_vdev_split_mirror(spa_t *spa, const char *newname, nvlist_t *config,
 	vdev_t *rvd, **vml = NULL;	/* vdev modify list */
 	uint64_t *dtl_objs = NULL;	/* DTL objs from original pool */
 	uint_t ndtl = 0, nleaves;
+	uint64_t *log_arrays = NULL;	/* metaslab arrays of the logs */
+	uint64_t *log_counts = NULL;	/* entries in each of them */
+	uint_t nlogs = 0, ntvds = 0;
 	boolean_t activate_slog;
 
 	ASSERT(spa_writeable(spa));
@@ -9667,6 +9715,12 @@ spa_vdev_split_mirror(spa_t *spa, const char *newname, nvlist_t *config,
 	dtl_objs = kmem_zalloc(nleaves * sizeof (uint64_t), KM_SLEEP);
 	spa_split_collect_dtl(spa->spa_root_vdev, dtl_objs, &ndtl);
 
+	/* Record the metaslab arrays of the logs. */
+	ntvds = rvd->vdev_children;
+	log_arrays = kmem_zalloc(ntvds * sizeof (uint64_t), KM_SLEEP);
+	log_counts = kmem_zalloc(ntvds * sizeof (uint64_t), KM_SLEEP);
+	spa_split_collect_logs(rvd, log_arrays, log_counts, &nlogs);
+
 	/* stop writers from using the disks */
 	for (c = 0; c < children; c++) {
 		if (vml[c] != NULL)
@@ -9777,6 +9831,21 @@ spa_vdev_split_mirror(spa_t *spa, const char *newname, nvlist_t *config,
 		    spa_split_dtl_free_sync, &ssda, 0, ZFS_SPACE_CHECK_NONE));
 	}
 
+	/*
+	 * Likewise free the metaslab arrays and space maps of the logs,
+	 * which the new pool leaves out.
+	 */
+	if (nlogs != 0) {
+		spa_split_log_arg_t ssla;
+
+		ssla.ssla_spa = newspa;
+		ssla.ssla_arrays = log_arrays;
+		ssla.ssla_counts = log_counts;
+		ssla.ssla_count = nlogs;
+		VERIFY0(dsl_sync_task(spa_name(newspa), NULL,
+		    spa_split_log_free_sync, &ssla, 0, ZFS_SPACE_CHECK_NONE));
+	}
+
 	/* set the props */
 	if (props != NULL) {
 		spa_configfile_set(newspa, props, B_FALSE);
@@ -9874,6 +9943,10 @@ spa_vdev_split_mirror(spa_t *spa, const char *newname, nvlist_t *config,
 	kmem_free(vml, children * sizeof (vdev_t *));
 	if (dtl_objs != NULL)
 		kmem_free(dtl_objs, nleaves * sizeof (uint64_t));
+	if (log_arrays != NULL) {
+		kmem_free(log_arrays, ntvds * sizeof (uint64_t));
+		kmem_free(log_counts, ntvds * sizeof (uint64_t));
+	}
 
 	/* if we're not going to mount the filesystems in userland, export */
 	if (exp)
@@ -9909,6 +9982,10 @@ out:
 	kmem_free(vml, children * sizeof (vdev_t *));
 	if (dtl_objs != NULL)
 		kmem_free(dtl_objs, nleaves * sizeof (uint64_t));
+	if (log_arrays != NULL) {
+		kmem_free(log_arrays, ntvds * sizeof (uint64_t));
+		kmem_free(log_counts, ntvds * sizeof (uint64_t));
+	}
 
 	return (error);
 }
@@ -10750,8 +10827,12 @@ spa_sync_config_object(spa_t *spa, dmu_tx_t *tx)
 			    vdzap) == ENOENT) {
 				/*
 				 * ZAP is listed in old AVZ but not in new one;
-				 * destroy it
+				 * destroy it.  The ZAP of a top-level vdev that
+				 * a split pool left out still names the object
+				 * of the vdev's unflushed txgs: free it too.
 				 */
+				vdev_destroy_ms_flush_data(spa->spa_meta_objset,
+				    vdzap, tx);
 				VERIFY0(zap_destroy(spa->spa_meta_objset, vdzap,
 				    tx));
 			}

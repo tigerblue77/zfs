@@ -4293,24 +4293,47 @@ vdev_validate_aux(vdev_t *vd)
 	return (0);
 }
 
-static void
-vdev_destroy_ms_flush_data(vdev_t *vd, dmu_tx_t *tx)
+/*
+ * Free the object that a top-level vdev's ZAP names for the unflushed
+ * txgs of the vdev's metaslabs, if there is one.
+ */
+void
+vdev_destroy_ms_flush_data(objset_t *mos, uint64_t top_zap, dmu_tx_t *tx)
 {
-	objset_t *mos = spa_meta_objset(vd->vdev_spa);
-
-	if (vd->vdev_top_zap == 0)
-		return;
-
 	uint64_t object = 0;
-	int err = zap_lookup(mos, vd->vdev_top_zap,
+	int err = zap_lookup(mos, top_zap,
 	    VDEV_TOP_ZAP_MS_UNFLUSHED_PHYS_TXGS, sizeof (uint64_t), 1, &object);
 	if (err == ENOENT)
 		return;
 	VERIFY0(err);
 
 	VERIFY0(dmu_object_free(mos, object, tx));
-	VERIFY0(zap_remove(mos, vd->vdev_top_zap,
+	VERIFY0(zap_remove(mos, top_zap,
 	    VDEV_TOP_ZAP_MS_UNFLUSHED_PHYS_TXGS, tx));
+}
+
+/*
+ * Free the space maps that the first count entries of a metaslab array
+ * name, and the array itself.
+ */
+void
+vdev_destroy_ms_array(objset_t *mos, uint64_t ms_array, uint64_t count,
+    dmu_tx_t *tx)
+{
+	size_t array_bytes = count * sizeof (uint64_t);
+	uint64_t *smobj_array = kmem_alloc(array_bytes, KM_SLEEP);
+	VERIFY0(dmu_read(mos, ms_array, 0, array_bytes, smobj_array, 0));
+
+	for (uint64_t i = 0; i < count; i++) {
+		uint64_t smobj = smobj_array[i];
+		if (smobj == 0)
+			continue;
+
+		space_map_free_obj(mos, smobj, tx);
+	}
+
+	kmem_free(smobj_array, array_bytes);
+	VERIFY0(dmu_object_free(mos, ms_array, tx));
 }
 
 /*
@@ -4324,23 +4347,10 @@ vdev_destroy_spacemaps(vdev_t *vd, dmu_tx_t *tx)
 		return;
 
 	objset_t *mos = vd->vdev_spa->spa_meta_objset;
-	uint64_t array_count = vd->vdev_asize >> vd->vdev_ms_shift;
-	size_t array_bytes = array_count * sizeof (uint64_t);
-	uint64_t *smobj_array = kmem_alloc(array_bytes, KM_SLEEP);
-	VERIFY0(dmu_read(mos, vd->vdev_ms_array, 0,
-	    array_bytes, smobj_array, 0));
-
-	for (uint64_t i = 0; i < array_count; i++) {
-		uint64_t smobj = smobj_array[i];
-		if (smobj == 0)
-			continue;
-
-		space_map_free_obj(mos, smobj, tx);
-	}
-
-	kmem_free(smobj_array, array_bytes);
-	VERIFY0(dmu_object_free(mos, vd->vdev_ms_array, tx));
-	vdev_destroy_ms_flush_data(vd, tx);
+	vdev_destroy_ms_array(mos, vd->vdev_ms_array,
+	    vd->vdev_asize >> vd->vdev_ms_shift, tx);
+	if (vd->vdev_top_zap != 0)
+		vdev_destroy_ms_flush_data(mos, vd->vdev_top_zap, tx);
 	vd->vdev_ms_array = 0;
 }
 

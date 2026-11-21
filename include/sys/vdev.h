@@ -83,6 +83,10 @@ extern void vdev_destroy_unlink_zap(vdev_t *vd, uint64_t zapobj,
 extern uint64_t vdev_create_link_zap(vdev_t *vd, dmu_tx_t *tx);
 extern void vdev_construct_zaps(vdev_t *vd, dmu_tx_t *tx);
 extern void vdev_destroy_spacemaps(vdev_t *vd, dmu_tx_t *tx);
+extern void vdev_destroy_ms_array(objset_t *mos, uint64_t ms_array,
+    uint64_t count, dmu_tx_t *tx);
+extern void vdev_destroy_ms_flush_data(objset_t *mos, uint64_t top_zap,
+    dmu_tx_t *tx);
 extern void vdev_indirect_mark_obsolete(vdev_t *vd, uint64_t offset,
     uint64_t size);
 extern void spa_vdev_indirect_mark_obsolete(spa_t *spa, uint64_t vdev,
