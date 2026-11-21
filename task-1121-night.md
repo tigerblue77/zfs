@@ -13,8 +13,8 @@ Main's message names your window. Default assignment:
 | window | VM | wake-up | whole content fits if begun by | hard end (HE) | items, in this order |
 |---|---|---|---|---|---|
 | S1 | 107 | 19:00Z | 19:10Z | 02:25Z | X3, X4, V10P, restore |
-| S2 | 106 | 02:30Z | 02:40Z (03:10Z if TQL3 is staged) | 07:35Z | TQL3, TQL2 (shape A), restore |
-| S3 | 105 | 07:40Z | 07:50Z | 10:00Z | HRIG2's measured part and step 10, only if they have not run by day; restore |
+| S2 | 106 | 02:30Z | 02:40Z (03:10Z if TQL3 is staged) | 05:30Z | TQL3, restore |
+| S3 | 105 | 05:35Z | 05:45Z | 10:00Z | HRIG2's measured part and step 10, only if they have not run by day; AR3; restore |
 | U | all three | 10:05Z | - | - | unmask the timers (6.7), nothing else |
 
 "Begun by" is the latest time at which the window's first step can begin with every item still fitting; a later start drops items from the end (4.3). The windows do not overlap and no VM works past its HE: that is the only coordination, because no VM can see another.
@@ -27,8 +27,8 @@ Caps, in minutes, used by the start rule (each task's own maximum, split): prep 
 | X4 | task-1120-x4.md (9d671348412e196a) | 45 | 90 | 15 | 0-4 / 5 / 6-7 |
 | V10P | task-1120-v10p.md (4f9dd2d59470cee7) | 40 | 90 | 15 | 0-4 / 5-6 / 7 |
 | TQL3 | task-1121-tql3.md (9d1858fee4e6603d) | 30 | 90 | 15 | 0-4 / 5-6 / 7 |
-| TQL2 | task-1120-tql2.md (9137c2a010885c7a), shape A | 50 | 60 | 15 | 0-4 / 5-6 / 7 |
 | HRIG2 | task-1121-hrig2.md (23e55484fc947cc7) | 55 | 75 | 20 | 0-6 / 7-9 / 10 |
+| AR3 | task-1121-ar3.md (27db6a8f49aff169) | 70 | 115 | 30 | 0-5 / 6 / 7-END |
 | restore | this file, 6.1 to 6.6 | - | - | 35 | - |
 
 ## 2. Rules for the whole night
@@ -148,5 +148,5 @@ apt-daily-upgrade may start at once (it missed its morning run): let it run. Del
 ## 7. Per VM
 
 - **VM 107 (S1).** X3 is staged by day if main's message asks for it. X3's step 6 removes `/var/tmp/task-1120-x3` and keeps `/var/log/task-1120-x3` whole: X4 reads it, and X4's step 0 checks both. X4 and V10P are not staged by day: S1 runs their steps 0 to 4.
-- **VM 106 (S2).** TQL3 is staged by day if main's message asks for it. TQL2 runs in shape A only: its step 0 decides the shape (8 CPUs, one NUMA node), and any other shape is its stop.
-- **VM 105 (S3, a fallback).** HRIG2's measured part runs by day on a plain GO from main when it can; S3 then has only the restore. S3 runs HRIG2's measured part only if HRIG2 is at its READY line at the window start: its prep does not fit S3. HRIG2's step 10 reboots into Debian inside S3, as the task says: resume by your own arrangement, then 4.2's checks (the timers stay masked), HRIG2's report, then the restore.
+- **VM 106 (S2).** TQL3 is staged by day if main's message asks for it. TQL2 is not run tonight.
+- **VM 105 (S3).** HRIG2's measured part runs by day on a plain GO from main when it can. S3 runs HRIG2's measured part only if HRIG2 is at its READY line at the window start: its prep does not fit S3. HRIG2's step 10 reboots into Debian inside S3, as the task says: resume by your own arrangement, then 4.2's checks (the timers stay masked), HRIG2's report, then the next item. AR3 is not staged: S3 runs it from its step 0, and the start rule leaves it out when HRIG2 ran in S3. AR3's step 4 boots 7.0.14-25-pve and its END boots back into Debian, both inside S3: before each, a one-shot scheduled task of your own session 5 minutes ahead; after each, 4.2's checks (the timers stay masked), then the task goes on. AR3's END keeps its four trees under `~/work` (`z-P3`, `z-P3C2`, `z-P3C3`, `z-P3A`): the restore leaves them.
