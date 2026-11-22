@@ -145,6 +145,7 @@ typedef struct trim_args {
 	uint64_t	trim_extent_bytes_max;	/* Maximum TRIM I/O size */
 	uint64_t	trim_extent_bytes_min;	/* Minimum TRIM I/O size */
 	enum trim_flag	trim_flags;		/* TRIM flags (secure) */
+	const boolean_t	*trim_stop;		/* Simple TRIM: stop if set */
 
 	/*
 	 * These fields are updated by vdev_trim_ranges().
@@ -540,7 +541,9 @@ vdev_trim_range(trim_args_t *ta, uint64_t start, uint64_t size)
 	if ((ta->trim_type == TRIM_TYPE_MANUAL &&
 	    vdev_trim_should_stop(vd)) ||
 	    (ta->trim_type == TRIM_TYPE_AUTO &&
-	    vdev_autotrim_should_stop(vd->vdev_top))) {
+	    vdev_autotrim_should_stop(vd->vdev_top)) ||
+	    (ta->trim_type == TRIM_TYPE_SIMPLE && ta->trim_stop != NULL &&
+	    *ta->trim_stop)) {
 		mutex_enter(&vd->vdev_trim_io_lock);
 		vd->vdev_trim_inflight[ta->trim_type]--;
 		mutex_exit(&vd->vdev_trim_io_lock);
@@ -1728,10 +1731,12 @@ vdev_trim_l2arc(spa_t *spa)
 
 /*
  * A wrapper which calls vdev_trim_ranges(). It is intended to be called
- * on leaf vdevs.
+ * on leaf vdevs.  If stop is not NULL, setting *stop ends the TRIM early,
+ * before its next TRIM I/O, and makes it return EINTR.
  */
 int
-vdev_trim_simple(vdev_t *vd, uint64_t start, uint64_t size)
+vdev_trim_simple(vdev_t *vd, uint64_t start, uint64_t size,
+    const boolean_t *stop)
 {
 	trim_args_t ta = {0};
 	zfs_range_seg64_t physical_rs;
@@ -1753,6 +1758,7 @@ vdev_trim_simple(vdev_t *vd, uint64_t start, uint64_t size)
 	ta.trim_extent_bytes_max = zfs_trim_extent_bytes_max;
 	ta.trim_extent_bytes_min = SPA_MINBLOCKSIZE;
 	ta.trim_flags = 0;
+	ta.trim_stop = stop;
 
 	ASSERT3U(physical_rs.rs_end, >=, physical_rs.rs_start);
 

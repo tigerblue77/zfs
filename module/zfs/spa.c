@@ -2358,6 +2358,7 @@ spa_unload(spa_t *spa)
 			vdev_autotrim_stop_all(spa);
 			vdev_rebuild_stop_all(spa);
 			l2arc_spa_rebuild_stop(spa);
+			l2arc_spa_feed_stop(spa);
 		}
 
 		spa_config_enter(spa, SCL_ALL, FTAG, RW_WRITER);
@@ -8074,6 +8075,7 @@ spa_export_common(const char *pool, int new_state, nvlist_t **oldconfig,
 		vdev_autotrim_stop_all(spa);
 		vdev_rebuild_stop_all(spa);
 		l2arc_spa_rebuild_stop(spa);
+		l2arc_spa_feed_stop(spa);
 
 		/*
 		 * We want this to be reflected on every label,
