@@ -1452,14 +1452,18 @@ spa_vdev_config_exit_impl(spa_t *spa, vdev_t *vd, uint64_t txg, int error,
 	 * and the clear needs spa_namespace_lock.  At the end of the
 	 * operation, wait without the lock, as spa_sync_allpools() does.
 	 * spa_vdev_top_lock still keeps out other vdev changes, and the
-	 * hold makes an export fail with EBUSY.
+	 * hold makes an export fail with EBUSY.  A load of the pool may
+	 * end meanwhile (the removal thread restarted by spa_load_impl()
+	 * gets here), so spa_load() leaves the hold out of spa_minref.
 	 */
 	if (error == 0 && txg_wait_synced_flags(spa->spa_dsl_pool, txg,
 	    final ? TXG_WAIT_SUSPEND : TXG_WAIT_NONE) != 0) {
 		spa_open_ref(spa, FTAG);
+		spa->spa_vdev_exit_holds++;
 		spa_namespace_exit(FTAG);
 		txg_wait_synced(spa->spa_dsl_pool, txg);
 		spa_namespace_enter(FTAG);
+		spa->spa_vdev_exit_holds--;
 		spa_close(spa, FTAG);
 	}
 

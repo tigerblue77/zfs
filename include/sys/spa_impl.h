@@ -425,6 +425,7 @@ struct spa {
 	uint8_t		spa_claiming;		/* pool is doing zil_claim() */
 	boolean_t	spa_is_root;		/* pool is root */
 	int		spa_minref;		/* num refs when first opened */
+	uint_t		spa_vdev_exit_holds;	/* not counted in spa_minref */
 	spa_mode_t	spa_mode;		/* SPA_MODE_{READ|WRITE} */
 	boolean_t	spa_read_spacemaps;	/* spacemaps available if ro */
 	spa_log_state_t spa_log_state;		/* log state */

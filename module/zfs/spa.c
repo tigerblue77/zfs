@@ -3785,10 +3785,13 @@ spa_load(spa_t *spa, spa_load_state_t state, spa_import_type_t type)
 
 	/*
 	 * Don't count references from objsets that are already closed
-	 * and are making their way through the eviction process.
+	 * and are making their way through the eviction process, nor
+	 * the hold of a vdev change that waits for a suspended pool
+	 * without the namespace lock in spa_vdev_exit().
 	 */
 	spa_evicting_os_wait(spa);
-	spa->spa_minref = zfs_refcount_count(&spa->spa_refcount);
+	spa->spa_minref = zfs_refcount_count(&spa->spa_refcount) -
+	    spa->spa_vdev_exit_holds;
 	if (error) {
 		if (error != EEXIST) {
 			spa->spa_loaded_ts.tv_sec = 0;
