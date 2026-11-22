@@ -965,7 +965,6 @@ spa_remove(spa_t *spa)
 	ASSERT3U(zfs_refcount_count(&spa->spa_refcount), ==, 0);
 	ASSERT0(spa->spa_waiters);
 	ASSERT0(spa->spa_stats_holds);
-	ASSERT0(spa->spa_vdev_change_holds);
 
 	nvlist_free(spa->spa_config_splitting);
 
@@ -1348,31 +1347,6 @@ spa_l2cache_activate(vdev_t *vd)
  */
 
 /*
- * A vdev change that waits without spa_namespace_lock counts itself in
- * spa_vdev_change_holds, under the lock, for as long as it does: export
- * fails with EBUSY while the count is not zero, and spa_unload() waits for
- * it.  It takes no reference on the pool: the removal thread, which
- * spa_load_impl() restarts before it retakes the namespace lock, can be
- * waiting when the load ends, and spa_load() sets spa_minref from the
- * reference count then.
- */
-static void
-spa_vdev_change_hold(spa_t *spa)
-{
-	ASSERT(spa_namespace_held());
-	spa->spa_vdev_change_holds++;
-}
-
-static void
-spa_vdev_change_rele(spa_t *spa)
-{
-	ASSERT(spa_namespace_held());
-	ASSERT3U(spa->spa_vdev_change_holds, >, 0);
-	if (--spa->spa_vdev_change_holds == 0)
-		spa_namespace_broadcast();
-}
-
-/*
  * Take spa_namespace_lock and then the config lock as writer, at the start
  * of a vdev change.  The writer waits for every reader, spa_sync() included,
  * which holds SCL_CONFIG for a whole txg: as long as a device that does not
@@ -1380,7 +1354,7 @@ spa_vdev_change_rele(spa_t *spa)
  * on the system needs the namespace lock, so wait for the config lock
  * without it, and then only try to retake it, since it is taken before the
  * config lock.  spa_vdev_top_lock keeps out other vdev changes meanwhile,
- * and spa_vdev_change_hold() makes an export fail with EBUSY.
+ * and the hold makes an export fail with EBUSY.
  */
 static uint64_t
 spa_vdev_enter_locks(spa_t *spa)
@@ -1388,7 +1362,7 @@ spa_vdev_enter_locks(spa_t *spa)
 	spa_namespace_enter(FTAG);
 
 	if (!spa_config_tryenter(spa, SCL_ALL, spa, RW_WRITER)) {
-		spa_vdev_change_hold(spa);
+		spa_open_ref(spa, FTAG);
 		spa_namespace_exit(FTAG);
 		for (;;) {
 			spa_config_enter(spa, SCL_ALL, spa, RW_WRITER);
@@ -1399,7 +1373,7 @@ spa_vdev_enter_locks(spa_t *spa)
 			spa_namespace_enter(FTAG);
 			spa_namespace_exit(FTAG);
 		}
-		spa_vdev_change_rele(spa);
+		spa_close(spa, FTAG);
 	}
 
 	ASSERT0P(spa->spa_export_thread);
@@ -1518,11 +1492,11 @@ spa_vdev_config_exit_impl(spa_t *spa, vdev_t *vd, uint64_t txg, int error,
 	 * sync lasts as long as a device that does not answer, or until
 	 * zpool clear, which needs the lock, resumes a suspended pool, and
 	 * the teardown waits for the I/O of the pool.  spa_vdev_top_lock
-	 * still keeps out other vdev changes, spa_vdev_change_hold() makes
-	 * an export fail with EBUSY, and vd is no longer in the vdev tree.
+	 * still keeps out other vdev changes, the hold makes an export
+	 * fail with EBUSY, and vd is no longer in the vdev tree.
 	 */
 	if (final) {
-		spa_vdev_change_hold(spa);
+		spa_open_ref(spa, FTAG);
 		spa_namespace_exit(FTAG);
 		if (zio_injection_enabled) {
 			int ignored = 0;
@@ -1561,7 +1535,7 @@ spa_vdev_config_exit_impl(spa_t *spa, vdev_t *vd, uint64_t txg, int error,
 
 	if (final) {
 		spa_namespace_enter(FTAG);
-		spa_vdev_change_rele(spa);
+		spa_close(spa, FTAG);
 	}
 
 	/*
@@ -1595,14 +1569,8 @@ spa_vdev_exit(spa_t *spa, vdev_t *vd, uint64_t txg, int error)
 	vdev_rebuild_restart(spa);
 
 	spa_vdev_config_exit_impl(spa, vd, txg, error, FTAG, B_TRUE);
-
-	/*
-	 * Release spa_vdev_top_lock first: once the namespace lock is free,
-	 * spa_unload() may stop waiting for spa_vdev_change_holds and free
-	 * the pool, if this change is the removal thread.
-	 */
-	mutex_exit(&spa->spa_vdev_top_lock);
 	spa_namespace_exit(FTAG);
+	mutex_exit(&spa->spa_vdev_top_lock);
 
 	return (error);
 }
