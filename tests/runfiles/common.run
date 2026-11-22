@@ -1207,7 +1207,7 @@ tags = ['functional', 'userquota']
 [tests/functional/vdev_disk:Linux]
 pre =
 post =
-tests = ['page_alignment']
+tests = ['page_alignment', 'zil_write_cgroup']
 tags = ['functional', 'vdev_disk']
 
 [tests/functional/vdev_zaps]
