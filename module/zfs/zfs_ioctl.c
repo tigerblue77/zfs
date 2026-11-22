@@ -3980,6 +3980,7 @@ zfs_ioc_create(const char *fsname, nvlist_t *innvl, nvlist_t *outnvl)
 	dmu_objset_type_t type;
 	boolean_t is_insensitive = B_FALSE;
 	dsl_crypto_params_t *dcp = NULL;
+	uint64_t volblocksize = 0;
 
 	type = (dmu_objset_type_t)fnvlist_lookup_int32(innvl, "type");
 	(void) nvlist_lookup_nvlist(innvl, "props", &nvprops);
@@ -4008,7 +4009,7 @@ zfs_ioc_create(const char *fsname, nvlist_t *innvl, nvlist_t *outnvl)
 		return (SET_ERROR(EINVAL));
 
 	if (type == DMU_OST_ZVOL) {
-		uint64_t volsize, volblocksize;
+		uint64_t volsize;
 
 		if (nvprops == NULL)
 			return (SET_ERROR(EINVAL));
@@ -4066,8 +4067,21 @@ zfs_ioc_create(const char *fsname, nvlist_t *innvl, nvlist_t *outnvl)
 	 * It would be nice to do this atomically.
 	 */
 	if (error == 0) {
-		error = zfs_set_prop_nvlist(fsname, ZPROP_SRC_LOCAL,
-		    nvprops, outnvl);
+		/*
+		 * zvol_create_cb() took volblocksize out of nvprops, so
+		 * zfs_check_settable() never sees it: check it against the
+		 * encryption suite the volume was created with.
+		 */
+		if (type == DMU_OST_ZVOL &&
+		    volblocksize > SPA_OLD_MAXBLOCKSIZE &&
+		    (error = dsl_crypto_check_blksz(fsname,
+		    volblocksize)) != 0) {
+			fnvlist_add_int32(outnvl,
+			    zfs_prop_to_name(ZFS_PROP_VOLBLOCKSIZE), error);
+		} else {
+			error = zfs_set_prop_nvlist(fsname, ZPROP_SRC_LOCAL,
+			    nvprops, outnvl);
+		}
 		if (error != 0) {
 			spa_t *spa;
 			int error2;
@@ -5460,6 +5474,9 @@ zfs_check_settable(const char *dsname, nvpair_t *pair, cred_t *cr)
 				return (SET_ERROR(ENOTSUP));
 			}
 			spa_close(spa, FTAG);
+
+			if ((err = dsl_crypto_check_blksz(dsname, intval)) != 0)
+				return (err);
 		}
 		break;
 

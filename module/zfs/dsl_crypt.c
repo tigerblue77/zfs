@@ -1183,6 +1183,58 @@ dsl_dir_get_crypt(dsl_dir_t *dd, uint64_t *crypt)
 	    DSL_CRYPTO_KEY_CRYPTO_SUITE, 8, 1, crypt));
 }
 
+/*
+ * Refuse a record or volume block size that the encryption suite of
+ * dataset dsname cannot encrypt in one operation.
+ */
+int
+dsl_crypto_check_blksz(const char *dsname, uint64_t blksz)
+{
+	dsl_pool_t *dp;
+	dsl_dir_t *dd;
+	uint64_t crypt;
+	int ret;
+
+	ret = dsl_pool_hold(dsname, FTAG, &dp);
+	if (ret != 0)
+		return (ret);
+
+	ret = dsl_dir_hold(dp, dsname, FTAG, &dd, NULL);
+	if (ret == 0) {
+		ret = dsl_dir_get_crypt(dd, &crypt);
+		if (ret == 0 && blksz > zio_crypt_max_blksz(crypt))
+			ret = SET_ERROR(ZFS_ERR_BADPROP);
+		dsl_dir_rele(dd, FTAG);
+	}
+
+	dsl_pool_rele(dp, FTAG);
+	return (ret);
+}
+
+/*
+ * Return the largest data block that can be encrypted for objset os.
+ * Blocks of a raw receive arrive encrypted, so only writes encrypted
+ * here, which need the key loaded, are limited.
+ */
+uint64_t
+dsl_crypto_max_blksz(objset_t *os)
+{
+	dsl_crypto_key_t *dck;
+	uint64_t maxbs = SPA_MAXBLOCKSIZE;
+
+	if (!os->os_encrypted || os->os_raw_receive ||
+	    os->os_dsl_dataset == NULL)
+		return (maxbs);
+
+	if (spa_keystore_lookup_key(os->os_spa,
+	    os->os_dsl_dataset->ds_object, FTAG, &dck) == 0) {
+		maxbs = zio_crypt_max_blksz(dck->dck_key.zk_crypt);
+		spa_keystore_dsl_key_rele(os->os_spa, dck, FTAG);
+	}
+
+	return (maxbs);
+}
+
 static void
 dsl_crypto_key_sync_impl(objset_t *mos, uint64_t dckobj, uint64_t crypt,
     uint64_t root_ddobj, uint64_t guid, uint8_t *iv, uint8_t *mac,

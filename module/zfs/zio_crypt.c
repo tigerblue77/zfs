@@ -204,6 +204,23 @@ const zio_crypt_info_t zio_crypt_table[ZIO_CRYPT_FUNCTIONS] = {
 	{SUN_CKM_AES_GCM,	ZC_TYPE_GCM,	32,	"aes-256-gcm"}
 };
 
+/*
+ * Return the largest power-of-two block size that suite crypt can encrypt
+ * in one operation.  CCM encodes the payload length in the
+ * 15 - ZIO_DATA_IV_LEN bytes that the nonce leaves free, so it cannot
+ * take a block of 2^24 bytes.
+ */
+uint64_t
+zio_crypt_max_blksz(uint64_t crypt)
+{
+	if (crypt < ZIO_CRYPT_FUNCTIONS &&
+	    zio_crypt_table[crypt].ci_crypt_type == ZC_TYPE_CCM) {
+		return (MIN(SPA_MAXBLOCKSIZE,
+		    1ULL << (NBBY * (15 - ZIO_DATA_IV_LEN) - 1)));
+	}
+	return (SPA_MAXBLOCKSIZE);
+}
+
 void
 zio_crypt_key_destroy(zio_crypt_key_t *key)
 {

@@ -97,6 +97,7 @@ typedef struct zio_crypt_key {
 } zio_crypt_key_t;
 
 void zio_crypt_key_destroy(zio_crypt_key_t *key);
+uint64_t zio_crypt_max_blksz(uint64_t crypt);
 int zio_crypt_key_init(uint64_t crypt, zio_crypt_key_t *key);
 int zio_crypt_key_get_salt(zio_crypt_key_t *key, uint8_t *salt_out);
 

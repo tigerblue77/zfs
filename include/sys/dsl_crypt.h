@@ -166,6 +166,8 @@ int dsl_crypto_params_create_nvlist(dcp_cmd_t cmd, nvlist_t *props,
 void dsl_crypto_params_free(dsl_crypto_params_t *dcp, boolean_t unload);
 void dsl_dataset_crypt_stats(struct dsl_dataset *ds, nvlist_t *nv);
 int dsl_crypto_can_set_keylocation(const char *dsname, const char *keylocation);
+int dsl_crypto_check_blksz(const char *dsname, uint64_t blksz);
+uint64_t dsl_crypto_max_blksz(objset_t *os);
 boolean_t dsl_dir_incompatible_encryption_version(dsl_dir_t *dd);
 
 void spa_keystore_init(spa_keystore_t *sk);
