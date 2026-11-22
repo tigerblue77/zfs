@@ -201,3 +201,31 @@ Write `/var/log/task-1122-wrs/report.md` and give the same text as your final me
 2. **Table:** item | test | run | result | duration | key note. Then one verdict line per item, e.g. "s2 zpool-split-hold-newspa-v2-wr: zpool_split_new_pool_busy PASS 3/3 (debug)", or SKIPPED with the reason.
 3. **Quotes:** the NOTE and zinject lines (run 1 in full, then what differs), every non-PASS detail, and the kernel-line checks.
 4. **What did not run, deviations, cleanup:** on 106, F27's STATE OK line; on 107, X5's `end` line. Then `End`.
+
+## 8. Added at 20:25Z: three more items
+
+These are the new tests of the branches that Monday's long tasks run (SLD5B-WR, SLD6B-WR, IRD-WR). Running them once now catches a broken port before those tasks spend hours on it.
+
+The rules are those of sections 1 to 5: the same start rule, the same end times (106: 21:45Z; 107: 21:15Z, then 6.2), and on each VM after its last item of section 1. One correction applies here too, as main's message of 20:17Z said: a `WARNING: Pool '<pool>' has encountered an uncorrectable I/O failure and has been suspended.` line and its `was suspended and is being resumed` partner are not a stop. Count them and quote one pair.
+
+| item | VM | branch | head | tree | n |
+|---|---|---|---|---|---|
+| s6 | 106 | spa-lock-detangle-7-v2-wr | bfebf20f54db200387256432a634b27a46ab5920 | 97385d14a6c9889d9bb2a35ff63e6adf1c8e06cf | 3 |
+| r4 | 107 | import-fail-removal-deadlock-v2-wr | 2864fc11b3e2f0cc205551785f8f610a9e09725d | aca709ad4536e0de194adb181ee0f554cbd728c1 | 2 |
+| r5 | 107 | spa-lock-detangle-7b-v2-wr | 96b27607262c9c85058e783c621d4d3dce2034df | ce10f58ca9bd10a76c1ab14cc41ebd4d319334e6 | 5 |
+
+Each item's tests, every one of mode `100755`, run 3 times each:
+
+| item | test file | sha256 |
+|---|---|---|
+| s6 | replacement/vdev_change_load_wait.ksh | eb50c30d3114bca445fceec38fb14ad7487c7d21995f5bded1085f4ce45ccd4b |
+| s6 | replacement/vdev_change_sync_wait.ksh | 66d463e3110c40c14ae11461b8872c24fbdbcfb4bef5e6a30313030c0f37993d |
+| s6 | replacement/vdev_change_thread_wait.ksh | 8489946c995ef37ce44e57cdaa93d0eb2ef8a9d95017762616baac660147511d |
+| r4 | removal/removal_failed_import.ksh | 8fd7ae04ccc2b92e6366557c017e1167698ad064c918ad02422626d559d13136 |
+| r5 | replacement/vdev_change_step_wait.ksh | 14fe11822ce07c5e0d561aeb41b48b7cf18a6b5c8c593111f1898e8a5e563a31 |
+
+Start rule for the item's runs: now + 45 min for s6 (three tests), and now + 20 min for r4 and r5.
+
+These tests hold a thread at a zinject point until they remove the handler by its ID. A run that ends with a thread still held (`zio_inject_pause` in a stack, or a handler listed after the run) is a stop: capture as section 2 says, change nothing, and report. On 107 this means no 6.2 until main answers.
+
+The report covers these items too, in the same tables.
