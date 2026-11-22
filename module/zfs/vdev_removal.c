@@ -1386,6 +1386,11 @@ vdev_remove_complete(spa_t *spa)
 	 * vdev_metaslab_fini()
 	 */
 	txg_wait_synced(spa->spa_dsl_pool, 0);
+	if (zio_injection_enabled) {
+		int ignored = 0;
+		(void) zio_handle_func_injection(spa,
+		    "vdev_remove_complete:start", &ignored);
+	}
 	txg = spa_vdev_enter(spa);
 	vdev_t *vd = vdev_lookup_top(spa, spa->spa_vdev_removal->svr_vdev_id);
 	ASSERT0P(vd->vdev_initialize_thread);
