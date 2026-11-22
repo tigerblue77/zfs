@@ -1347,22 +1347,16 @@ spa_l2cache_activate(vdev_t *vd)
  * Lock the given spa_t for the purpose of adding or removing a vdev.
  * Grabs the global spa_namespace_lock plus the spa config lock for writing.
  * It returns the next transaction group for the spa_t.
- *
- * The autotrim threads are stopped before the namespace lock is taken:
- * a thread may wait for its TRIM I/O, a txg sync or the config lock on
- * its way out.  spa_vdev_top_lock keeps out vdev changes and the restart
- * of the threads meanwhile.
  */
 uint64_t
 spa_vdev_enter(spa_t *spa)
 {
 	mutex_enter(&spa->spa_vdev_top_lock);
-
-	vdev_autotrim_stop_all(spa);
-
 	spa_namespace_enter(FTAG);
 
 	ASSERT0P(spa->spa_export_thread);
+
+	vdev_autotrim_stop_all(spa);
 
 	return (spa_vdev_config_enter(spa));
 }
@@ -1372,13 +1366,14 @@ spa_vdev_enter(spa_t *spa)
  * the vdev being detached.  When there is a rebuild in process it will be
  * suspended while the vdev tree is modified then resumed by spa_vdev_exit().
  * The rebuild is canceled if only a single child remains after the detach.
- * Like the autotrim threads, the rebuild is stopped before the namespace
- * lock is taken: its thread waits for txg syncs on its way out.
  */
 uint64_t
 spa_vdev_detach_enter(spa_t *spa, uint64_t guid)
 {
 	mutex_enter(&spa->spa_vdev_top_lock);
+	spa_namespace_enter(FTAG);
+
+	ASSERT0P(spa->spa_export_thread);
 
 	vdev_autotrim_stop_all(spa);
 
@@ -1388,10 +1383,6 @@ spa_vdev_detach_enter(spa_t *spa, uint64_t guid)
 			vdev_rebuild_stop_wait(vd->vdev_top);
 		}
 	}
-
-	spa_namespace_enter(FTAG);
-
-	ASSERT0P(spa->spa_export_thread);
 
 	return (spa_vdev_config_enter(spa));
 }
