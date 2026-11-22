@@ -328,6 +328,9 @@ zio_inject_point_limit(spa_t *spa, const char *name, uint64_t align)
  *
  * Delay and pause handlers don't act at points marked zp_noblock.
  *
+ * A point with no pool at hand passes a NULL spa: a handler for the point
+ * on any pool acts there.
+ *
  * Otherwise return 0.  Callers test zio_injection_enabled first.
  *
  * A handler with a value condition (zi_start, from "zinject -o") matches
@@ -352,8 +355,8 @@ zio_handle_point_injection(spa_t *spa, zio_inject_point_t *zp, int *error)
 	for (handler = list_head(&inject_handlers); handler != NULL;
 	    handler = list_next(&inject_handlers, handler)) {
 		if (handler->zi_record.zi_cmd != ZINJECT_FUNC_FAULT ||
-		    handler->zi_spa_name == NULL ||
-		    strcmp(spa_name(spa), handler->zi_spa_name) != 0 ||
+		    handler->zi_spa_name == NULL || (spa != NULL &&
+		    strcmp(spa_name(spa), handler->zi_spa_name) != 0) ||
 		    !zio_inject_point_match(handler->zi_record.zi_func, zp))
 			continue;
 
