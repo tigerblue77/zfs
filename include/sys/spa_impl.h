@@ -355,6 +355,7 @@ struct spa {
 	uint64_t	spa_nonallocating_dspace;
 	spa_removing_phys_t spa_removing_phys;
 	spa_vdev_removal_t *spa_vdev_removal;
+	boolean_t	spa_removal_completing; /* vdev_remove_complete() */
 
 	spa_condensing_indirect_phys_t	spa_condensing_indirect_phys;
 	spa_condensing_indirect_t	*spa_condensing_indirect;

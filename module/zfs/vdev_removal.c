@@ -256,8 +256,8 @@ vdev_passivate(vdev_t *vd, uint64_t *txg)
 	 * Wait for the youngest allocations and frees to sync,
 	 * and then wait for the deferral of those frees to finish.
 	 */
-	spa_vdev_config_exit(spa, NULL,
-	    *txg + TXG_CONCURRENT_STATES + TXG_DEFER_SIZE, 0, FTAG);
+	spa_vdev_config_pause(spa,
+	    *txg + TXG_CONCURRENT_STATES + TXG_DEFER_SIZE, FTAG);
 
 	/*
 	 * We must ensure that no "stubby" log blocks are allocated
@@ -267,7 +267,7 @@ vdev_passivate(vdev_t *vd, uint64_t *txg)
 	 */
 	error = spa_reset_logs(spa);
 
-	*txg = spa_vdev_config_enter(spa);
+	*txg = spa_vdev_config_resume(spa);
 
 	if (error != 0) {
 		metaslab_group_activate(mg);
@@ -287,10 +287,10 @@ vdev_passivate(vdev_t *vd, uint64_t *txg)
  * Turn off allocations for a top-level device from the pool.
  *
  * Turning off allocations for a top-level device can take a significant
- * amount of time. As a result we use the spa_vdev_config_[enter/exit]
- * functions which allow us to grab and release the spa_config_lock while
- * still holding the namespace lock. During each step the configuration
- * is synced out.
+ * amount of time. As a result we use spa_vdev_config_pause() and
+ * spa_vdev_config_resume(), which release the spa_config_lock and the
+ * namespace lock between the steps, while spa_vdev_top_lock keeps out other
+ * vdev changes. During each step the configuration is synced out.
  */
 int
 spa_vdev_noalloc(spa_t *spa, uint64_t guid)
@@ -651,6 +651,17 @@ void
 spa_restart_removal(spa_t *spa)
 {
 	spa_vdev_removal_t *svr = spa->spa_vdev_removal;
+
+	/*
+	 * The removal thread may be in vdev_remove_complete(), waiting for
+	 * the txg of its first step without spa_namespace_lock: svr_thread
+	 * is NULL by then, and the sync of that txg frees svr.  This is
+	 * read under spa_namespace_lock, which vdev_remove_complete() holds
+	 * to change it; spa_load_impl(), which calls this without the lock,
+	 * starts the only removal thread of the pool.
+	 */
+	if (spa->spa_removal_completing)
+		return;
 
 	if (svr == NULL)
 		return;
@@ -1419,20 +1430,23 @@ vdev_remove_complete(spa_t *spa)
 	ASSERT0(vd->vdev_stat.vs_space);
 	ASSERT0(vd->vdev_stat.vs_dspace);
 
+	/* Until svr is freed: see spa_restart_removal(). */
+	spa->spa_removal_completing = B_TRUE;
 	vdev_remove_replace_with_indirect(vd, txg);
 
 	/*
 	 * Release the config lock and allow spa_sync to run and finish the
 	 * removal via vdev_remove_complete_sync in syncing context.
 	 *
-	 * Retain the namespace lock to prevent the pool from being exported
-	 * or destroyed before completion of the device removal.
+	 * spa_vdev_config_pause() counts the change in
+	 * spa_vdev_change_holds, which keeps the pool from being exported,
+	 * destroyed or unloaded before completion of the device removal.
 	 *
 	 * Note that we hold on to the vdev_t that has been replaced.  Since
 	 * it isn't part of the vdev tree any longer, it can't be concurrently
 	 * manipulated, even while we don't have the config lock.
 	 */
-	(void) spa_vdev_config_exit(spa, NULL, txg, 0, FTAG);
+	spa_vdev_config_pause(spa, txg, FTAG);
 
 	/*
 	 * Top ZAP should have been transferred to the indirect vdev in
@@ -1446,7 +1460,9 @@ vdev_remove_complete(spa_t *spa)
 	ASSERT0(vd->vdev_leaf_zap);
 
 	/* Update the vdev labels and dirty the config. */
-	txg = spa_vdev_config_enter(spa);
+	txg = spa_vdev_config_resume(spa);
+	ASSERT0P(spa->spa_vdev_removal);
+	spa->spa_removal_completing = B_FALSE;
 	(void) vdev_label_init(vd, 0, VDEV_LABEL_REMOVE);
 	/*
 	 * Request to update the config and the config cachefile.
@@ -2155,8 +2171,8 @@ spa_vdev_remove_log(vdev_t *vd, uint64_t *txg)
 	 * Wait for the youngest allocations and frees to sync,
 	 * and then wait for the deferral of those frees to finish.
 	 */
-	spa_vdev_config_exit(spa, NULL,
-	    *txg + TXG_CONCURRENT_STATES + TXG_DEFER_SIZE, 0, FTAG);
+	spa_vdev_config_pause(spa,
+	    *txg + TXG_CONCURRENT_STATES + TXG_DEFER_SIZE, FTAG);
 
 	/*
 	 * Cancel any initialize or TRIM which was in progress.
@@ -2167,15 +2183,15 @@ spa_vdev_remove_log(vdev_t *vd, uint64_t *txg)
 
 	/*
 	 * Evacuate the device.  We don't hold the config lock as
-	 * writer since we need to do I/O but we do keep the
-	 * spa_namespace_lock held.  Once this completes the device
-	 * should no longer have any blocks allocated on it.
+	 * writer since we need to do I/O, nor the spa_namespace_lock,
+	 * but we do keep spa_vdev_top_lock held.  Once this completes
+	 * the device should no longer have any blocks allocated on it.
 	 */
-	ASSERT(spa_namespace_held());
+	ASSERT(MUTEX_HELD(&spa->spa_vdev_top_lock));
 	if (vd->vdev_stat.vs_alloc != 0)
 		error = spa_reset_logs(spa);
 
-	*txg = spa_vdev_config_enter(spa);
+	*txg = spa_vdev_config_resume(spa);
 
 	if (error != 0) {
 		metaslab_group_activate(mg);
@@ -2214,8 +2230,8 @@ spa_vdev_remove_log(vdev_t *vd, uint64_t *txg)
 	 */
 	vdev_metaslab_fini(vd);
 
-	spa_vdev_config_exit(spa, NULL, *txg, 0, FTAG);
-	*txg = spa_vdev_config_enter(spa);
+	spa_vdev_config_pause(spa, *txg, FTAG);
+	*txg = spa_vdev_config_resume(spa);
 
 	sysevent_t *ev = spa_event_create(spa, vd, NULL,
 	    ESC_ZFS_VDEV_REMOVE_DEV);
@@ -2246,8 +2262,8 @@ spa_vdev_remove_log(vdev_t *vd, uint64_t *txg)
 	 * would otherwise lose a vdev that the pool still has.  The vdev is
 	 * out of the tree, so nothing uses it meanwhile.
 	 */
-	spa_vdev_config_exit(spa, NULL, *txg, 0, FTAG);
-	*txg = spa_vdev_config_enter(spa);
+	spa_vdev_config_pause(spa, *txg, FTAG);
+	*txg = spa_vdev_config_resume(spa);
 
 	(void) vdev_label_init(vd, 0, VDEV_LABEL_REMOVE);
 	vdev_free(vd);
@@ -2437,13 +2453,13 @@ spa_vdev_remove_top(vdev_t *vd, uint64_t *txg)
 	 * resume if the removal is canceled sometime later.
 	 */
 
-	spa_vdev_config_exit(spa, NULL, *txg, 0, FTAG);
+	spa_vdev_config_pause(spa, *txg, FTAG);
 
 	vdev_initialize_stop_all(vd, VDEV_INITIALIZE_ACTIVE);
 	vdev_trim_stop_all(vd, VDEV_TRIM_ACTIVE);
 	vdev_autotrim_stop_wait(vd);
 
-	*txg = spa_vdev_config_enter(spa);
+	*txg = spa_vdev_config_resume(spa);
 
 	/*
 	 * Things might have changed while the config lock was dropped
@@ -2477,9 +2493,10 @@ spa_vdev_remove_top(vdev_t *vd, uint64_t *txg)
  *
  * Removing a device from the vdev namespace requires several steps
  * and can take a significant amount of time.  As a result we use
- * the spa_vdev_config_[enter/exit] functions which allow us to
- * grab and release the spa_config_lock while still holding the namespace
- * lock.  During each step the configuration is synced out.
+ * spa_vdev_config_pause() and spa_vdev_config_resume(), which release
+ * the spa_config_lock and the namespace lock between the steps, while
+ * spa_vdev_top_lock keeps out other vdev changes.  During each step the
+ * configuration is synced out.
  */
 int
 spa_vdev_remove(spa_t *spa, uint64_t guid, boolean_t unspare)
@@ -2562,16 +2579,16 @@ spa_vdev_remove(spa_t *spa, uint64_t guid, boolean_t unspare)
 
 		/*
 		 * Stop trimming the cache device. We need to release the
-		 * config lock to allow the syncing of TRIM transactions
-		 * without releasing the spa_namespace_lock. The same
-		 * strategy is employed in spa_vdev_remove_top().
+		 * config lock to allow the syncing of TRIM transactions.
+		 * The same strategy is employed in spa_vdev_remove_top().
 		 */
-		spa_vdev_config_exit(spa, NULL,
-		    txg + TXG_CONCURRENT_STATES + TXG_DEFER_SIZE, 0, FTAG);
+		ASSERT(!locked);
+		spa_vdev_config_pause(spa,
+		    txg + TXG_CONCURRENT_STATES + TXG_DEFER_SIZE, FTAG);
 		mutex_enter(&vd->vdev_trim_lock);
 		vdev_trim_stop(vd, VDEV_TRIM_CANCELED, NULL);
 		mutex_exit(&vd->vdev_trim_lock);
-		txg = spa_vdev_config_enter(spa);
+		txg = spa_vdev_config_resume(spa);
 
 		ev = spa_event_create(spa, vd, NULL, ESC_ZFS_VDEV_REMOVE_AUX);
 		spa_vdev_remove_aux(spa->spa_l2cache.sav_config,

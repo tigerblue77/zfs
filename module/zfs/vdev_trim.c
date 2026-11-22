@@ -1128,6 +1128,7 @@ vdev_trim_stop_all(vdev_t *vd, vdev_trim_state_t tgt_state)
 	vdev_t *vd_l2cache;
 
 	ASSERT(spa_namespace_held() ||
+	    MUTEX_HELD(&spa->spa_vdev_top_lock) ||
 	    spa->spa_export_thread == curthread);
 
 	list_create(&vd_list, sizeof (vdev_t),

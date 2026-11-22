@@ -199,8 +199,9 @@ threads of the pool, such as the device removal thread, have been restarted.
 A handler can be added to a pool that is not loaded yet, after
 .Fl u .
 .It Sy spa_vdev_exit:unlocked
-At the end of a vdev change, once the change no longer holds the namespace
-lock and before it waits for its transaction group to sync.
+At the end of a vdev change, and between two of its steps, once the change
+no longer holds the namespace lock and before it waits for its transaction
+group to sync.
 .El
 .
 .It Xo
