@@ -44,9 +44,7 @@ static void zvol_request_impl(zvol_state_t *zv, struct bio *bio,
 static unsigned int zvol_major = ZVOL_MAJOR;
 static unsigned long zvol_max_discard_blocks = 16384;
 
-#ifndef HAVE_BLKDEV_GET_ERESTARTSYS
 static unsigned int zvol_open_timeout_ms = 1000;
-#endif
 
 static unsigned int zvol_blk_mq_threads = 0;
 static unsigned int zvol_blk_mq_actual_threads;
@@ -716,12 +714,10 @@ zvol_open(struct block_device *bdev, fmode_t flag)
 	zvol_state_t *zv;
 	int error = 0;
 	boolean_t drop_suspend = B_FALSE;
-#ifndef HAVE_BLKDEV_GET_ERESTARTSYS
 	hrtime_t timeout = MSEC2NSEC(zvol_open_timeout_ms);
 	hrtime_t start = gethrtime();
 
 retry:
-#endif
 
 #ifdef HAVE_BLK_MODE_T
 	zv = atomic_load_ptr(&disk->private_data);
@@ -804,11 +800,14 @@ retry:
 		 * no choice but to return an error.  For 5.12 and older
 		 * kernels returning -ERESTARTSYS will result in the
 		 * bdev->bd_mutex being dropped, then reacquired, and
-		 * fops->open() being called again.  This process can be
-		 * repeated safely until both locks are acquired.  For 5.13
-		 * and newer the -ERESTARTSYS retry logic was removed from
-		 * the kernel so the only option is to return the error for
-		 * the caller to handle it.
+		 * fops->open() being called again.  For 5.13 and newer the
+		 * -ERESTARTSYS retry logic was removed from the kernel so
+		 * the only option is to return the error for the caller to
+		 * handle it.  Older kernels retry here too before returning
+		 * it: up to 5.10, an open that __blkdev_get() restarts and
+		 * that finds the device opened by someone else meanwhile
+		 * keeps a reference on the disk and on this module that is
+		 * never dropped.
 		 */
 		if (!spa_namespace_held()) {
 			if (!spa_namespace_tryenter(FTAG)) {
@@ -816,17 +815,16 @@ retry:
 				rw_exit(&zv->zv_suspend_lock);
 				drop_suspend = B_FALSE;
 
+				if ((gethrtime() - start) > timeout) {
 #ifdef HAVE_BLKDEV_GET_ERESTARTSYS
-				schedule();
-				return (-SET_ERROR(ERESTARTSYS));
-#else
-				if ((gethrtime() - start) > timeout)
+					schedule();
+#endif
 					return (-SET_ERROR(ERESTARTSYS));
+				}
 
 				schedule_timeout_interruptible(
 					MSEC_TO_TICK(10));
 				goto retry;
-#endif
 			} else {
 				drop_namespace = B_TRUE;
 			}
@@ -1929,7 +1927,5 @@ module_param(zvol_blk_mq_blocks_per_thread, uint, 0644);
 MODULE_PARM_DESC(zvol_blk_mq_blocks_per_thread,
 	"Process volblocksize blocks per thread");
 
-#ifndef HAVE_BLKDEV_GET_ERESTARTSYS
 module_param(zvol_open_timeout_ms, uint, 0644);
 MODULE_PARM_DESC(zvol_open_timeout_ms, "Timeout for ZVOL open retries");
-#endif

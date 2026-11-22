@@ -3007,6 +3007,13 @@ many blocks, where block size is determined by the
 .Sy volblocksize
 property of a zvol.
 .
+.It Sy zvol_open_timeout_ms Ns = Ns Sy 1000 Ns ms Po 1 sec Pc Pq uint
+On Linux, how long the first open of a volume retries, every 10 ms,
+to take the pool namespace lock it needs.
+Past this time the open gives up the lock, which lets a volume used as
+a vdev of another pool be opened without a deadlock:
+kernels before 5.13 then restart the open, newer ones fail it.
+.
 .It Sy zvol_prefetch_bytes Ns = Ns Sy 131072 Ns B Po 128 KiB Pc Pq uint
 When adding a zvol to the system, prefetch this many bytes
 from the start and end of the volume.
