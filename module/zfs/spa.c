@@ -9907,6 +9907,11 @@ spa_vdev_split_mirror(spa_t *spa, const char *newname, nvlist_t *config,
 	spa_config_exit(spa, SCL_STATE_ALL, spa);
 
 	zio_handle_panic_injection(spa, FTAG, 3);
+	if (zio_injection_enabled) {
+		int ignored = 0;
+		(void) zio_handle_func_injection(spa,
+		    "spa_vdev_split_mirror:committed", &ignored);
+	}
 
 	/* split is complete; log a history record */
 	spa_history_log_internal(newspa, "split", NULL,
