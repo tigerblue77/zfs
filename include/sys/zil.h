@@ -685,6 +685,7 @@ extern void zil_kstat_values_update(zil_kstat_values_t *zs,
 extern int zil_replay_disable;
 extern uint_t zfs_immediate_write_sz;
 extern int zil_special_is_slog;
+extern uint_t zil_issue_inline;
 
 #ifdef	__cplusplus
 }

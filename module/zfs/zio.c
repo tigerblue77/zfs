@@ -2350,7 +2350,8 @@ zio_issue_async(zio_t *zio)
 	 * not as this writer.  Bulk slog writes, at ZIO_PRIORITY_ASYNC_WRITE,
 	 * keep the taskq.
 	 */
-	if (zio->io_priority == ZIO_PRIORITY_SYNC_WRITE &&
+	if (zil_issue_inline &&
+	    zio->io_priority == ZIO_PRIORITY_SYNC_WRITE &&
 	    zio->io_bookmark.zb_level == ZB_ZIL_LEVEL &&
 	    zio->io_bookmark.zb_object == ZB_ZIL_OBJECT)
 		return (zio);

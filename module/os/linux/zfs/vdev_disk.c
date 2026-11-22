@@ -27,6 +27,7 @@
 #include <sys/abd.h>
 #include <sys/fs/zfs.h>
 #include <sys/zio.h>
+#include <sys/zil.h>
 #include <linux/blkpg.h>
 #include <linux/msdos_fs.h>
 #include <linux/vfs_compat.h>
@@ -1174,7 +1175,7 @@ vdev_disk_io_rw(zio_t *zio)
 	/* Kernel threads are normally in the root io cgroup. */
 	if (current->flags & PF_KTHREAD)
 		vdev_disk_pool_bio_get(vd);
-	if (zio->io_type == ZIO_TYPE_WRITE &&
+	if (zil_issue_inline && zio->io_type == ZIO_TYPE_WRITE &&
 	    (zio->io_flags & ZIO_FLAG_ZILWRITE)) {
 		vbio->vbio_zil = B_TRUE;
 		vbio->vbio_pool_bio = vd->vd_pool_bio;

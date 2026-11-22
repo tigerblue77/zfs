@@ -2276,6 +2276,13 @@ uint_t zfs_immediate_write_sz = 32768;
  */
 int zil_special_is_slog = 1;
 
+/*
+ * FORK ONLY, for measurements: 0 issues ZIL blocks as master does, from a
+ * write issue taskq, with no I/O identity of their own and the commit
+ * timeout timed from the issue, so that one loaded module runs both.
+ */
+uint_t zil_issue_inline = 1;
+
 uint64_t
 zil_max_copied_data(zilog_t *zilog)
 {
@@ -3745,7 +3752,7 @@ zil_commit_waiter(zilog_t *zilog, zil_commit_waiter_t *zcw)
 	 * the bottom of the zil_process_commit_list() function.
 	 */
 	int pct = MAX(zfs_commit_timeout_pct, 1);
-	hrtime_t latency = zilog->zl_behind ?
+	hrtime_t latency = (zilog->zl_behind && zil_issue_inline) ?
 	    zilog->zl_last_lwb_close_latency : zilog->zl_last_lwb_latency;
 	hrtime_t sleep = (latency * pct) / 100;
 	hrtime_t wakeup = gethrtime() + sleep;
@@ -5348,3 +5355,6 @@ ZFS_MODULE_PARAM(zfs, zfs_, immediate_write_sz, UINT, ZMOD_RW,
 
 ZFS_MODULE_PARAM(zfs_zil, zil_, special_is_slog, INT, ZMOD_RW,
 	"Treat special vdevs as SLOG");
+
+ZFS_MODULE_PARAM(zfs_zil, zil_, issue_inline, UINT, ZMOD_RW,
+	"Issue ZIL blocks from the thread that writes them out (fork only)");

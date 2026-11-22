@@ -2792,6 +2792,18 @@ The default value of
 .Sy 100%
 will create a maximum of one thread per CPU.
 .
+.It Sy zil_issue_inline Ns = Ns Sy 1 Ns | Ns 0 Pq uint
+Fork only, for measurements; not meant for upstream.
+With
+.Sy 0 ,
+ZIL blocks are issued as in master: from the write issue taskq, with the
+I/O identity of the thread that submits them, and with the commit timeout
+of
+.Sy zfs_commit_timeout_pct
+timed from each block's issue.
+.Sy 1
+issues them from the thread that writes them out.
+.
 .It Sy zil_maxblocksize Ns = Ns Sy 131072 Ns B Po 128 KiB Pc Pq uint
 This sets the maximum block size used by the ZIL.
 On very fragmented pools, lowering this
