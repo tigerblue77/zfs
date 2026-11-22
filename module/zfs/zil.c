@@ -734,11 +734,29 @@ static int
 zil_free_log_block(zilog_t *zilog, const blkptr_t *bp, void *tx,
     uint64_t claim_txg)
 {
-	(void) claim_txg;
+	spa_t *spa = zilog->zl_spa;
+	vdev_t *vd;
+	boolean_t readable;
 
-	zio_free(zilog->zl_spa, dmu_tx_get_txg(tx), bp);
+	zio_free(spa, dmu_tx_get_txg(tx), bp);
 
-	return (0);
+	if (claim_txg != 0)
+		return (0);
+
+	/*
+	 * An unclaimed log owns nothing but its blocks: its records are
+	 * already in the pool.  So stop the walk at a block on a log device
+	 * that cannot be read, rather than read it, and leave what follows
+	 * it allocated, as zil_claim() does.  The read would only suspend
+	 * the pool, and callers such as spa_vdev_remove_log() hold
+	 * spa_namespace_lock, which is needed to resume it.
+	 */
+	spa_config_enter(spa, SCL_VDEV, FTAG, RW_READER);
+	vd = vdev_lookup_top(spa, DVA_GET_VDEV(&bp->blk_dva[0]));
+	readable = (vd == NULL || !vd->vdev_islog || vdev_readable(vd));
+	spa_config_exit(spa, SCL_VDEV, FTAG);
+
+	return (readable ? 0 : SET_ERROR(ENXIO));
 }
 
 static int
