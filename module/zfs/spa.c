@@ -7777,6 +7777,21 @@ spa_import(char *pool, nvlist_t *config, nvlist_t *props, uint64_t flags)
 
 	if (error != 0 || (props && spa_writeable(spa) &&
 	    (error = spa_prop_set(spa, props)))) {
+		/*
+		 * The load may have restarted a device removal, whose
+		 * completion takes spa_namespace_lock, and spa_unload()
+		 * waits for the removal thread.  Stop it without the lock,
+		 * as export does, while the load marker keeps lookups of
+		 * the pool waiting.
+		 */
+		if (spa->spa_vdev_removal != NULL) {
+			spa->spa_load_thread = curthread;
+			spa_namespace_exit(FTAG);
+			spa_vdev_remove_suspend(spa);
+			spa_namespace_enter(FTAG);
+			spa->spa_load_thread = NULL;
+			spa_namespace_broadcast();
+		}
 		spa_unload(spa);
 		spa_deactivate(spa);
 		spa_remove(spa);
