@@ -918,7 +918,10 @@ zio_handle_inject_point(spa_t *spa, zio_inject_point_t point)
 	for (handler = list_head(&inject_handlers); handler != NULL;
 	    handler = list_next(&inject_handlers, handler)) {
 		if (handler->zi_record.zi_cmd != ZINJECT_DELAY_POINT ||
-		    handler->zi_spa != spa || handler->zi_point != point)
+		    handler->zi_point != point)
+			continue;
+		if (handler->zi_spa != NULL ? handler->zi_spa != spa :
+		    strcmp(handler->zi_spa_name, spa_name(spa)) != 0)
 			continue;
 
 		mutex_enter(&inject_point_lock);
@@ -1121,9 +1124,12 @@ zio_inject_fault(char *name, int flags, int *id, zinject_record_t *record)
 			 * spa_inject_ref() will add an injection reference,
 			 * which will prevent the pool from being removed
 			 * from the namespace while still allowing it to be
-			 * unloaded.
+			 * unloaded.  A point may also be set before the pool
+			 * is imported: it then matches the pool by name, as
+			 * an import delay does.
 			 */
-			if ((spa = spa_inject_addref(name)) == NULL)
+			if ((spa = spa_inject_addref(name)) == NULL &&
+			    record->zi_cmd != ZINJECT_DELAY_POINT)
 				return (SET_ERROR(ENOENT));
 		}
 

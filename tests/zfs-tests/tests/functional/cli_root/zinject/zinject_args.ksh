@@ -142,6 +142,10 @@ function test_point_fault
 		zinject | grep -q "$p" || \
 		    log_fail "point $p was not registered"
 	done
+	# A pool not imported yet is matched by its name.
+	log_must eval "zinject -w ${points[0]} -s 10 $TESTPOOL-notimported"
+	zinject | grep -q "$TESTPOOL-notimported" || \
+	    log_fail "point for a pool not imported was not registered"
 	zinject -c all
 }
 

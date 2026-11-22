@@ -14,7 +14,7 @@
 .\"
 .\" lint-ok: WARNING: sections out of conventional order: Sh SYNOPSIS
 .\"
-.Dd November 17, 2026
+.Dd November 22, 2026
 .Dt ZINJECT 8
 .Os
 .
@@ -175,6 +175,10 @@ A test can stop an operation inside a race window that waits on no I/O,
 run a competing operation, and then let the first one continue.
 The held thread keeps the locks it holds, and the pool cannot be exported
 while the handler exists.
+If
+.Ar pool
+is not imported, the handler holds the threads of the pool of that name
+once it is imported, and does not keep it from being exported.
 The points are:
 .Bl -tag -width Ds
 .It Sy dmu_objset_upgrade_task_cb:done
