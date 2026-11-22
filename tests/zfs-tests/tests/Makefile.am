@@ -398,6 +398,7 @@ nobase_dist_datadir_zfs_tests_tests_DATA += \
 	functional/scrub_mirror/scrub_mirror_common.kshlib \
 	functional/send_xdr_encoding/send_xdr_encoding.cfg \
 	functional/send_xdr_encoding/send_xdr_encoding.kshlib \
+	functional/slog/blockfiles/setattr_size.dat.bz2 \
 	functional/slog/slog.cfg \
 	functional/slog/slog.kshlib \
 	functional/snapdir/snapdir.cfg \
@@ -2422,6 +2423,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/slog/slog_indirect_shared_error.ksh \
 	functional/slog/slog_replay_fs_001.ksh \
 	functional/slog/slog_replay_fs_002.ksh \
+	functional/slog/slog_replay_fs_setattr_size.ksh \
 	functional/slog/slog_replay_fs_split_truncate.ksh \
 	functional/slog/slog_replay_fs_split_write.ksh \
 	functional/slog/slog_replay_indirect_eof.ksh \
