@@ -2839,6 +2839,11 @@ dmu_buf_will_rewrite(dmu_buf_t *db_fake, dmu_tx_t *tx)
 		return;
 	}
 	mutex_exit(&db->db_mtx);
+	if (zio_injection_enabled) {
+		int ignored = 0;
+		(void) zio_handle_func_injection(dmu_objset_spa(db->db_objset),
+		    "dmu_buf_will_rewrite:clean", &ignored);
+	}
 
 	/*
 	 * The dbuf is not dirty, so we need to make it dirty and
