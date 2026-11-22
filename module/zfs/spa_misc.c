@@ -112,8 +112,8 @@
  *		spa_namespace_lock	->	spa_config_lock[]
  *
  *	The namespace lock must always be taken before the config lock.
- *	spa_vdev_enter() waits for the config lock without the namespace
- *	lock, and then only tries to take the namespace lock.
+ *	spa_vdev_config_enter() waits for the config lock without the
+ *	namespace lock, and then only tries to take the namespace lock.
  *
  *
  * The spa_namespace_lock can be acquired directly and is globally visible.
@@ -224,6 +224,13 @@
  *				to complete without the namespace lock, sync
  *				the updated configs to the cache, and release
  *				the namespace lock.
+ *
+ *	spa_vdev_config_pause()	Between two steps of a vdev change, release
+ *				both locks and wait for the first step to
+ *				sync, without the namespace lock.
+ *
+ *	spa_vdev_config_resume()
+ *				Take both locks again for the next step.
  *
  * vdev state is protected by spa_vdev_state_enter() / spa_vdev_state_exit().
  * Like spa_vdev_enter/exit, these are convenience wrappers -- the actual
@@ -1373,41 +1380,6 @@ spa_vdev_change_rele(spa_t *spa)
 }
 
 /*
- * Take spa_namespace_lock and then the config lock as writer, at the start
- * of a vdev change.  The writer waits for every reader, spa_sync() included,
- * which holds SCL_CONFIG for a whole txg: as long as a device that does not
- * answer, or until zpool clear resumes a suspended pool.  Every pool lookup
- * on the system needs the namespace lock, so wait for the config lock
- * without it, and then only try to retake it, since it is taken before the
- * config lock.  spa_vdev_top_lock keeps out other vdev changes meanwhile,
- * and spa_vdev_change_hold() makes an export fail with EBUSY.
- */
-static uint64_t
-spa_vdev_enter_locks(spa_t *spa)
-{
-	spa_namespace_enter(FTAG);
-
-	if (!spa_config_tryenter(spa, SCL_ALL, spa, RW_WRITER)) {
-		spa_vdev_change_hold(spa);
-		spa_namespace_exit(FTAG);
-		for (;;) {
-			spa_config_enter(spa, SCL_ALL, spa, RW_WRITER);
-			if (spa_namespace_tryenter(FTAG))
-				break;
-			spa_config_exit(spa, SCL_ALL, spa);
-			/* Let the holder finish before trying again. */
-			spa_namespace_enter(FTAG);
-			spa_namespace_exit(FTAG);
-		}
-		spa_vdev_change_rele(spa);
-	}
-
-	ASSERT0P(spa->spa_export_thread);
-
-	return (spa_last_synced_txg(spa) + 1);
-}
-
-/*
  * Lock the given spa_t for the purpose of adding or removing a vdev.
  * Grabs the global spa_namespace_lock plus the spa config lock for writing.
  * It returns the next transaction group for the spa_t.
@@ -1424,7 +1396,9 @@ spa_vdev_enter(spa_t *spa)
 
 	vdev_autotrim_stop_all(spa);
 
-	return (spa_vdev_enter_locks(spa));
+	spa_namespace_enter(FTAG);
+
+	return (spa_vdev_config_enter(spa));
 }
 
 /*
@@ -1449,27 +1423,51 @@ spa_vdev_detach_enter(spa_t *spa, uint64_t guid)
 		}
 	}
 
-	return (spa_vdev_enter_locks(spa));
+	spa_namespace_enter(FTAG);
+
+	return (spa_vdev_config_enter(spa));
 }
 
 /*
- * Internal implementation for spa_vdev_enter().  Used when a vdev
- * operation requires multiple syncs (i.e. removing a device) while
- * keeping the spa_namespace_lock held.
+ * Internal implementation for spa_vdev_enter(): take the config lock as
+ * writer, with spa_namespace_lock held, and return the next txg.  The writer
+ * waits for every reader, spa_sync() included, which holds SCL_CONFIG for a
+ * whole txg: as long as a device that does not answer, or until zpool clear
+ * resumes a suspended pool.  Every pool lookup on the system needs the
+ * namespace lock, so if the config lock is busy, wait for it without the
+ * namespace lock, and then only try to retake the namespace lock, since it
+ * is taken before the config lock.  spa_vdev_change_hold() makes an export
+ * fail with EBUSY meanwhile, and the caller's spa_vdev_top_lock keeps out
+ * other vdev changes of the pool.
  */
 uint64_t
 spa_vdev_config_enter(spa_t *spa)
 {
 	ASSERT(spa_namespace_held());
 
-	spa_config_enter(spa, SCL_ALL, spa, RW_WRITER);
+	if (!spa_config_tryenter(spa, SCL_ALL, spa, RW_WRITER)) {
+		spa_vdev_change_hold(spa);
+		spa_namespace_exit(FTAG);
+		for (;;) {
+			spa_config_enter(spa, SCL_ALL, spa, RW_WRITER);
+			if (spa_namespace_tryenter(FTAG))
+				break;
+			spa_config_exit(spa, SCL_ALL, spa);
+			/* Let the holder finish before trying again. */
+			spa_namespace_enter(FTAG);
+			spa_namespace_exit(FTAG);
+		}
+		spa_vdev_change_rele(spa);
+	}
+
+	ASSERT0P(spa->spa_export_thread);
 
 	return (spa_last_synced_txg(spa) + 1);
 }
 
 static void
 spa_vdev_config_exit_impl(spa_t *spa, vdev_t *vd, uint64_t txg, int error,
-    const char *tag, boolean_t final)
+    const char *tag, boolean_t unlocked)
 {
 	ASSERT(spa_namespace_held());
 
@@ -1513,7 +1511,8 @@ spa_vdev_config_exit_impl(spa_t *spa, vdev_t *vd, uint64_t txg, int error,
 	 * that there won't be more than one config change per txg.
 	 * This allows us to use the txg as the generation number.
 	 *
-	 * At the end of the operation, wait for the sync and tear vd down
+	 * At the end of the operation, and between two of its steps
+	 * (spa_vdev_config_pause()), wait for the sync and tear vd down
 	 * without spa_namespace_lock, as spa_sync_allpools() waits: the
 	 * sync lasts as long as a device that does not answer, or until
 	 * zpool clear, which needs the lock, resumes a suspended pool, and
@@ -1521,7 +1520,7 @@ spa_vdev_config_exit_impl(spa_t *spa, vdev_t *vd, uint64_t txg, int error,
 	 * still keeps out other vdev changes, spa_vdev_change_hold() makes
 	 * an export fail with EBUSY, and vd is no longer in the vdev tree.
 	 */
-	if (final) {
+	if (unlocked) {
 		spa_vdev_change_hold(spa);
 		spa_namespace_exit(FTAG);
 		if (zio_injection_enabled) {
@@ -1559,7 +1558,7 @@ spa_vdev_config_exit_impl(spa_t *spa, vdev_t *vd, uint64_t txg, int error,
 		spa_config_exit(spa, SCL_STATE_ALL, spa);
 	}
 
-	if (final) {
+	if (unlocked) {
 		spa_namespace_enter(FTAG);
 		spa_vdev_change_rele(spa);
 	}
@@ -1574,12 +1573,48 @@ spa_vdev_config_exit_impl(spa_t *spa, vdev_t *vd, uint64_t txg, int error,
 /*
  * Used in combination with spa_vdev_config_enter() to allow the syncing
  * of multiple transactions without releasing the spa_namespace_lock.
+ * Only for a step that must keep other threads from finding a pool in the
+ * namespace meanwhile, as while zpool split creates its new pool; the
+ * steps of a vdev change otherwise use spa_vdev_config_pause().
  */
 void
 spa_vdev_config_exit(spa_t *spa, vdev_t *vd, uint64_t txg, int error,
     const char *tag)
 {
 	spa_vdev_config_exit_impl(spa, vd, txg, error, tag, B_FALSE);
+}
+
+/*
+ * Pause a vdev change between two of its steps: release the config lock
+ * and spa_namespace_lock, and wait for the given txg to sync.  Until
+ * spa_vdev_config_resume(), the caller holds only spa_vdev_top_lock, which
+ * keeps out other vdev changes of the pool, and is counted by
+ * spa_vdev_change_hold(), which makes an export fail with EBUSY, so it may
+ * wait for I/O, txg syncs and threads of the pool without stopping pool
+ * lookups on the system.
+ */
+void
+spa_vdev_config_pause(spa_t *spa, uint64_t txg, const char *tag)
+{
+	spa_vdev_config_exit_impl(spa, NULL, txg, 0, tag, B_TRUE);
+	spa_vdev_change_hold(spa);
+	spa_namespace_exit(FTAG);
+}
+
+/*
+ * Take spa_namespace_lock and the config lock again after
+ * spa_vdev_config_pause(), and return the next txg.
+ */
+uint64_t
+spa_vdev_config_resume(spa_t *spa)
+{
+	ASSERT(MUTEX_HELD(&spa->spa_vdev_top_lock));
+
+	spa_namespace_enter(FTAG);
+	uint64_t txg = spa_vdev_config_enter(spa);
+	spa_vdev_change_rele(spa);
+
+	return (txg);
 }
 
 /*

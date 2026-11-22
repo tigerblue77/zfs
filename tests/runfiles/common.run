@@ -1043,7 +1043,8 @@ tests = ['attach_import', 'attach_multiple', 'attach_rebuild',
     'replace_import', 'replace_rebuild', 'replace_resilver',
     'replace_resilver_sit_out', 'resilver_restart_001',
     'resilver_restart_002', 'scrub_cancel', 'vdev_change_load_wait',
-    'vdev_change_sync_wait', 'vdev_change_thread_wait']
+    'vdev_change_step_wait', 'vdev_change_sync_wait',
+    'vdev_change_thread_wait']
 tags = ['functional', 'replacement']
 
 [tests/functional/reservation]

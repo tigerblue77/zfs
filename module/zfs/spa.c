@@ -8500,6 +8500,7 @@ spa_vdev_add(spa_t *spa, nvlist_t *nvroot, boolean_t check_ashift)
 	 */
 	(void) spa_vdev_exit(spa, vd, txg, 0);
 
+	mutex_enter(&spa->spa_vdev_top_lock);
 	spa_namespace_enter(FTAG);
 	spa_config_update(spa, SPA_CONFIG_UPDATE_POOL);
 	if (nadded == 0)
@@ -8507,6 +8508,7 @@ spa_vdev_add(spa_t *spa, nvlist_t *nvroot, boolean_t check_ashift)
 	for (uint64_t c = 0; c < nadded; c++)
 		spa_event_post(evs[c]);
 	spa_namespace_exit(FTAG);
+	mutex_exit(&spa->spa_vdev_top_lock);
 	if (nadded > 0)
 		kmem_free(evs, nadded * sizeof (sysevent_t *));
 
@@ -8936,14 +8938,14 @@ spa_vdev_attach(spa_t *spa, uint64_t guid, nvlist_t *nvroot, int replacing,
 		 * Wait for the youngest allocations and frees to sync,
 		 * and then wait for the deferral of those frees to finish.
 		 */
-		spa_vdev_config_exit(spa, NULL,
-		    txg + TXG_CONCURRENT_STATES + TXG_DEFER_SIZE, 0, FTAG);
+		spa_vdev_config_pause(spa,
+		    txg + TXG_CONCURRENT_STATES + TXG_DEFER_SIZE, FTAG);
 
 		vdev_initialize_stop_all(tvd, VDEV_INITIALIZE_ACTIVE);
 		vdev_trim_stop_all(tvd, VDEV_TRIM_ACTIVE);
 		vdev_autotrim_stop_wait(tvd);
 
-		dtl_max_txg = spa_vdev_config_enter(spa);
+		dtl_max_txg = spa_vdev_config_resume(spa);
 
 		tvd->vdev_rz_expanding = B_TRUE;
 
@@ -9598,9 +9600,9 @@ spa_vdev_split_mirror(spa_t *spa, const char *newname, nvlist_t *config,
 
 	/* clear the log and flush everything up to now */
 	activate_slog = spa_passivate_log(spa);
-	(void) spa_vdev_config_exit(spa, NULL, txg, 0, FTAG);
+	spa_vdev_config_pause(spa, txg, FTAG);
 	error = spa_reset_logs(spa);
-	txg = spa_vdev_config_enter(spa);
+	txg = spa_vdev_config_resume(spa);
 
 	if (activate_slog)
 		spa_activate_log(spa);
@@ -9774,7 +9776,11 @@ spa_vdev_split_mirror(spa_t *spa, const char *newname, nvlist_t *config,
 	newspa->spa_config_txg = spa->spa_config_txg;
 	spa_set_log_state(newspa, SPA_LOG_CLEAR);
 
-	/* release the spa config lock, retaining the namespace lock */
+	/*
+	 * Release the spa config lock, retaining the namespace lock: the new
+	 * pool must not be found, nor its guid taken, before spa_load()
+	 * marks it as loading.
+	 */
 	spa_vdev_config_exit(spa, NULL, txg, 0, FTAG);
 
 	zio_handle_panic_injection(spa, FTAG, 1);
@@ -9853,7 +9859,11 @@ spa_vdev_split_mirror(spa_t *spa, const char *newname, nvlist_t *config,
 			goto out;
 	}
 
-	/* flush everything */
+	/*
+	 * Flush everything.  The new pool is loaded by now, and others may
+	 * find it while spa_vdev_config_enter() waits for its config lock
+	 * without spa_namespace_lock.
+	 */
 	txg = spa_vdev_config_enter(newspa);
 	vdev_config_dirty(newspa->spa_root_vdev);
 	(void) spa_vdev_config_exit(newspa, NULL, txg, 0, FTAG);
@@ -9863,7 +9873,8 @@ spa_vdev_split_mirror(spa_t *spa, const char *newname, nvlist_t *config,
 	spa_async_resume(newspa);
 
 	/*
-	 * Once spa_vdev_exit() drops spa_namespace_lock, the new pool can be
+	 * Once spa_namespace_lock is dropped, while spa_vdev_config_enter()
+	 * waits for the config lock or in spa_vdev_exit(), the new pool can be
 	 * exported or destroyed by another thread.  Hold it until we are done.
 	 */
 	spa_open_ref(newspa, FTAG);
@@ -10330,6 +10341,12 @@ spa_async_thread(void *arg)
 	if (tasks & SPA_ASYNC_CONFIG_UPDATE) {
 		uint64_t old_space, new_space;
 
+		/*
+		 * spa_vdev_top_lock keeps the update out of the middle of a
+		 * vdev change, which releases spa_namespace_lock between its
+		 * steps (spa_vdev_config_pause()).
+		 */
+		mutex_enter(&spa->spa_vdev_top_lock);
 		spa_namespace_enter(FTAG);
 		old_space = metaslab_class_get_space(spa_normal_class(spa));
 		old_space += metaslab_class_get_space(spa_special_class(spa));
@@ -10349,6 +10366,7 @@ spa_async_thread(void *arg)
 		new_space += metaslab_class_get_space(
 		    spa_special_embedded_log_class(spa));
 		spa_namespace_exit(FTAG);
+		mutex_exit(&spa->spa_vdev_top_lock);
 
 		/*
 		 * If the pool grew as a result of the config update,

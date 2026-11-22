@@ -1065,6 +1065,8 @@ extern uint64_t spa_vdev_detach_enter(spa_t *spa, uint64_t guid);
 extern uint64_t spa_vdev_config_enter(spa_t *spa);
 extern void spa_vdev_config_exit(spa_t *spa, vdev_t *vd, uint64_t txg,
     int error, const char *tag);
+extern void spa_vdev_config_pause(spa_t *spa, uint64_t txg, const char *tag);
+extern uint64_t spa_vdev_config_resume(spa_t *spa);
 extern int spa_vdev_exit(spa_t *spa, vdev_t *vd, uint64_t txg, int error);
 
 /* Pool vdev state change lock */
