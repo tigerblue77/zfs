@@ -1,0 +1,169 @@
+From 2bc9e93358330f12d89d02acf1844ca46c2541e1 Mon Sep 17 00:00:00 2001
+From: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 15:31:47 +0000
+Subject: [PATCH 3/6] vdev_queue: add zfs_vdev_queue_window, capping active
+ I/Os
+
+The vdev queue lets up to zfs_vdev_max_active (1000) I/Os be active on
+a leaf vdev, so in practice the sum of the per-class maxima: 33, or 44
+with every class active, more if they are raised.  A disk takes fewer
+at once: at most 32 for SATA with NCQ.  The I/Os beyond that wait in
+the block layer: for a request tag, the submitting thread asleep in
+blk_mq_get_tag(), where the tags are the device's own; in the dispatch
+lists, where the SCSI layer holds each disk to its queue_depth; or in
+the I/O scheduler.  There they are served in the block layer's order,
+not by the vdev queue's classes, and a sync read issued behind async
+writes waits for them.
+
+Let zfs_vdev_queue_window limit the I/Os active on a leaf vdev to
+zfs_vdev_queue_window_max or, when that is 0, to the queue depth its
+device reports.  On Linux, vdev_disk reads blk_queue_depth() when it
+opens the device: the depth the driver set, as SCSI does for SCSI and
+SATA disks, else the queue's nr_requests.  Nothing else reports one,
+so other vdevs keep only zfs_vdev_max_active unless
+zfs_vdev_queue_window_max is set.  The limit counts I/Os, not
+requests: an I/O larger than the device's max_sectors_kb still takes
+several.
+
+The next commit uses the same tunable for a window below that limit,
+adjusted to the latency of reads and sync writes.  It is off by
+default, and then nothing changes but the depth read at open.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>
+---
+ include/sys/vdev_impl.h         |  1 +
+ man/man4/zfs.4                  | 26 ++++++++++++++++++++++++
+ module/os/linux/zfs/vdev_disk.c |  3 +++
+ module/zfs/vdev_queue.c         | 35 ++++++++++++++++++++++++++++++++-
+ 4 files changed, 64 insertions(+), 1 deletion(-)
+
+diff --git a/include/sys/vdev_impl.h b/include/sys/vdev_impl.h
+index e44dc3da53f..bce34b70807 100644
+--- a/include/sys/vdev_impl.h
++++ b/include/sys/vdev_impl.h
+@@ -425,6 +425,7 @@ struct vdev {
+ 	boolean_t	vdev_resilver_deferred;  /* resilver deferred */
+ 	boolean_t	vdev_kobj_flag; /* kobj event record */
+ 	boolean_t	vdev_attaching; /* vdev attach ashift handling */
++	uint32_t	vdev_queue_depth; /* device queue depth, 0 unknown */
+ 	vdev_queue_t	vdev_queue;	/* I/O deadline schedule queue	*/
+ 	spa_aux_vdev_t	*vdev_aux;	/* for l2cache and spares vdevs	*/
+ 	zio_t		*vdev_probe_zio; /* root of current probe	*/
+diff --git a/man/man4/zfs.4 b/man/man4/zfs.4
+index e4e48c5b22f..876577e1956 100644
+--- a/man/man4/zfs.4
++++ b/man/man4/zfs.4
+@@ -1533,6 +1533,32 @@ Ideally, this will be at least the sum of each queue's
+ .Sy max_active .
+ .No See Sx ZFS I/O SCHEDULER .
+ .
++.It Sy zfs_vdev_queue_window Ns = Ns Sy 0 Ns | Ns 1 Pq uint
++When set, the number of I/O operations active to each device is also limited
++to
++.Sy zfs_vdev_queue_window_max ,
++so that the operations issued do not wait for a request slot below ZFS,
++where the order chosen by the
++.Sx ZFS I/O SCHEDULER
++no longer applies.
++.
++.It Sy zfs_vdev_queue_window_max Ns = Ns Sy 0 Pq uint
++The limit applied by
++.Sy zfs_vdev_queue_window .
++With
++.Sy 0 ,
++the queue depth of the device, read when it is opened:
++on Linux, that of a block device's driver, as in
++.Pa device/queue_depth
++in sysfs for SCSI and SATA disks, or else
++.Pa queue/nr_requests .
++Other devices report none, and are then limited by
++.Sy zfs_vdev_max_active
++alone.
++An operation larger than the device takes in one request
++.Pq Pa queue/max_sectors_kb
++still takes several.
++.
+ .It Sy zfs_vdev_open_timeout_ms Ns = Ns Sy 1000 Pq uint
+ Timeout value to wait before determining a device is missing
+ during import.
+diff --git a/module/os/linux/zfs/vdev_disk.c b/module/os/linux/zfs/vdev_disk.c
+index 50522280e14..63a049b9160 100644
+--- a/module/os/linux/zfs/vdev_disk.c
++++ b/module/os/linux/zfs/vdev_disk.c
+@@ -510,6 +510,9 @@ vdev_disk_open(vdev_t *v, uint64_t *psize, uint64_t *max_psize,
+ 	v->vdev_nonrot = blk_queue_nonrot(bdev_get_queue(bdev));
+ #endif
+ 
++	/* Requests the device takes at once, for zfs_vdev_queue_window. */
++	v->vdev_queue_depth = blk_queue_depth(bdev_get_queue(bdev));
++
+ 	/* Physical volume size in bytes for the partition */
+ 	*psize = bdev_capacity(bdev);
+ 
+diff --git a/module/zfs/vdev_queue.c b/module/zfs/vdev_queue.c
+index c12713b107b..1e06a407a9a 100644
+--- a/module/zfs/vdev_queue.c
++++ b/module/zfs/vdev_queue.c
+@@ -193,6 +193,15 @@ static uint_t zfs_vdev_nia_delay = 5;
+  */
+ static uint_t zfs_vdev_nia_credit = 5;
+ 
++/*
++ * With zfs_vdev_queue_window set, a leaf vdev has no more I/Os active than
++ * zfs_vdev_queue_window_max or, if that is 0, the queue depth its device
++ * reports (only Linux block devices do), so that the I/Os the queue issued
++ * do not wait below it for a request slot, where its priorities are lost.
++ */
++static uint_t zfs_vdev_queue_window = 0;
++static uint_t zfs_vdev_queue_window_max = 0;
++
+ /*
+  * To reduce IOPs, we aggregate small adjacent I/Os into one large I/O.
+  * For read I/Os, we also aggregate across small adjacency gaps; for writes
+@@ -401,6 +410,24 @@ vdev_queue_class_max_active(vdev_queue_t *vq, zio_priority_t p)
+ 	}
+ }
+ 
++/*
++ * The most I/Os that may be active on the vdev at once.
++ */
++static uint32_t
++vdev_queue_max_active(vdev_queue_t *vq)
++{
++	uint32_t max = zfs_vdev_max_active;
++
++	if (zfs_vdev_queue_window != 0) {
++		uint32_t cap = zfs_vdev_queue_window_max;
++		if (cap == 0)
++			cap = vq->vq_vdev->vdev_queue_depth;
++		if (cap != 0 && cap < max)
++			max = cap;
++	}
++	return (max);
++}
++
+ /*
+  * Return the i/o class to issue from, or ZIO_PRIORITY_NUM_QUEUEABLE if
+  * there is no eligible class.
+@@ -411,7 +438,7 @@ vdev_queue_class_to_issue(vdev_queue_t *vq)
+ 	uint32_t cq = vq->vq_cqueued;
+ 	zio_priority_t p, p1;
+ 
+-	if (cq == 0 || vq->vq_active >= zfs_vdev_max_active)
++	if (cq == 0 || vq->vq_active >= vdev_queue_max_active(vq))
+ 		return (ZIO_PRIORITY_NUM_QUEUEABLE);
+ 
+ 	/*
+@@ -1143,3 +1170,9 @@ ZFS_MODULE_PARAM(zfs_vdev, zfs_vdev_, nia_credit, UINT, ZMOD_RW,
+ 
+ ZFS_MODULE_PARAM(zfs_vdev, zfs_vdev_, nia_delay, UINT, ZMOD_RW,
+ 	"Number of non-interactive I/Os before _max_active");
++
++ZFS_MODULE_PARAM(zfs_vdev, zfs_vdev_, queue_window, UINT, ZMOD_RW,
++	"Limit active I/Os per vdev to its queue depth");
++
++ZFS_MODULE_PARAM(zfs_vdev, zfs_vdev_, queue_window_max, UINT, ZMOD_RW,
++	"Max active I/Os per vdev with queue_window, 0 for its queue depth");
+-- 
+2.43.0
+

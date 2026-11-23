@@ -1,0 +1,293 @@
+From e328ef70bc2930cb779de1106a8daa515ac93d3c Mon Sep 17 00:00:00 2001
+From: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 15:31:47 +0000
+Subject: [PATCH 4/6] vdev_queue: adjust zfs_vdev_queue_window to read latency
+
+blk-wbt is the only limit on writes to a disk that reacts to how long
+reads take: it lets a quarter of min(16, queue depth) writes through
+when a read was issued or completed in the last 100 ms, and about
+halves that, down to 1, after each 100 ms in which every read took
+longer than wbt_lat_usec, 75 ms on rotational disks.  With
+zfs_vdev_disk_sync_writes=2, the writes the vdev queue paces leave
+blk-wbt, and nothing replaces it: the queue keeps 2 to 10 async writes
+active per leaf vdev by the amount of dirty data, whatever the reads.
+On a Debian 13 VM with five null_blk rotational disks, that gave 1.5x
+the writer throughput and 1.35x the read p99, the same as turning
+blk-wbt off; on a raidz2 of five SATA HDDs, turning blk-wbt off made
+reads about 20% slower.
+
+So below the limit zfs_vdev_queue_window sets, keep a window per leaf
+vdev: beyond its class's min_active, no I/O is issued while as many as
+the window are active.  The window starts at the limit.  After each
+period, 250 ms on rotating media and 20 ms on others, it shrinks by a
+quarter, but not below 1, if more than a tenth of the reads and sync
+writes completed during the period took longer than
+zfs_vdev_queue_window_rotating_us (75 ms, blk-wbt's default for
+rotational disks) or zfs_vdev_queue_window_non_rotating_us (2 ms, its
+default for the others); otherwise, if it held an I/O back, it grows
+by an eighth, up to the limit.  Sync writes count with reads because a
+thread waits for them too, and they are slow when the disk is
+congested; async writes complete into a volatile write cache, so their
+latency says little.  The latency is io_delay, from issue to
+completion, which zpool iostat reports as disk_wait.  A target of 0
+leaves the window at the limit.
+
+While reads are slow, the window holds async writes at
+zfs_vdev_async_write_min_active, 2 by default, and scrub and the other
+background classes at their min_active.  The sync classes keep theirs,
+10, which is also their default max_active.  Their max_active still
+applies: raised, it lets them use the room the window gives while
+latency allows, and so absorb bursts of sync writes.
+
+It is off by default.  Whether it protects reads as blk-wbt does while
+keeping most of the throughput of zfs_vdev_disk_sync_writes=2 is what
+it is for, and has not been measured yet.
+
+Signed-off-by: Tigerblue77 <37409593+tigerblue77@users.noreply.github.com>
+---
+ include/sys/vdev_impl.h |  5 +++
+ man/man4/zfs.4          | 55 +++++++++++++++++++++++-
+ module/zfs/vdev_queue.c | 94 ++++++++++++++++++++++++++++++++++++++++-
+ 3 files changed, 151 insertions(+), 3 deletions(-)
+
+diff --git a/include/sys/vdev_impl.h b/include/sys/vdev_impl.h
+index bce34b70807..da782995944 100644
+--- a/include/sys/vdev_impl.h
++++ b/include/sys/vdev_impl.h
+@@ -151,6 +151,11 @@ struct vdev_queue {
+ 	list_t		vq_active_list;	/* List of active I/Os. */
+ 	hrtime_t	vq_io_complete_ts; /* time last i/o completed */
+ 	hrtime_t	vq_io_delta_ts;
++	hrtime_t	vq_win_start;	/* window: start of the period */
++	uint32_t	vq_win_depth;	/* window: active I/Os, 0 unset */
++	uint32_t	vq_win_ios;	/* window: latency samples */
++	uint32_t	vq_win_slow;	/* window: samples over target */
++	boolean_t	vq_win_held;	/* window: an I/O was held back */
+ 	zio_t		vq_io_search; /* used as local for stack reduction */
+ 	kmutex_t	vq_lock;
+ };
+diff --git a/man/man4/zfs.4 b/man/man4/zfs.4
+index 876577e1956..4b8cd63ba19 100644
+--- a/man/man4/zfs.4
++++ b/man/man4/zfs.4
+@@ -1540,7 +1540,41 @@ to
+ so that the operations issued do not wait for a request slot below ZFS,
+ where the order chosen by the
+ .Sx ZFS I/O SCHEDULER
+-no longer applies.
++no longer applies,
++and below that to a window adjusted to the latency of the device.
++Once a class has its
++.Sy min_active
++operations active, no further one is issued from it
++while as many operations as the window are active.
++.Pp
++The window starts at
++.Sy zfs_vdev_queue_window_max .
++At the end of each period, of 250 ms on rotating media and 20 ms on others,
++it shrinks by a quarter, but not below one,
++if more than a tenth of the reads and synchronous writes
++completed during the period took longer than
++.Sy zfs_vdev_queue_window_rotating_us
++or
++.Sy zfs_vdev_queue_window_non_rotating_us
++from issue to completion,
++the
++.Sy disk_wait
++reported by
++.Nm zpool Cm iostat Fl l .
++Otherwise, if it held an operation back, it grows by an eighth, up to
++.Sy zfs_vdev_queue_window_max .
++.Pp
++The window thus limits writes, and other operations beyond their
++.Sy min_active ,
++while reads take too long, as the Linux writeback throttle
++.Pq blk-wbt
++does for the writes it handles, see
++.Sy zfs_vdev_disk_sync_writes .
++The
++.Sy max_active
++of each class still applies:
++raising that of the synchronous classes lets them use the window
++while the latency allows it.
+ .
+ .It Sy zfs_vdev_queue_window_max Ns = Ns Sy 0 Pq uint
+ The limit applied by
+@@ -1558,6 +1592,25 @@ alone.
+ An operation larger than the device takes in one request
+ .Pq Pa queue/max_sectors_kb
+ still takes several.
++Below the sum of the classes'
++.Sy min_active ,
++the classes below their minimum take turns.
++.
++.It Sy zfs_vdev_queue_window_rotating_us Ns = Ns Sy 75000 Ns \(mcs Po 75 ms Pc Pq uint
++The latency target of the window of
++.Sy zfs_vdev_queue_window
++on rotating media.
++.Sy 0
++keeps the window at
++.Sy zfs_vdev_queue_window_max .
++.
++.It Sy zfs_vdev_queue_window_non_rotating_us Ns = Ns Sy 2000 Ns \(mcs Po 2 ms Pc Pq uint
++The latency target of the window of
++.Sy zfs_vdev_queue_window
++on non-rotating media.
++.Sy 0
++keeps the window at
++.Sy zfs_vdev_queue_window_max .
+ .
+ .It Sy zfs_vdev_open_timeout_ms Ns = Ns Sy 1000 Pq uint
+ Timeout value to wait before determining a device is missing
+diff --git a/module/zfs/vdev_queue.c b/module/zfs/vdev_queue.c
+index 1e06a407a9a..8648c9463ce 100644
+--- a/module/zfs/vdev_queue.c
++++ b/module/zfs/vdev_queue.c
+@@ -202,6 +202,20 @@ static uint_t zfs_vdev_nia_credit = 5;
+ static uint_t zfs_vdev_queue_window = 0;
+ static uint_t zfs_vdev_queue_window_max = 0;
+ 
++/*
++ * Below that limit, the window: beyond its class's min_active, no I/O is
++ * issued while as many as the window are active.  At the end of a period,
++ * it shrinks by a quarter if more than a tenth of the reads and sync
++ * writes completed in it took longer than the target, from issue to
++ * completion, and otherwise grows by an eighth if it held an I/O back.
++ * A target of 0 leaves the window at the limit.
++ */
++static uint_t zfs_vdev_queue_window_rotating_us = 75000;
++static uint_t zfs_vdev_queue_window_non_rotating_us = 2000;
++
++#define	VDQ_WINDOW_PERIOD_ROTATING	MSEC2NSEC(250)
++#define	VDQ_WINDOW_PERIOD_NON_ROTATING	MSEC2NSEC(20)
++
+ /*
+  * To reduce IOPs, we aggregate small adjacent I/Os into one large I/O.
+  * For read I/Os, we also aggregate across small adjacency gaps; for writes
+@@ -428,6 +442,14 @@ vdev_queue_max_active(vdev_queue_t *vq)
+ 	return (max);
+ }
+ 
++static uint32_t
++vdev_queue_window(vdev_queue_t *vq, uint32_t max)
++{
++	uint32_t w = vq->vq_win_depth;
++
++	return (w == 0 || w > max ? max : w);
++}
++
+ /*
+  * Return the i/o class to issue from, or ZIO_PRIORITY_NUM_QUEUEABLE if
+  * there is no eligible class.
+@@ -436,9 +458,10 @@ static zio_priority_t
+ vdev_queue_class_to_issue(vdev_queue_t *vq)
+ {
+ 	uint32_t cq = vq->vq_cqueued;
++	uint32_t max = vdev_queue_max_active(vq);
+ 	zio_priority_t p, p1;
+ 
+-	if (cq == 0 || vq->vq_active >= vdev_queue_max_active(vq))
++	if (cq == 0 || vq->vq_active >= max)
+ 		return (ZIO_PRIORITY_NUM_QUEUEABLE);
+ 
+ 	/*
+@@ -469,6 +492,11 @@ vdev_queue_class_to_issue(vdev_queue_t *vq)
+ 		    vdev_queue_class_max_active(vq, p))
+ 			break;
+ 	}
++	if (p < ZIO_PRIORITY_NUM_QUEUEABLE && zfs_vdev_queue_window != 0 &&
++	    vq->vq_active >= vdev_queue_window(vq, max)) {
++		vq->vq_win_held = B_TRUE;
++		p = ZIO_PRIORITY_NUM_QUEUEABLE;
++	}
+ 
+ found:
+ 	vq->vq_last_prio = p;
+@@ -596,6 +624,60 @@ vdev_queue_pending_remove(vdev_queue_t *vq, zio_t *zio)
+ 	zio->io_queue_state = ZIO_QS_NONE;
+ }
+ 
++/*
++ * Take the latency of a completed read or sync write into the window, and
++ * at the end of a period, adjust the window.  The latency is io_delay, from
++ * issue to completion, which zpool iostat reports as disk_wait.
++ */
++static void
++vdev_queue_window_update(vdev_queue_t *vq, zio_t *zio, hrtime_t now)
++{
++	uint32_t max, w;
++	hrtime_t target, period;
++
++	ASSERT(MUTEX_HELD(&vq->vq_lock));
++
++	if (vq->vq_vdev->vdev_nonrot) {
++		target = USEC2NSEC(zfs_vdev_queue_window_non_rotating_us);
++		period = VDQ_WINDOW_PERIOD_NON_ROTATING;
++	} else {
++		target = USEC2NSEC(zfs_vdev_queue_window_rotating_us);
++		period = VDQ_WINDOW_PERIOD_ROTATING;
++	}
++
++	if (vq->vq_win_depth == 0) {
++		vq->vq_win_depth = MAX(vdev_queue_max_active(vq), 1);
++		vq->vq_win_start = now;
++	}
++
++	switch (zio->io_priority) {
++	case ZIO_PRIORITY_SYNC_READ:
++	case ZIO_PRIORITY_SYNC_WRITE:
++	case ZIO_PRIORITY_ASYNC_READ:
++		vq->vq_win_ios++;
++		if (target != 0 && zio->io_delay > target)
++			vq->vq_win_slow++;
++		break;
++	default:
++		break;
++	}
++
++	if (now - vq->vq_win_start < period)
++		return;
++
++	max = MAX(vdev_queue_max_active(vq), 1);
++	w = vdev_queue_window(vq, max);
++	if (vq->vq_win_slow > vq->vq_win_ios / 10)
++		w -= MIN(w - 1, MAX(1, w / 4));
++	else if (vq->vq_win_held)
++		w = MIN(max, w + MAX(1, w / 8));
++	vq->vq_win_depth = w;
++	vq->vq_win_start = now;
++	vq->vq_win_ios = 0;
++	vq->vq_win_slow = 0;
++	vq->vq_win_held = B_FALSE;
++}
++
+ static void
+ vdev_queue_agg_io_done(zio_t *aio)
+ {
+@@ -983,6 +1065,8 @@ vdev_queue_io_done(zio_t *zio)
+ 
+ 	mutex_enter(&vq->vq_lock);
+ 	vdev_queue_pending_remove(vq, zio);
++	if (zfs_vdev_queue_window != 0)
++		vdev_queue_window_update(vq, zio, now);
+ 
+ 	while ((nio = vdev_queue_io_to_issue(vq)) != NULL) {
+ 		mutex_exit(&vq->vq_lock);
+@@ -1172,7 +1256,13 @@ ZFS_MODULE_PARAM(zfs_vdev, zfs_vdev_, nia_delay, UINT, ZMOD_RW,
+ 	"Number of non-interactive I/Os before _max_active");
+ 
+ ZFS_MODULE_PARAM(zfs_vdev, zfs_vdev_, queue_window, UINT, ZMOD_RW,
+-	"Limit active I/Os per vdev to its queue depth");
++	"Limit active I/Os per vdev by queue depth and read latency");
+ 
+ ZFS_MODULE_PARAM(zfs_vdev, zfs_vdev_, queue_window_max, UINT, ZMOD_RW,
+ 	"Max active I/Os per vdev with queue_window, 0 for its queue depth");
++
++ZFS_MODULE_PARAM(zfs_vdev, zfs_vdev_, queue_window_rotating_us, UINT,
++	ZMOD_RW, "Latency target of queue_window on rotating media");
++
++ZFS_MODULE_PARAM(zfs_vdev, zfs_vdev_, queue_window_non_rotating_us, UINT,
++	ZMOD_RW, "Latency target of queue_window on non-rotating media");
+-- 
+2.43.0
+
