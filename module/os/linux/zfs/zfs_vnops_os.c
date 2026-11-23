@@ -3877,9 +3877,6 @@ zfs_putpage(struct inode *ip, struct page *pp, struct writeback_control *wbc,
 	int		cnt = 0;
 	struct address_space *mapping;
 
-	if ((err = zfs_enter_verify_zp(zfsvfs, zp, FTAG)) != 0)
-		return (err);
-
 	ASSERT(PageLocked(pp));
 
 	pgoff = page_offset(pp);	/* Page byte-offset in file */
@@ -3890,7 +3887,6 @@ zfs_putpage(struct inode *ip, struct page *pp, struct writeback_control *wbc,
 	/* Page is beyond end of file */
 	if (pgoff >= offset) {
 		unlock_page(pp);
-		zfs_exit(zfsvfs, FTAG);
 		return (0);
 	}
 
@@ -3928,10 +3924,18 @@ zfs_putpage(struct inode *ip, struct page *pp, struct writeback_control *wbc,
 	 *    must be held in order to prevent a lock inversion with the
 	 *    zfs_free_range() function.
 	 *
+	 * 3) The page must also be unlocked before entering the file system.
+	 *    Threads inside it wait for page locks (zfs_read(), zfs_write(),
+	 *    zpl_fadvise() flushing the page cache, another zfs_putpage()
+	 *    relocking the page below), and once a writer such as a rollback
+	 *    waits for the teardown lock, no new reader gets in until they
+	 *    have left.
+	 *
 	 * This presents a problem because upon entering this function the
-	 * page lock is already held.  To safely acquire the range lock the
-	 * page lock must be dropped.  This creates a window where another
-	 * process could truncate, invalidate, dirty, or write out the page.
+	 * page lock is already held.  To safely enter the file system and
+	 * acquire the range lock the page lock must be dropped.  This creates
+	 * a window where another process could truncate, invalidate, dirty,
+	 * or write out the page.
 	 *
 	 * Therefore, after successfully reacquiring the range and page locks
 	 * the current page state is checked.  In the common case everything
@@ -3941,6 +3945,9 @@ zfs_putpage(struct inode *ip, struct page *pp, struct writeback_control *wbc,
 	mapping = pp->mapping;
 	redirty_page_for_writepage(wbc, pp);
 	unlock_page(pp);
+
+	if ((err = zfs_enter_verify_zp(zfsvfs, zp, FTAG)) != 0)
+		return (err);
 
 	zfs_locked_range_t *lr = zfs_rangelock_enter(&zp->z_rangelock,
 	    pgoff, pglen, RL_WRITER);
