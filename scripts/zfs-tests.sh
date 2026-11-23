@@ -642,7 +642,15 @@ post_user = root
 post =
 EOF
 	if [ "$SINGLETEST" = "${SINGLETEST%/*}" ] ; then
-		NEWSINGLETEST=$(find "$STF_SUITE" -name "$SINGLETEST*" -print -quit)
+		# Search only tests/, for the exact name first: a helper, data
+		# file, directory or other test can start with a test's name.
+		# Some tests are programs, which libtool also keeps in .libs.
+		NEWSINGLETEST=$(find "$STF_SUITE/tests" -name .libs -prune \
+		    -o -type f \( -name "$SINGLETEST" -o \
+		    -name "$SINGLETEST.ksh" \) -print -quit)
+		[ -n "$NEWSINGLETEST" ] || NEWSINGLETEST=$(find \
+		    "$STF_SUITE/tests" -type f -name "$SINGLETEST*.ksh" \
+		    -print -quit)
 		if [ -z "$NEWSINGLETEST" ] ; then
 			fail "couldn't find test matching '$SINGLETEST'"
 		fi
