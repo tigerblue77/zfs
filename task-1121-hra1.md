@@ -1,6 +1,10 @@
-TASK-1121-HRA1 (from the coordinator session "main"): performance, on VM 105 (CHSONVTST02) booted once into 7.0.14-25-pve, pass 1 of 6 of the host rig's arms, about 3 h 45 on the VM plus the wait for main's GO, at most 4 h 50 without that wait (the first task builds seven trees, about 1 h 50). Its measured part (steps 7 and 8, about 70 min, never more than 85) runs ALONE on the host and on a quiet VM: before it you end your turn with a note for main and wait for main's GO; you never check the other VMs yourself. Steps 0 to 5 are functional and may run while other VMs work. The rig is TASK-1121-HRIG's (five emulated hard disks served by `hddsim`, a raidz2 filled like the host's pool, the host's guest on a 1M zvol), at the device configuration calibration chose, and is switched before every run to one of 15 arms: a code tree, module parameters and device settings each. If TASK-1122-HRIG3's verdict is NOT CALIBRATED, the rig is labelled "not calibrated" (the owner's decision of 21/11): the series runs on the closest point measured, its comparisons between arms are valid, and its absolute values are not the host's. This task runs each arm once, in a fixed order; six such tasks make the six passes the verdicts need. Two reboots are pre-approved for this task only (into 7.0 at step 3, back to Debian at step 10); for this task that replaces the standing approval of 18/11. Nothing is published on GitHub, no credential files, fstrim at the end. Report: `/var/log/task-1121-hra1/report.md` and the same text as your final message.
+TASK-1121-HRA1 (from the coordinator session "main"): performance, on VM 105 (CHSONVTST02) booted once into 7.0.14-25-pve, pass 1 of 6 of the host rig's arms, run again in full (its second attempt, below), about 1 h 55 on the VM plus the wait for main's GO, at most 2 h 50 without that wait (the trees the first attempt built are checked and reused). Its measured part (steps 7 and 8, about 70 min, never more than 85) runs ALONE on the host and on a quiet VM: before it you end your turn with a note for main and wait for main's GO; you never check the other VMs yourself. Steps 0 to 5 are functional and may run while other VMs work. The rig is TASK-1121-HRIG's (five emulated hard disks served by `hddsim`, a raidz2 filled like the host's pool, the host's guest on a 1M zvol), at the device configuration calibration chose, and is switched before every run to one of 15 arms: a code tree, module parameters and device settings each. If TASK-1122-HRIG3's verdict is NOT CALIBRATED, the rig is labelled "not calibrated" (the owner's decision of 21/11): the series runs on the closest point measured, its comparisons between arms are valid, and its absolute values are not the host's. This task runs each arm once, in a fixed order; six such tasks make the six passes the verdicts need. Two reboots are pre-approved for this task only (into 7.0 at step 3, back to Debian at step 10); for this task that replaces the standing approval of 18/11. Nothing is published on GitHub, no credential files, fstrim at the end. Report: `/var/log/task-1121-hra1/report.md` and the same text as your final message.
 
-**Filled by main (22/11):** kit v2.1 commit `cca50b0943d674176aa10f98fdcfc271ef392bae` (fork branch `vm-kit-hra21`, no parent, tree `b50c3f0a74fd73077b596376dd793013cfa71765`); the rig's point `grid/G7.conf` (sha256 `538b4c3b879d8e69b0c9a7b3e6d8f2fe2bb3d6337c9b5fa7ba3625ddb12af7b8`) with the guest at its defaults (`-`), from TASK-1122-HRIG3's verdict line `TASK-1122-HRIG3 VERDICT: NOT CALIBRATED g7-50mbs: P1; closest: grid/G7.conf 538b4c3b879d8e69b0c9a7b3e6d8f2fe2bb3d6337c9b5fa7ba3625ddb12af7b8 GUEST=-`. The rig is therefore labelled **not calibrated**: every result of this task says so.
+**Filled by main (23/11):** the kit v2.2 commit `964c0afff7ab58e7867f808c24fab14c0961799b` (published on the fork as the orphan branch `vm-kit-hra22`, no parent, tree `86b41cf24b89622b18946cb4a26b016f5e623b44`). **Filled by main (22/11):** the rig's point `grid/G7.conf` (sha256 `538b4c3b879d8e69b0c9a7b3e6d8f2fe2bb3d6337c9b5fa7ba3625ddb12af7b8`) with the guest at its defaults (`-`), from TASK-1122-HRIG3's verdict line `TASK-1122-HRIG3 VERDICT: NOT CALIBRATED g7-50mbs: P1; closest: grid/G7.conf 538b4c3b879d8e69b0c9a7b3e6d8f2fe2bb3d6337c9b5fa7ba3625ddb12af7b8 GUEST=-`. The rig is therefore labelled **not calibrated**: every result of this task says so.
+
+**Kit v2.2 (23/11), the only change from kit v2.1:** `hddsim.c`'s page store. TASK-1121-HRA1's first attempt (22/11) stopped in pass A1 at arm P1I: with `zfs_immediate_write_sz=2097152` every guest write is copied into the ZIL, whose log records shift the guest's patterned pages by their headers, so kit v2.1's store (a page kept compact only if it repeats its first 8 bytes) kept almost every log sector in full and each disk's 512 MiB ran out in about 1.5 min; the disks refused writes and the pool suspended. Kit v2.2 keeps a page made of at most four runs of one 8-byte word in 40 bytes (on a model of P1I's log stream, v2.1 kept 99.7 % of the sectors in full, v2.2 keeps 92.4 % as runs and holds 8.4 % of v2.1's bytes), within the same `store_mb=512` per disk (the runs and the full pages together), and its statistics lines add `runs` (pages kept as runs) and `store_kib` (the store's memory). The disk model is unchanged: `selftest` and `priotest` print the same lines as kit v2.1's on every grid point, and every other file of the kit is kit v2.1's, byte for byte.
+
+**Second attempt (23/11): pass A1 again, in full.** The first attempt (22/11, kit v2.1) ran 7 of A1's 15 arms validly (R0, M0, pr3o, P0, pr3, P1, PQ3) before the store ran out in P1I. Its runs are not completed but replaced: the plan pairs each comparison inside one pass, measured within the same hour, and continuing from P1I would put 8 of the 16 comparisons (C5, C6, C7, C8, C9, C12, C13, C14) across two days, two pool fills and two builds of `hddsim`, and would make P1I follow the warm-up instead of PQ3 (the Williams order). Step 0 moves the first attempt's directory aside, unchanged, to `/var/log/task-1121-hra1-1122`; nothing reads it. The trees it built in `/var/tmp/hra-trees` are checked and reused.
 
 **Your messages to main are blocked:** a message you send to main is refused, so do not try. Main reads your chat instead. Every note for main is therefore the end of a turn in your own chat. End this task with your final report as your last message (the full text, nothing after it), then stay idle until main writes. The final report is sent after the reboot of step 10.
 
@@ -29,7 +33,7 @@ The owner's host (Dell T630, kernel 7.0.14-29-pve, OpenZFS 2.4.4, five SATA hard
 
 | What | Source | Commit | Tree |
 | --- | --- | --- | --- |
-| kit v2.1 | https://github.com/tigerblue77/zfs, by commit (branch `vm-kit-hra21`) | `cca50b0943d674176aa10f98fdcfc271ef392bae` (no parent) | `b50c3f0a74fd73077b596376dd793013cfa71765` |
+| kit v2.2 | https://github.com/tigerblue77/zfs, by commit (branch `vm-kit-hra22`) | `964c0afff7ab58e7867f808c24fab14c0961799b` (no parent) | `86b41cf24b89622b18946cb4a26b016f5e623b44` |
 | R, OpenZFS 2.4.4 | https://github.com/openzfs/zfs tag `zfs-2.4.4` (tag object `f75f3256a0916c5ba090b088e6ea5a9528f6f956`) | `71a9f9578616a90c3c14bb59629fb4d31bfd68d1` | `d2a62ec4527f872ce840ba60f50248e66fcc080b` |
 | M, master | the fork, by commit (A~3) | `c913da86156eba3243cc1ef515e98d69887654a7` | `7e32938edf1a54c02519e2dc0104e9325b5a6f4d` |
 | P, PR1 | the fork, by commit (branch `vdev-disk-bio-sync-flags`) | `846b9194b4a3eb54f601c1bda0382b68d785b0ef` | `9a4214cf8f0887e110763ef53c666c8527c2ca9e` |
@@ -53,11 +57,11 @@ The rig's point (`grid/G7.conf`, the closest measured, not calibrated): the kit'
 | `grid/G7.conf` | `538b4c3b879d8e69b0c9a7b3e6d8f2fe2bb3d6337c9b5fa7ba3625ddb12af7b8` |
 | `grid/G8.conf` | `fa7ec5a6b920725373c83e78321824294366859058633fa35a892fc213dfb875` |
 
-## The rig (`hr-bench.sh`, kit v2.1)
+## The rig (`hr-bench.sh`, kit v2.2)
 
 As TASK-1121-HRIG (disks `/dev/ublkb70`-`74`, 16 GiB, 4K, rotational, volatile write cache, scheduler `none`, iostats; pool `hrp` raidz2, ashift 12, compression off, `cachefile=none`, zvol `hrp/vm` 1M filled whole, filler to 66 %; the same ZFS settings after every module load; the same guest, sampler and counters; the guest runs with TASK-1122-HRIG3's guest settings (`-`) when they are not `-`), with these differences:
 
-- **The model** is `$L/best.conf`, the calibrated point, for every arm, plus the arm's `ncq_prio`. hddsim v2 adds NCQ priority (`ncq_prio`, off by default; with it off the model is TASK-1121-HRIG's, checked at step 4): a request that arrives with UBLK_IO_F_META is marked; with `ncq_prio=1` a marked command waiting for the media is served before every normal one in the NCQ (shortest positioning first among the marked), the oldest command past `age_ms` (1 s) still going first whatever its mark, the commands waiting above the NCQ staying in arrival order, a media operation in progress never interrupted, flushes and the destaging the drive forces (cache above 75 %, a write waiting for space) unchanged; with `ncq_prio=2` marked commands also go before that forced destaging, until a write has waited `age_ms` for space. ATA leaves how a drive serves high-priority commands to its firmware: 1 is the reading that assumes least, 2 the most. Each disk's statistics line counts the requests of the second that arrived marked (`mark r w f o`), and `rej` the requests answered with an error since the start (kit v1.1's counter; v1.1's flush fix is in too).
+- **The model** is `$L/best.conf`, the calibrated point, for every arm, plus the arm's `ncq_prio`. hddsim v2 adds NCQ priority (`ncq_prio`, off by default; with it off the model is TASK-1121-HRIG's, checked at step 4): a request that arrives with UBLK_IO_F_META is marked; with `ncq_prio=1` a marked command waiting for the media is served before every normal one in the NCQ (shortest positioning first among the marked), the oldest command past `age_ms` (1 s) still going first whatever its mark, the commands waiting above the NCQ staying in arrival order, a media operation in progress never interrupted, flushes and the destaging the drive forces (cache above 75 %, a write waiting for space) unchanged; with `ncq_prio=2` marked commands also go before that forced destaging, until a write has waited `age_ms` for space. ATA leaves how a drive serves high-priority commands to its firmware: 1 is the reading that assumes least, 2 the most. Each disk's statistics line counts the requests of the second that arrived marked (`mark r w f o`), and `rej` the requests answered with an error since the start (kit v1.1's counter; v1.1's flush fix is in too). Kit v2.2's store keeps a page of at most four runs of one 8-byte word in 40 bytes, within the same `store_mb` (512 MiB per disk), and each statistics line adds `runs` and `store_kib`.
 - **Every run switches the rig to its arm**, on fast disks (every request completes at once): the pool is exported, the arm's tree loaded (`scripts/zfs.sh -u`, then `scripts/zfs.sh`, srcversion checked against the build), the common settings and the arm's parameters written and read back, the pool imported (`-d` on the five disks only, `-o cachefile=none`), the guest's database and journal areas (320 MiB) read once through the zvol so that their partial-block writes find their blocks in the ARC, then the disks get the model and blk-wbt its target (1 first, so that it restarts from its initial depth). `arm.txt` in the run's directory records what is loaded: the tree's stamp, srcversion loaded and built, every zfs and spl module parameter, every disk's sysfs queue values, every server's parameters.
 - **One run** is 45 s of ramp and 180 s measured (TASK-1121-HRIG's measures otherwise), about 4 min 25 s with the switch. A warm-up run (30 s + 60 s, pass `W<pass>`, not in the verdicts) of the pass's last arm comes first, so that the first arm also follows another.
 
@@ -163,7 +167,7 @@ for i in 70 71 72 73 74; do sed -n '/ready/,$p' $L/dev/$i.out | sed 1d; done | w
 sudo -n dmesg | tac | sed '/task-1121-hra1: start/q' | grep -c 'error, dev ublkb'
 ```
 - **The trees** stay in `/var/tmp/hra-trees` from one arms task to the next; only TASK-1121-HRA6 removes them. Never edit a file in them; a tree that fails `hr-trees.sh check` is a stop.
-- Every build, setup step, run and chain runs detached (`setsid nohup ... &`) and is polled. A hang is: the trees' build still going after 3 hours; `disks` after 5 minutes; `pool` after 30 minutes; `armcheck` after 25 minutes; a run after 10 minutes, or `driver.log` unchanged for 10 minutes while a chain runs. Then capture `ps -eLo pid,tid,stat,comm,wchan:32 | grep -E ' D|txg|z_|zpool|python3|hddsim|kworker'`, the kernel stacks of every D task (`sudo -n cat /proc/<pid>/stack`), `tail -n 5 $L/dev/*.stats`, `cat $L/dev/*.out` and `sudo -n dmesg | tail -n 150` into `$L/hang-<tag>.txt`, then stop and report.
+- Every build, setup step, run and chain runs detached (`setsid nohup ... &`) and is polled. A hang is: the trees' build still going after 60 minutes; `disks` after 5 minutes; `pool` after 30 minutes; `armcheck` after 25 minutes; a run after 10 minutes, or `driver.log` unchanged for 10 minutes while a chain runs. Then capture `ps -eLo pid,tid,stat,comm,wchan:32 | grep -E ' D|txg|z_|zpool|python3|hddsim|kworker'`, the kernel stacks of every D task (`sudo -n cat /proc/<pid>/stack`), `tail -n 5 $L/dev/*.stats`, `cat $L/dev/*.out` and `sudo -n dmesg | tail -n 150` into `$L/hang-<tag>.txt`, then stop and report.
 - This is a performance measurement: nothing else on this VM from step 7 to the end of step 8 (no build, ztest, ZTS, second load, bpftrace or blktrace).
 - If a fetch fails, wait 1 minute and try once more, then stop and report. If a commit, a tree, a parent, the kit's file list, a mode or a hash differs, stop and report the outputs as they are: do not edit, retype or repair any file, and compare each value with the program, not by eye.
 - If the driver stops (`STOP:` in driver.log): run `teardown`, then report; do not retry a measured run on your own.
@@ -175,7 +179,7 @@ sudo -n dmesg | tac | sed '/task-1121-hra1: start/q' | grep -c 'error, dev ublkb
 ```
 echo "T0=$(date +%s)"; date -u; hostname; uname -r; cat /proc/cmdline; nproc; grep -m1 'model name' /proc/cpuinfo; free -m; df -h / /var/tmp; uptime -s; swapon --show
 lsmod | grep -E '^(zfs|spl|ublk_drv|null_blk) '; ls -l /dev/zfs /dev/ublk-control 2>&1; ls /dev/ublkb* /dev/ublkc* 2>&1; losetup -a; ls -d /var/tmp/task-1121-hra1 /var/log/task-1121-hra1 2>&1
-ls -d /var/tmp/hra-trees /var/log/task-1121-hra? 2>&1; ls /var/tmp/hra-trees 2>&1; cut -d' ' -f1-3,6-9 /var/tmp/hra-trees/*.stamp 2>&1
+ls -d /var/tmp/hra-trees /var/log/task-1121-hra? /var/log/task-1121-hra1-1122 2>&1; grep -c 'pass A1 start' /var/log/task-1121-hra1/driver.log 2>&1; ls -l /var/log/task-1121-hra1/hang-p1i.txt 2>&1; ls /var/tmp/hra-trees 2>&1; cut -d' ' -f1-3,6-9 /var/tmp/hra-trees/*.stamp 2>&1
 grep -E 'CONFIG_BLK_DEV_UBLK|CONFIG_BLK_WBT=|CONFIG_BLK_WBT_MQ|CONFIG_IO_URING=|CONFIG_PSI=' /boot/config-7.0.14-25-pve
 ls -d /usr/src/linux-headers-7.0.14-25-pve /lib/modules/7.0.14-25-pve/kernel/drivers/block/ublk_drv.ko* 2>&1; grep -c "7.0.14-25-pve" /boot/grub/grub.cfg; sudo -n grub-editenv list
 command -v python3 git make gcc modinfo; python3 --version; gcc --version | head -1; git --version; ls /usr/include/linux/io_uring.h; pgrep -a -x zed || echo NO-ZED
@@ -183,8 +187,9 @@ ps -eo pid=,comm= | grep -wE 'fio|make|cc1|ztest|zfs-tests.sh|zloop.sh|configure
 ls -l /etc/zfs/zpool.cache 2>&1
 ```
 
-Stop and report, changing nothing, if: `uname -r` does not start with `6.12.`; a zfs, spl, ublk_drv or null_blk module is loaded, `/dev/zfs` or a `/dev/ublk*` exists; `losetup -a` is not empty; `$T` or `$L` exists; less than 6000 MB available; /proc/cmdline holds `slub_debug`, `kasan`, `kmemleak`, `page_poison`, `init_on_free` or `init_on_alloc=1`; `/boot/config-7.0.14-25-pve` lacks `CONFIG_BLK_DEV_UBLK=m` or `=y`, or `CONFIG_BLK_WBT` or `CONFIG_PSI`; the 7.0 headers or the 7.0 `ublk_drv` module are missing; no grub entry names 7.0.14-25-pve; `grub-editenv list` shows a `next_entry`; python3 is older than 3.8; a build, test or load runs.
-Also stop if `/var/tmp/hra-trees` exists (trees of an earlier series: report its listing), or /var/tmp has less than 25 GiB free (seven built trees take about 10 GiB).
+Stop and report, changing nothing, if: `uname -r` does not start with `6.12.`; a zfs, spl, ublk_drv or null_blk module is loaded, `/dev/zfs` or a `/dev/ublk*` exists; `losetup -a` is not empty; `$T` exists, or `$L` exists other than as the first attempt (below); less than 6000 MB available; /proc/cmdline holds `slub_debug`, `kasan`, `kmemleak`, `page_poison`, `init_on_free` or `init_on_alloc=1`; `/boot/config-7.0.14-25-pve` lacks `CONFIG_BLK_DEV_UBLK=m` or `=y`, or `CONFIG_BLK_WBT` or `CONFIG_PSI`; the 7.0 headers or the 7.0 `ublk_drv` module are missing; no grub entry names 7.0.14-25-pve; `grub-editenv list` shows a `next_entry`; python3 is older than 3.8; a build, test or load runs.
+The first attempt, before anything else of this step: if `$L` exists, its `driver.log` holds `pass A1 start` and `$L/hang-p1i.txt` exists (the attempt of 22/11), move it aside as it is, `sudo -n mv /var/log/task-1121-hra1 /var/log/task-1121-hra1-1122`, and say so; stop if `/var/log/task-1121-hra1-1122` already exists or `$L` holds anything else.
+Expected: `/var/tmp/hra-trees` with the stamps the first attempt left (R, M, P, A, RQ, PQ, P3W; about 5.5 GiB). A missing tree is rebuilt at step 2 (say so; about 4 min each on 22/11). Stop if /var/tmp has less than 10 GiB free (25 GiB if `/var/tmp/hra-trees` is missing).
 Note, without stopping: swap, zed (do not start or stop it). `/etc/zfs/zpool.cache`: absent is expected; size 0: `L=/var/log/task-1121-hra1; sudo -n mkdir -p $L && sudo -n mv /etc/zfs/zpool.cache $L/zpool.cache.step0` and say so; size above 0: stop and report its `ls -l`, load nothing.
 
 ```
@@ -192,13 +197,13 @@ L=/var/log/task-1121-hra1; T=/var/tmp/task-1121-hra1; R=/var/tmp/hra-trees
 sudo -n mkdir -p $T $L/bin $R && sudo -n chown "$(id -un)" $T $L $L/bin $R
 ```
 
-### 1. Kit v2.1, fetched by commit from the fork
+### 1. Kit v2.2, fetched by commit from the fork
 
 ```
 L=/var/log/task-1121-hra1; T=/var/tmp/task-1121-hra1
-cd $L/bin && git init -q . && git fetch -q --depth 1 https://github.com/tigerblue77/zfs cca50b0943d674176aa10f98fdcfc271ef392bae
-test "$(git rev-parse FETCH_HEAD)" = cca50b0943d674176aa10f98fdcfc271ef392bae && echo kit commit OK
-test "$(git rev-parse 'FETCH_HEAD^{tree}')" = b50c3f0a74fd73077b596376dd793013cfa71765 && echo kit tree OK
+cd $L/bin && git init -q . && git fetch -q --depth 1 https://github.com/tigerblue77/zfs 964c0afff7ab58e7867f808c24fab14c0961799b
+test "$(git rev-parse FETCH_HEAD)" = 964c0afff7ab58e7867f808c24fab14c0961799b && echo kit commit OK
+test "$(git rev-parse 'FETCH_HEAD^{tree}')" = 86b41cf24b89622b18946cb4a26b016f5e623b44 && echo kit tree OK
 test "$(git cat-file -p FETCH_HEAD | grep -c '^parent')" = 0 && echo kit parent OK
 git checkout -q FETCH_HEAD && git ls-files -s | awk '{print $1, $4}'
 printf '%s  %s\n' \
@@ -212,7 +217,7 @@ printf '%s  %s\n' \
     538b4c3b879d8e69b0c9a7b3e6d8f2fe2bb3d6337c9b5fa7ba3625ddb12af7b8 grid/G7.conf \
     fa7ec5a6b920725373c83e78321824294366859058633fa35a892fc213dfb875 grid/G8.conf \
     ba2267bacf0bf60dc531c2d0431633737017553b17a761fbdfd08844a856b251 grid/fast.conf \
-    f4f0f861093d80b1ca08a3e52966dd056b12d7ef61f5eec831d1c0c8294381f9 hddsim.c \
+    c1af827f2aa6610b9ab828eb2b047de20cb8fea699dbc1c1018d36e8ed7369c7 hddsim.c \
     1de5d21aaadc484978ec4b65fdbd4824071a47b79b2e4833ebe959a7d9f08cbc hr-bench.sh \
     b259d0f15f7df96326179564088e6f80433c501eca9723d69770f20e2ce44669 hr-load.py \
     1bef26029e0a3cb455e96cc697cf0e209371242a121a728f2d0e230108bc7fd3 hr-report.py \
@@ -245,7 +250,7 @@ cd $L/bin && bash ./hr-trees.sh fetch $R > $L/trees-fetch.txt 2>&1; echo rc=$?; 
 cd $L/bin && setsid nohup bash -c './hr-trees.sh build '$R' /usr/src/linux-headers-7.0.14-25-pve; echo "build rc=$?"; echo build-done' > $L/build.log 2>&1 < /dev/null &
 ```
 
-Expected: rc=0, 32 `OK` lines and nothing else. Poll `cat $L/build.log` until `build-done` (seven trees, about 15 min each, one after the other with `make -j$(nproc)`). Expected: one line `<name> build rc=0 <s> s, <k> warning lines` per tree, then `build rc=0`. On a failed build, quote `grep -nE 'error:|Error [0-9]' $R/build-<name>.log | head -20` and stop.
+Expected: rc=0, 32 `OK` lines and nothing else. Poll `cat $L/build.log` until `build-done`: `<name> built before OK` for each tree the first attempt built, a build (`<name> build rc=0 <s> s, <k> warning lines`, about 4 min each on 22/11) for a tree missing, then `build rc=0`. On a failed build, quote `grep -nE 'error:|Error [0-9]' $R/build-<name>.log | head -20` and stop.
 Then:
 
 ```
@@ -337,7 +342,7 @@ python3 -I $L/bin/hr-report.py arms $(ls -d /var/log/task-1121-hra1 2>/dev/null)
 sed -n '/^## Runs/,/^## Per arm/p' $L/arms.md | grep -c '^| A1 .* | yes |'; grep '| no |' $L/arms.md; sed -n '/^## Verdicts/,$p' $L/arms.md
 ```
 
-Expected: rc 0; 15 valid runs of A1 (fewer if the time rule dropped some), every run of the earlier tasks counted as their reports said. A run that is not valid is a finding: quote its line. The verdicts are final only in TASK-1121-HRA6.
+Expected: rc 0; 15 valid runs of A1 (fewer if the time rule dropped some), and only this attempt's: the first attempt's directory, `/var/log/task-1121-hra1-1122`, is not read. A run that is not valid is a finding: quote its line. The verdicts are final only in TASK-1121-HRA6.
 
 ### 10. Teardown, back to Debian, end
 
@@ -354,7 +359,7 @@ ls -l /etc/zfs/zpool.cache 2>&1
 ```
 
 Expected: no module loaded, no `/dev/ublk*`, 0 `hddsim` processes, each stats file ending with `I ... hddsim 7N stopped (stop 0 del 0 io_err 0)`, no kernel line but `ublk` lines (quote every line, with the step it happened in). `/etc/zfs/zpool.cache`: size 0: `sudo -n mv /etc/zfs/zpool.cache $L/zpool.cache.end`; above 0: report it and leave it.
-Keep `/var/log/task-1121-hra1` (raw data included: the next arms tasks read it) and `/var/tmp/hra-trees` (the next arms task reuses it).
+Keep `/var/log/task-1121-hra1` (raw data included: the next arms tasks read it) and `/var/log/task-1121-hra1-1122` (the first attempt, unchanged) and `/var/tmp/hra-trees` (the next arms task reuses it).
 Then boot back into the Debian 6.12 kernel by a plain reboot (the default entry), resuming by your own arrangement; then `uname -r`, `sudo -n grub-editenv list` (no `next_entry`), `fstrim -av`, `df -h /`, and send the report.
 
 ## Stop conditions (all in one place)
@@ -370,8 +375,8 @@ Step 0's list; a fetch failing twice; any commit, tree, tag, parent, file list, 
    b. **Per arm**, from "Per arm": guest fsync p50, p99 and max, read p99, syncq_wait w p99, disk_wait r p99, PSI, disk busy, txg sync mean, `z_wr_int` in blk-wbt, guest MB/s; next to the host's where arms.md gives it.
    c. **This pass's runs**: each run's line of "Runs" (valid or why not), the warm-up, what the time rule dropped or what was skipped.
    d. **NCQ priority on the disks**: marked reads per second on QM, QR, QR2, PQR, PQ3 and marked writes per second on PQ3 (and 0 elsewhere), with armcheck's lines.
-   e. **Emulation health**: per run the lateness; every disk check; `full_pages` after the pool and the last `full` value per disk; the probe against the model.
+   e. **Emulation health**: per run the lateness; every disk check; `full_pages` after the pool and the last `full`, `runs` and `store_kib` values per disk (the store's memory, against its 524288 KiB); the probe against the model.
    f. **Noise**: the quiet check; per run the steal and load1; any run with steal above 1 %; the time of GO.
 2. arms.md whole, then calib-f.md's "Criteria" table and armcheck.txt.
 3. Setup: kernel (both boots), /proc/cmdline, CPUs, RAM, swap, the kernel config lines, kit checks and file hashes, `best.conf`'s name and sha256, trees-fetch.txt's non-OK lines (none expected), trees-check.txt, the modinfo lines, build times (from build.log), the selftest and priotest lines, setup-devices.txt, the probe, setup-zpool-list.txt, setup-props.txt; per run its start and end time (driver.log); the measured time from GO to the end of step 8, and the time on the VM without the wait.
-4. dmesg findings, deviations, what could not be run, end state (modules, devices, processes, `fstrim -av`, `df -h /var/tmp`), what happened to `/etc/zfs/zpool.cache` at steps 0, 3 and 10, the reboots with their UTC times and how you resumed, then End.
+4. The first attempt's directory: moved at step 0 or not, and why. Then dmesg findings, deviations, what could not be run, end state (modules, devices, processes, `fstrim -av`, `df -h /var/tmp`), what happened to `/etc/zfs/zpool.cache` at steps 0, 3 and 10, the reboots with their UTC times and how you resumed, then End.
