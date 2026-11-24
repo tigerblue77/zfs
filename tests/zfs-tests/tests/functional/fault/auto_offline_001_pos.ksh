@@ -74,6 +74,9 @@ filedev2="$TEST_BASE_DIR/file-vdev-2"
 filedev3="$TEST_BASE_DIR/file-vdev-3"
 sparedev="$TEST_BASE_DIR/file-vdev-spare"
 removedev=$(get_debug_device)
+# Rescan only the scsi_debug host when reattaching: a scan of every host
+# can take minutes on a system with many SCSI hosts.
+removehost=$(get_scsi_host $removedev)
 
 typeset poolconfs=(
     "mirror $filedev1 $removedev"
@@ -103,7 +106,7 @@ do
 	log_must wait_vdev_state $TESTPOOL $removedev "REMOVED"
 
 	# 4. Reattach the device
-	insert_disk $removedev
+	insert_disk $removedev $removehost
 
 	# 5. Verify the device is onlined
 	log_must wait_vdev_state $TESTPOOL $removedev "ONLINE"
@@ -140,7 +143,7 @@ do
 	log_must wait_vdev_state $TESTPOOL $removedev "REMOVED"
 
 	# 4. Reattach the device
-	insert_disk $removedev
+	insert_disk $removedev $removehost
 
 	# 5. Verify the device is onlined
 	log_must wait_vdev_state $TESTPOOL $removedev "ONLINE"
@@ -174,7 +177,7 @@ do
 	log_must wait_vdev_state $TESTPOOL $removedev "REMOVED"
 
 	# 5. Reattach the device
-	insert_disk $removedev
+	insert_disk $removedev $removehost
 
 	# 6. Verify the device is onlined
 	log_must wait_vdev_state $TESTPOOL $removedev "ONLINE"
